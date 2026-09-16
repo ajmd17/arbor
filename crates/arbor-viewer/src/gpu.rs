@@ -624,7 +624,7 @@ pub struct MeshDrawParams<'a> {
 impl GpuMesh {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::MESH_VS, shaders::MESH_FS, &["a_pos", "a_normal", "a_uv", "a_tangent"]);
+            let program = compile_program(gl, shaders::MESH_VS, &shaders::mesh_fs(), &["a_pos", "a_normal", "a_uv", "a_tangent"]);
             let vao = gl.create_vertex_array().expect("mesh vao");
             let vbo_pos = gl.create_buffer().expect("vbo pos");
             let vbo_nrm = gl.create_buffer().expect("vbo nrm");
@@ -899,7 +899,7 @@ pub struct GpuLeaves {
 impl GpuLeaves {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::LEAF_VS, shaders::LEAF_FS, &["a_pos", "a_normal", "a_uv", "a_tint"]);
+            let program = compile_program(gl, shaders::LEAF_VS, &shaders::leaf_fs(), &["a_pos", "a_normal", "a_uv", "a_tint"]);
             let vao = gl.create_vertex_array().expect("leaf vao");
             let vbo_pos = gl.create_buffer().expect("leaf pos");
             let vbo_nrm = gl.create_buffer().expect("leaf nrm");
@@ -1060,7 +1060,7 @@ impl GpuLeaves {
     }
 }
 
-use crate::lighting::SkyParams;
+use crate::lighting::{sh9_cached, SkyParams};
 
 impl SkyParams {
     unsafe fn bind(&self, gl: &glow::Context, program: glow::Program) {
@@ -1073,6 +1073,20 @@ impl SkyParams {
             set("u_sky_zenith", self.zenith);
             set("u_sky_horizon", self.horizon);
             set("u_ground_bounce", self.ground_bounce);
+
+            // The dome as harmonics, which is what every surface reads its ambient
+            // from, and the exposure that belongs to this time of day.
+            let sh = sh9_cached(self);
+            let mut flat = [0.0f32; 27];
+            for (i, c) in sh.iter().enumerate() {
+                flat[i * 3..i * 3 + 3].copy_from_slice(&c.to_array());
+            }
+            if let Some(l) = gl.get_uniform_location(program, "u_sh[0]") {
+                gl.uniform_3_f32_slice(Some(&l), &flat);
+            }
+            if let Some(l) = gl.get_uniform_location(program, "u_exposure") {
+                gl.uniform_1_f32(Some(&l), self.exposure());
+            }
         }
     }
 }
@@ -1090,7 +1104,7 @@ pub struct GpuSky {
 impl GpuSky {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::SKY_VS, shaders::SKY_FS, &["a_pos"]);
+            let program = compile_program(gl, shaders::SKY_VS, &shaders::sky_fs(), &["a_pos"]);
             let vao = gl.create_vertex_array().expect("sky vao");
             let vbo = gl.create_buffer().expect("sky vbo");
             // One oversized triangle covers the screen with no seam down the middle.
@@ -1179,7 +1193,7 @@ pub struct GpuGround {
 impl GpuGround {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::GROUND_VS, shaders::GROUND_FS, &["a_pos"]);
+            let program = compile_program(gl, shaders::GROUND_VS, &shaders::ground_fs(), &["a_pos"]);
             let vao = gl.create_vertex_array().expect("ground vao");
             let vbo = gl.create_buffer().expect("ground vbo");
             gl.bind_vertex_array(Some(vao));

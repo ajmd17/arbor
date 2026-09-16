@@ -51,6 +51,7 @@ struct Startup {
     leaves: Option<bool>,
     shadows: Option<bool>,
     translucency: Option<f32>,
+    time_of_day: Option<f32>,
     sun_elevation: Option<f32>,
     sun_azimuth: Option<f32>,
     sun_intensity: Option<f32>,
@@ -59,6 +60,25 @@ struct Startup {
     distance: Option<f32>,
     target_y: Option<f32>,
     coverage_lod: Option<f32>,
+}
+
+/// The hour the viewer opens at: the low, warm light of just after sunrise.
+const DEFAULT_HOUR: f32 = 6.32;
+
+/// Elevation and azimuth of the sun at a given hour, on a day roughly like a temperate
+/// equinox: up a little after six, down a little before eight, and swinging through
+/// south at noon. Enough of an arc to light a tree by; not an ephemeris.
+fn sun_at_hour(hour: f32) -> (f32, f32) {
+    const SUNRISE: f32 = 6.0;
+    const SUNSET: f32 = 20.0;
+    const NOON_ELEVATION: f32 = 62.0;
+    let t = ((hour - SUNRISE) / (SUNSET - SUNRISE)).clamp(-0.2, 1.2);
+    // A sine arc puts the sun low for a long while near each end and high in the
+    // middle, which is what makes the interesting light last.
+    let elevation = (t * std::f32::consts::PI).sin() * NOON_ELEVATION;
+    // East at sunrise, through south, to west at sunset.
+    let azimuth = 90.0 + t * 180.0;
+    (elevation, azimuth)
 }
 
 fn main() -> eframe::Result<()> {
@@ -75,6 +95,7 @@ fn main() -> eframe::Result<()> {
         leaves: args.iter().any(|a| a == "--no-leaves").then_some(false),
         shadows: args.iter().any(|a| a == "--no-shadows").then_some(false),
         translucency: num("--translucency"),
+        time_of_day: num("--time"),
         sun_elevation: num("--sun-elevation"),
         sun_azimuth: num("--sun-azimuth"),
         sun_intensity: num("--sun-intensity"),
@@ -202,7 +223,6 @@ struct App {
     shadows: bool,
     show_skeleton: bool,
     show_ground: bool,
-    sky: SkyParams,
     sun_intensity: f32,
     show_leaves: bool,
     leaf_translucency: f32,
@@ -210,6 +230,8 @@ struct App {
     use_normal_map: bool,
     sun_azimuth: f32,
     sun_elevation: f32,
+    /// Hours, as the single control that moves the sun along its arc.
+    time_of_day: f32,
     auto_frame: bool,
     capture: Option<Capture>,
     frames: u32,
@@ -293,14 +315,16 @@ impl App {
             shadows: true,
             show_skeleton: false,
             show_ground: true,
-            sky: SkyParams::dawn(),
             sun_intensity: 1.0,
             show_leaves: true,
             leaf_translucency: 0.9,
             show_grid: false,
             use_normal_map: true,
-            sun_azimuth: 146.0,
-            sun_elevation: 16.0,
+            // Kept in step with the hour below: with the sky built from the sun, a
+            // dawn look is a dawn time rather than a dawn palette over a high sun.
+            sun_azimuth: sun_at_hour(DEFAULT_HOUR).1,
+            sun_elevation: sun_at_hour(DEFAULT_HOUR).0,
+            time_of_day: DEFAULT_HOUR,
             auto_frame: true,
             capture: startup.capture,
             frames: 0,
@@ -315,6 +339,12 @@ impl App {
         }
         if let Some(v) = startup.translucency {
             app.leaf_translucency = v;
+        }
+        if let Some(h) = startup.time_of_day {
+            app.time_of_day = h;
+            let (el, az) = sun_at_hour(h);
+            app.sun_elevation = el;
+            app.sun_azimuth = az;
         }
         if let Some(v) = startup.sun_elevation {
             app.sun_elevation = v;
@@ -510,8 +540,22 @@ impl App {
         if ui.checkbox(&mut self.show_skeleton, "Skeleton").changed() {
             self.rebuild_overlay();
         }
+        if ui
+            .add(
+                egui::Slider::new(&mut self.time_of_day, 3.5..=20.5)
+                    .text("Time of day")
+                    .custom_formatter(|h, _| {
+                        format!("{:02}:{:02}", h as i32, ((h % 1.0) * 60.0) as i32)
+                    }),
+            )
+            .changed()
+        {
+            let (el, az) = sun_at_hour(self.time_of_day);
+            self.sun_elevation = el;
+            self.sun_azimuth = az;
+        }
         ui.add(egui::Slider::new(&mut self.sun_azimuth, 0.0..=360.0).text("Sun azimuth"));
-        ui.add(egui::Slider::new(&mut self.sun_elevation, 1.0..=85.0).text("Sun elevation"));
+        ui.add(egui::Slider::new(&mut self.sun_elevation, -8.0..=85.0).text("Sun elevation"));
         ui.add(egui::Slider::new(&mut self.sun_intensity, 0.1..=3.0).text("Sun intensity"));
         ui.checkbox(&mut self.show_ground, "Ground");
 
@@ -678,8 +722,9 @@ impl eframe::App for App {
                 let color_pass = Arc::clone(&self.color_pass);
                 let sky_pass = Arc::clone(&self.sky_pass);
                 let ground_pass = Arc::clone(&self.ground_pass);
-                let mut sky = self.sky;
-                sky.sun_dir = self.sun_dir();
+                // Dome, ambient and exposure all come out of where the sun is, so
+                // moving it moves the whole sky rather than just the shading.
+                let mut sky = SkyParams::for_sun(self.sun_dir());
                 sky.sun_color *= self.sun_intensity;
                 let show_ground = self.show_ground;
                 let tree_height = self.stats.height.max(1.0);

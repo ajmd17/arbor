@@ -1,3 +1,60 @@
+/// GLSL every shader that answers to the sky shares: the dome, the ambient it throws,
+/// and the tonemapping and exposure that fit a whole day into a display. Kept in one
+/// place because four copies of a spherical-harmonic evaluator would be four chances
+/// for the renderer to disagree with itself about what the light is doing.
+pub const SKY_GLSL: &str = r#"
+const float PI = 3.14159265359;
+
+// The dome: a pale band at the horizon under a colder zenith, plus the bounce coming
+// back up off the ground. The colours arrive already built from the sun's angle, so
+// this shape is all that is left to do here.
+uniform vec3 u_sky_zenith;
+uniform vec3 u_sky_horizon;
+uniform vec3 u_ground_bounce;
+// That same dome projected into spherical harmonics, and the exposure that goes with
+// the time of day it describes.
+uniform vec3 u_sh[9];
+uniform float u_exposure;
+
+vec3 sky_color(vec3 dir) {
+    float h = clamp(dir.y, -1.0, 1.0);
+    vec3 dome = mix(u_sky_horizon, u_sky_zenith, pow(max(h, 0.0), 0.42));
+    return mix(u_ground_bounce, dome, smoothstep(-0.25, 0.03, h));
+}
+
+// Ambient arriving at a surface facing n, divided by PI so a surface multiplies it by
+// albedo and nothing else.
+//
+// Ramamoorthi and Hanrahan's closed form for a cosine-convolved dome. Unlike taking a
+// fixed fraction of whatever the surface happens to face, this integrates the whole
+// sky: a face turned down gets the warm ground bounce, a face turned up gets the cold
+// zenith, and both follow the time of day without a second set of numbers to tune.
+vec3 sky_ambient(vec3 n) {
+    const float c1 = 0.429043 / PI;
+    const float c2 = 0.511664 / PI;
+    const float c3 = 0.743125 / PI;
+    const float c4 = 0.886227 / PI;
+    const float c5 = 0.247708 / PI;
+    float x = n.x, y = n.y, z = n.z;
+    vec3 e = u_sh[0] * c4 - u_sh[6] * c5
+        + (u_sh[3] * x + u_sh[1] * y + u_sh[2] * z) * (2.0 * c2)
+        + u_sh[6] * (c3 * z * z)
+        + (u_sh[4] * x * y + u_sh[7] * x * z + u_sh[5] * y * z) * (2.0 * c1)
+        + u_sh[8] * (c1 * (x * x - y * y));
+    return max(e, vec3(0.0));
+}
+
+vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+// Everything on its way to the framebuffer goes through here, so a scene lit by a
+// midday sun and one lit by a sunrise both land somewhere a display can show.
+vec3 present(vec3 color) {
+    return pow(aces(color * u_exposure), vec3(1.0 / 2.2));
+}
+"#;
+
 pub const MESH_VS: &str = r#"#version 150
 in vec3 a_pos;
 in vec3 a_normal;
@@ -23,8 +80,7 @@ void main() {
     gl_Position = u_view_proj * vec4(a_pos, 1.0);
 }"#;
 
-pub const MESH_FS: &str = r#"#version 150
-in vec3 v_world;
+const MESH_FS_BODY: &str = r#"in vec3 v_world;
 in vec3 v_normal;
 in vec2 v_uv;
 in vec4 v_tangent;
@@ -42,27 +98,6 @@ uniform sampler2D u_normal_tex;
 uniform sampler2D u_rough_tex;
 uniform sampler2D u_shadow_tex;
 out vec4 out_color;
-
-const float PI = 3.14159265359;
-
-// One sky model shared by everything that shades: a warm band at the horizon under a
-// cold zenith, which is what a low sun does to the dome, plus the bounce coming back
-// up off the ground.
-uniform vec3 u_sky_zenith;
-uniform vec3 u_sky_horizon;
-uniform vec3 u_ground_bounce;
-
-vec3 sky_color(vec3 dir) {
-    float h = clamp(dir.y, -1.0, 1.0);
-    vec3 dome = mix(u_sky_horizon, u_sky_zenith, pow(max(h, 0.0), 0.42));
-    return mix(u_ground_bounce, dome, smoothstep(-0.25, 0.03, h));
-}
-
-// Ambient arriving at a surface: the dome above it, fading into ground bounce as the
-// surface turns to face down.
-vec3 sky_ambient(vec3 n) {
-    return sky_color(n) * 0.55 + u_sky_horizon * 0.12;
-}
 
 // Trowbridge-Reitz normal distribution. `a2` is the square of the perceptual-to-linear
 // roughness, so rough^4.
@@ -126,10 +161,6 @@ float sample_shadow(vec4 sc, float ndl) {
     return sum / 9.0;
 }
 
-vec3 aces(vec3 x) {
-    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
-
 void main() {
     if (u_mode == 1) {
         float c = mod(floor(v_uv.x * 4.0) + floor(v_uv.y * 4.0), 2.0);
@@ -167,10 +198,13 @@ void main() {
     vec3 direct = (albedo * (1.0 - F) * (1.0 - metallic) / PI + spec)
         * u_sun_color * ndl * shadow;
 
-    vec3 color = aces(direct + sky_ibl(albedo, f0, metallic, N, V, rough));
-    color = pow(color, vec3(1.0 / 2.2));
-    out_color = vec4(color, 1.0);
+    out_color = vec4(present(direct + sky_ibl(albedo, f0, metallic, N, V, rough)), 1.0);
 }"#;
+
+pub fn mesh_fs() -> String {
+    format!("#version 150
+{SKY_GLSL}{MESH_FS_BODY}")
+}
 
 pub const DEPTH_VS: &str = r#"#version 150
 in vec3 a_pos;
@@ -238,8 +272,7 @@ void main() {
     gl_Position = u_view_proj * vec4(a_pos, 1.0);
 }"#;
 
-pub const LEAF_FS: &str = r#"#version 150
-in vec3 v_world;
+const LEAF_FS_BODY: &str = r#"in vec3 v_world;
 in vec3 v_normal;
 in vec2 v_card_uv;
 in vec4 v_tint;
@@ -259,27 +292,6 @@ uniform sampler2D u_albedo_tex;
 uniform sampler2D u_rough_tex;
 uniform sampler2D u_shadow_tex;
 out vec4 out_color;
-
-// One sky model shared by everything that shades: a warm band at the horizon under a
-// cold zenith, which is what a low sun does to the dome, plus the bounce coming back
-// up off the ground.
-uniform vec3 u_sky_zenith;
-uniform vec3 u_sky_horizon;
-uniform vec3 u_ground_bounce;
-
-vec3 sky_color(vec3 dir) {
-    float h = clamp(dir.y, -1.0, 1.0);
-    vec3 dome = mix(u_sky_horizon, u_sky_zenith, pow(max(h, 0.0), 0.42));
-    return mix(u_ground_bounce, dome, smoothstep(-0.25, 0.03, h));
-}
-
-// Ambient arriving at a surface: the dome above it, fading into ground bounce as the
-// surface turns to face down.
-vec3 sky_ambient(vec3 n) {
-    return sky_color(n) * 0.55 + u_sky_horizon * 0.12;
-}
-
-const float PI = 3.14159265359;
 
 // Trowbridge-Reitz normal distribution. `a2` is the square of the perceptual-to-linear
 // roughness, so rough^4.
@@ -341,10 +353,6 @@ float sample_shadow(vec4 sc, float ndl) {
         }
     }
     return sum / 9.0;
-}
-
-vec3 aces(vec3 x) {
-    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
 void main() {
@@ -430,10 +438,13 @@ void main() {
         + sky_ibl(albedo, f0, 0.0, geometric, V, rough);
     // Leaves buried in the crown get less sky than the ones on the outside.
     color *= v_tint.a;
-    color = aces(color);
-    color = pow(color, vec3(1.0 / 2.2));
-    out_color = vec4(color, coverage);
+    out_color = vec4(present(color), coverage);
 }"#;
+
+pub fn leaf_fs() -> String {
+    format!("#version 150
+{SKY_GLSL}{LEAF_FS_BODY}")
+}
 
 pub const LEAF_DEPTH_VS: &str = r#"#version 150
 in vec3 a_pos;
@@ -471,31 +482,12 @@ void main() {
     gl_Position = vec4(a_pos.xy, 1.0, 1.0);
 }"#;
 
-pub const SKY_FS: &str = r#"#version 150
-in vec2 v_ndc;
+const SKY_FS_BODY: &str = r#"in vec2 v_ndc;
 uniform mat4 u_inv_view_proj;
 uniform vec3 u_cam_pos;
 uniform vec3 u_sun_dir;
 uniform vec3 u_sun_color;
 out vec4 out_color;
-
-uniform vec3 u_sky_zenith;
-uniform vec3 u_sky_horizon;
-uniform vec3 u_ground_bounce;
-
-vec3 sky_color(vec3 dir) {
-    float h = clamp(dir.y, -1.0, 1.0);
-    vec3 dome = mix(u_sky_horizon, u_sky_zenith, pow(max(h, 0.0), 0.42));
-    return mix(u_ground_bounce, dome, smoothstep(-0.25, 0.03, h));
-}
-
-vec3 sky_ambient(vec3 n) {
-    return sky_color(n) * 0.55 + u_sky_horizon * 0.12;
-}
-
-vec3 aces(vec3 x) {
-    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
 
 void main() {
     vec4 far = u_inv_view_proj * vec4(v_ndc, 1.0, 1.0);
@@ -506,9 +498,13 @@ void main() {
     col += u_sun_color * 0.22 * pow(d, 900.0);
     col += u_sun_color * 0.09 * pow(d, 18.0);
     col += u_sky_horizon * 0.35 * pow(d, 3.0);
-    col = aces(col);
-    out_color = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
+    out_color = vec4(present(col), 1.0);
 }"#;
+
+pub fn sky_fs() -> String {
+    format!("#version 150
+{SKY_GLSL}{SKY_FS_BODY}")
+}
 
 /// A ground plane, so the tree casts onto something. It fades into the sky at range
 /// rather than ending at a visible edge.
@@ -525,8 +521,7 @@ void main() {
     gl_Position = u_view_proj * vec4(a_pos, 1.0);
 }"#;
 
-pub const GROUND_FS: &str = r#"#version 150
-in vec3 v_world;
+const GROUND_FS_BODY: &str = r#"in vec3 v_world;
 in vec4 v_shadow;
 uniform vec3 u_cam_pos;
 uniform vec3 u_sun_dir;
@@ -536,24 +531,6 @@ uniform float u_fade_start;
 uniform float u_fade_end;
 uniform sampler2D u_shadow_tex;
 out vec4 out_color;
-
-uniform vec3 u_sky_zenith;
-uniform vec3 u_sky_horizon;
-uniform vec3 u_ground_bounce;
-
-vec3 sky_color(vec3 dir) {
-    float h = clamp(dir.y, -1.0, 1.0);
-    vec3 dome = mix(u_sky_horizon, u_sky_zenith, pow(max(h, 0.0), 0.42));
-    return mix(u_ground_bounce, dome, smoothstep(-0.25, 0.03, h));
-}
-
-vec3 sky_ambient(vec3 n) {
-    return sky_color(n) * 0.55 + u_sky_horizon * 0.12;
-}
-
-vec3 aces(vec3 x) {
-    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
 
 float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -602,6 +579,10 @@ void main() {
     float fade = smoothstep(u_fade_start, u_fade_end, dist);
     color = mix(color, sky_color(view), fade);
 
-    color = aces(color);
-    out_color = vec4(pow(color, vec3(1.0 / 2.2)), 1.0);
+    out_color = vec4(present(color), 1.0);
 }"#;
+
+pub fn ground_fs() -> String {
+    format!("#version 150
+{SKY_GLSL}{GROUND_FS_BODY}")
+}

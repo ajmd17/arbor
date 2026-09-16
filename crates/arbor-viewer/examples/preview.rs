@@ -218,8 +218,9 @@ fn main() {
     let (e, a) = (elev.to_radians(), azim.to_radians());
     let sun = Vec3::new(a.cos() * e.cos(), e.sin(), a.sin() * e.cos()).normalize();
 
-    let mut sky = lighting::SkyParams::dawn();
-    sky.sun_dir = sun;
+    // The sky is built from the sun, so moving the sun moves the whole dome with it.
+    let sky = lighting::SkyParams::for_sun(sun);
+    let irr = lighting::SkyIrradiance::new(&sky);
 
     // The same fit the viewer uses, so the shadow seen here is the shadow it draws.
     let mut lo_all = lo;
@@ -246,9 +247,9 @@ fn main() {
     };
     draw_sky(&mut target, vp, eye, &sky);
     if !args.iter().any(|a| a == "--no-ground") {
-        draw_ground(&mut target, vp, eye, &sky, &shadows, extent * 14.0);
+        draw_ground(&mut target, vp, eye, &sky, &irr, &shadows, extent * 14.0);
     }
-    draw_bark(&mut target, &mesh, vp, &sky, &shadows, bark.as_ref());
+    draw_bark(&mut target, &mesh, vp, &sky, &irr, &shadows, bark.as_ref());
     if params.leaves.enabled {
         draw_leaves(
             &mut target,
@@ -257,6 +258,7 @@ fn main() {
             vp,
             eye,
             &sky,
+            &irr,
             &shadows,
             leaf_tex.as_ref(),
         );
@@ -409,6 +411,7 @@ fn draw_ground(
     vp: Mat4,
     eye: Vec3,
     sky: &lighting::SkyParams,
+    irr: &lighting::SkyIrradiance,
     shadows: &ShadowMap,
     extent: f32,
 ) {
@@ -432,7 +435,7 @@ fn draw_ground(
             let albedo = albedo_base * (0.84 + 0.32 * grain);
             let ndl = n.dot(sky.sun_dir).max(0.0);
             let vis = shadows.visibility(f.world, n, ndl);
-            let mut color = albedo * (ndl * vis * sky.sun_color * INV_PI + sky.ambient(n));
+            let mut color = albedo * (ndl * vis * sky.sun_color * INV_PI + irr.eval(n));
             let view = (f.world - eye).normalize_or(Vec3::Y);
             let fade = smoothstep(fade_start, fade_end, (f.world.xz() - eye.xz()).length());
             color = color.lerp(sky.background(view), fade);
@@ -463,6 +466,7 @@ fn draw_bark(
     mesh: &Mesh,
     vp: Mat4,
     sky: &lighting::SkyParams,
+    irr: &lighting::SkyIrradiance,
     shadows: &ShadowMap,
     tex: Option<&Tex>,
 ) {
@@ -487,7 +491,7 @@ fn draw_bark(
             let n = f.normal.normalize_or_zero();
             let ndl = n.dot(sky.sun_dir).max(0.0);
             let vis = shadows.visibility(f.world, n, ndl);
-            Some(albedo * (ndl * vis * sky.sun_color * INV_PI + sky.ambient(n)))
+            Some(albedo * (ndl * vis * sky.sun_color * INV_PI + irr.eval(n)))
         });
     }
 }
@@ -500,6 +504,7 @@ fn draw_leaves(
     vp: Mat4,
     eye: Vec3,
     sky: &lighting::SkyParams,
+    irr: &lighting::SkyIrradiance,
     shadows: &ShadowMap,
     tex: Option<&Tex>,
 ) {
@@ -555,7 +560,7 @@ fn draw_leaves(
             let transmitted = albedo * 0.9 * through * lobe;
             Some(
                 (albedo * wrapped * vis * INV_PI + transmitted * vis) * sky.sun_color
-                    + albedo * sky.ambient(n),
+                    + albedo * irr.eval(n),
             )
         });
     }
