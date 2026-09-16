@@ -3,7 +3,8 @@
 //!
 //! cargo run --release -p arbor-viewer --example preview -- \
 //!     <pine|oak|path.ron> out.png [--seed N] [--yaw R] [--size N] [--zoom F]
-//!     [--aim 0..1] [--no-leaves] [--plain-mips]
+//!     [--aim 0..1] [--pitch D] [--sun-elevation D] [--sun-azimuth D]
+//!     [--no-leaves] [--no-ground] [--plain-mips]
 //!
 //! This is a deliberately small software rasteriser that mirrors what the viewer
 //! shaders do — alpha-tested leaf cards sampled from their atlas, wrapped diffuse and
@@ -14,22 +15,125 @@
 //! from. `--plain-mips` swaps the coverage-preserving chain for a plain box-filtered
 //! one, which is what the disappearing-canopy bug looked like.
 
+#[path = "../src/lighting.rs"]
+mod lighting;
 #[path = "../src/mipmap.rs"]
 mod mipmap;
 
 use arbor_core::species::{builtin_presets, parse_species};
 use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
-use glam::{Mat4, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat4, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::{Rgb, RgbImage};
 
 const TEXTURE_DIR: &str = "assets/textures";
 const ALPHA_CUTOFF: f32 = 0.35;
-const SKY: Vec3 = Vec3::new(0.52, 0.65, 0.84);
+const SHADOW_SIZE: i32 = 2048;
 
 struct Target {
     color: Vec<Vec3>,
     depth: Vec<f32>,
     size: usize,
+}
+
+/// Scene depth from the light, sampled the same way the viewer shader samples it.
+struct ShadowMap {
+    depth: Vec<f32>,
+    size: usize,
+    view_proj: Mat4,
+    bias: f32,
+}
+
+impl ShadowMap {
+    fn render(mesh: &Mesh, leaves: &LeafMesh, tex: Option<&Tex>, params: &SpeciesParams,
+              view_proj: Mat4, bias: f32) -> ShadowMap {
+        let size = SHADOW_SIZE as usize;
+        let mut map = ShadowMap { depth: vec![f32::INFINITY; size * size], size, view_proj, bias };
+        let mut raster_into = |positions: &[[f32; 3]], indices: &[u32], alpha: Option<(&Tex, Vec2, Vec2)>,
+                               uvs: Option<&[[f32; 2]]>| {
+            for tri in indices.chunks_exact(3) {
+                let p: Vec<Vec3> = tri.iter().map(|&i| Vec3::from(positions[i as usize])).collect();
+                let mut ndc = [Vec3::ZERO; 3];
+                for k in 0..3 {
+                    let c = view_proj * p[k].extend(1.0);
+                    if c.w.abs() < 1e-6 { return; }
+                    let n = c.xyz() / c.w;
+                    ndc[k] = Vec3::new((n.x * 0.5 + 0.5) * size as f32,
+                                       (n.y * 0.5 + 0.5) * size as f32,
+                                       n.z * 0.5 + 0.5);
+                }
+                let area = edge(ndc[0], ndc[1], ndc[2]);
+                if area.abs() < 1e-9 { continue; }
+                let min_x = ndc.iter().map(|q| q.x).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
+                let max_x = ndc.iter().map(|q| q.x).fold(f32::MIN, f32::max).ceil().min(size as f32 - 1.0);
+                let min_y = ndc.iter().map(|q| q.y).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
+                let max_y = ndc.iter().map(|q| q.y).fold(f32::MIN, f32::max).ceil().min(size as f32 - 1.0);
+                if max_x < 0.0 || max_y < 0.0 { continue; }
+                for y in min_y..=max_y as usize {
+                    for x in min_x..=max_x as usize {
+                        let q = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, 0.0);
+                        let mut w = [edge(ndc[1], ndc[2], q) / area,
+                                     edge(ndc[2], ndc[0], q) / area,
+                                     edge(ndc[0], ndc[1], q) / area];
+                        if w.iter().any(|&b| b < 0.0) {
+                            if w.iter().any(|&b| b > 0.0) { continue; }
+                            w = w.map(|b| -b);
+                        }
+                        // Leaf cards only block light where the cutout is opaque.
+                        if let (Some((t, origin, scale)), Some(uvs)) = (alpha, uvs) {
+                            let uv = Vec2::from(uvs[tri[0] as usize]) * w[0]
+                                + Vec2::from(uvs[tri[1] as usize]) * w[1]
+                                + Vec2::from(uvs[tri[2] as usize]) * w[2];
+                            if t.sample(origin + uv * scale, 0.0).w < ALPHA_CUTOFF { continue; }
+                        }
+                        let z = w[0] * ndc[0].z + w[1] * ndc[1].z + w[2] * ndc[2].z;
+                        let i = y * size + x;
+                        if z < map.depth[i] { map.depth[i] = z; }
+                    }
+                }
+            }
+        };
+        raster_into(&mesh.positions, &mesh.indices, None, None);
+        if !leaves.is_empty() {
+            if let Some(t) = tex {
+                let lp = &params.leaves;
+                let (cols, rows) = (lp.atlas_cols.max(1) as f32, lp.atlas_rows.max(1) as f32);
+                let scale = Vec2::new(1.0 / cols, 1.0 / rows);
+                let i = (lp.atlas_front as f32).min(cols * rows - 1.0);
+                let origin = Vec2::new((i % cols) / cols, (i / cols).floor() / rows);
+                raster_into(&leaves.positions, &leaves.indices, Some((t, origin, scale)),
+                            Some(&leaves.uvs));
+            }
+        }
+        map
+    }
+
+    /// Percentage-closer filter, matching the kernel the viewer uses.
+    fn visibility(&self, world: Vec3, normal: Vec3, ndl: f32) -> f32 {
+        let c = self.view_proj * (world + normal * self.bias).extend(1.0);
+        if c.w.abs() < 1e-6 { return 1.0; }
+        let n = c.xyz() / c.w;
+        let proj = Vec3::new(n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5);
+        if !(0.0..=1.0).contains(&proj.x) || !(0.0..=1.0).contains(&proj.y) || proj.z > 1.0 {
+            return 1.0;
+        }
+        let bias = (0.0025 * (1.0 - ndl)).max(0.0008);
+        let mut sum = 0.0;
+        let mut n_taps = 0.0;
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let x = (proj.x * self.size as f32) as i32 + dx;
+                let y = (proj.y * self.size as f32) as i32 + dy;
+                n_taps += 1.0;
+                if x < 0 || y < 0 || x >= self.size as i32 || y >= self.size as i32 {
+                    sum += 1.0;
+                    continue;
+                }
+                let d = self.depth[y as usize * self.size + x as usize];
+                sum += if proj.z - bias > d { 0.0 } else { 1.0 };
+            }
+        }
+        sum / n_taps
+    }
 }
 
 /// A vertex after projection, carrying whatever the shading needs.
@@ -92,19 +196,65 @@ fn main() {
     }
     let extent = (hi - lo).length().max(1.0);
     let dist = extent * 0.95 / zoom.max(0.05);
-    let eye = center + Vec3::new(yaw.sin() * dist, extent * 0.08 / zoom.max(0.05), yaw.cos() * dist);
+    let pitch: f32 = flag("--pitch")
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(5.0)
+        .to_radians();
+    let eye = center
+        + Vec3::new(
+            yaw.sin() * pitch.cos() * dist,
+            pitch.sin() * dist,
+            yaw.cos() * pitch.cos() * dist,
+        );
     let vp = Mat4::perspective_rh(50f32.to_radians(), 1.0, 0.05, dist * 6.0)
         * Mat4::look_at_rh(eye, center, Vec3::Y);
-    let sun = Vec3::new(0.45, 0.72, 0.52).normalize();
+    let elev: f32 = flag("--sun-elevation").and_then(|s| s.parse().ok()).unwrap_or(13.0);
+    let azim: f32 = flag("--sun-azimuth").and_then(|s| s.parse().ok()).unwrap_or(18.0);
+    let (e, a) = (elev.to_radians(), azim.to_radians());
+    let sun = Vec3::new(a.cos() * e.cos(), e.sin(), a.sin() * e.cos()).normalize();
+
+    let mut sky = lighting::SkyParams::dawn();
+    sky.sun_dir = sun;
+
+    // The same fit the viewer uses, so the shadow seen here is the shadow it draws.
+    let mut lo_all = lo;
+    let mut hi_all = hi;
+    lo_all.y = lo_all.y.min(0.0);
+    let (light_vp, texel) = lighting::light_view_proj(
+        (lo_all.to_array(), hi_all.to_array()),
+        sun,
+        SHADOW_SIZE,
+    );
+    let shadows = ShadowMap::render(
+        &mesh,
+        &leaves,
+        leaf_tex.as_ref(),
+        &params,
+        light_vp,
+        texel * 1.6,
+    );
 
     let mut target = Target {
-        color: vec![SKY; size * size],
+        color: vec![Vec3::ZERO; size * size],
         depth: vec![f32::INFINITY; size * size],
         size,
     };
-    draw_bark(&mut target, &mesh, vp, eye, sun, bark.as_ref());
+    draw_sky(&mut target, vp, eye, &sky);
+    if !args.iter().any(|a| a == "--no-ground") {
+        draw_ground(&mut target, vp, eye, &sky, &shadows, extent * 14.0);
+    }
+    draw_bark(&mut target, &mesh, vp, eye, &sky, &shadows, bark.as_ref());
     if params.leaves.enabled {
-        draw_leaves(&mut target, &leaves, &params, vp, eye, sun, leaf_tex.as_ref());
+        draw_leaves(
+            &mut target,
+            &leaves,
+            &params,
+            vp,
+            eye,
+            &sky,
+            &shadows,
+            leaf_tex.as_ref(),
+        );
     }
 
     let mut img = RgbImage::new(size as u32, size as u32);
@@ -231,7 +381,87 @@ fn tex_dims(tex: Option<&Tex>) -> Vec2 {
     }
 }
 
-fn draw_bark(t: &mut Target, mesh: &Mesh, vp: Mat4, eye: Vec3, sun: Vec3, tex: Option<&Tex>) {
+/// Fills every pixel with the dome, before anything is drawn over it.
+fn draw_sky(t: &mut Target, vp: Mat4, eye: Vec3, sky: &lighting::SkyParams) {
+    let inv = vp.inverse();
+    let n = t.size as f32;
+    for y in 0..t.size {
+        for x in 0..t.size {
+            let ndc = Vec2::new(
+                (x as f32 + 0.5) / n * 2.0 - 1.0,
+                1.0 - (y as f32 + 0.5) / n * 2.0,
+            );
+            let far = inv * Vec3::new(ndc.x, ndc.y, 1.0).extend(1.0);
+            let dir = (far.xyz() / far.w - eye).normalize_or(Vec3::Y);
+            t.color[y * t.size + x] = aces(sky.background(dir));
+        }
+    }
+}
+
+/// A ground plane catching the shadow, fading into the sky at range.
+fn draw_ground(
+    t: &mut Target,
+    vp: Mat4,
+    eye: Vec3,
+    sky: &lighting::SkyParams,
+    shadows: &ShadowMap,
+    extent: f32,
+) {
+    let albedo_base = Vec3::new(0.062, 0.058, 0.044);
+    let (fade_start, fade_end) = (extent * 0.10, extent * 0.62);
+    let corner = |sx: f32, sz: f32| Vec3::new(eye.x + sx * extent, 0.0, eye.z + sz * extent);
+    let quad = [
+        corner(-1.0, -1.0),
+        corner(1.0, -1.0),
+        corner(1.0, 1.0),
+        corner(-1.0, 1.0),
+    ];
+    for tri in [[0usize, 1, 2], [0, 2, 3]] {
+        let v: Vec<Vert> = tri
+            .iter()
+            .map(|&i| project(vp, quad[i], Vec3::Y, Vec2::ZERO, Vec4::ONE, Vec2::ONE))
+            .collect();
+        raster(t, &v, |f, _| {
+            let n = Vec3::Y;
+            let grain = hash_noise(f.world.xz() * 0.7) * 0.35 + hash_noise(f.world.xz() * 0.11) * 0.65;
+            let albedo = albedo_base * (0.84 + 0.32 * grain);
+            let ndl = n.dot(sky.sun_dir).max(0.0);
+            let vis = shadows.visibility(f.world, n, ndl);
+            let mut color = albedo * (ndl * vis * sky.sun_color + sky.ambient(n));
+            let view = (f.world - eye).normalize_or(Vec3::Y);
+            let fade = smoothstep(fade_start, fade_end, (f.world.xz() - eye.xz()).length());
+            color = color.lerp(sky.background(view), fade);
+            Some(color)
+        });
+    }
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a).max(1e-6)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn hash_noise(p: Vec2) -> f32 {
+    let h = |v: Vec2| (v.dot(Vec2::new(127.1, 311.7)).sin() * 43758.545).fract().abs();
+    let i = p.floor();
+    let f = p - i;
+    let u = f * f * (Vec2::splat(3.0) - 2.0 * f);
+    let a = h(i);
+    let b = h(i + Vec2::X);
+    let c = h(i + Vec2::Y);
+    let d = h(i + Vec2::ONE);
+    (a * (1.0 - u.x) + b * u.x) * (1.0 - u.y) + (c * (1.0 - u.x) + d * u.x) * u.y
+}
+
+fn draw_bark(
+    t: &mut Target,
+    mesh: &Mesh,
+    vp: Mat4,
+    eye: Vec3,
+    sky: &lighting::SkyParams,
+    shadows: &ShadowMap,
+    tex: Option<&Tex>,
+) {
     let dims = tex_dims(tex);
     for tri in mesh.indices.chunks_exact(3) {
         let v: Vec<Vert> = tri
@@ -250,14 +480,10 @@ fn draw_bark(t: &mut Target, mesh: &Mesh, vp: Mat4, eye: Vec3, sun: Vec3, tex: O
             .collect();
         raster(t, &v, |f, lod| {
             let albedo = sample(tex, f.uv, lod).xyz();
-            let mut n = f.normal.normalize_or_zero();
-            let view = (eye - f.world).normalize_or_zero();
-            if n.dot(view) < 0.0 {
-                n = -n;
-            }
-            let ndl = n.dot(sun).max(0.0);
-            let hemi = 0.18 + 0.16 * (n.y * 0.5 + 0.5);
-            Some(albedo * (hemi + ndl * 1.15))
+            let n = f.normal.normalize_or_zero();
+            let ndl = n.dot(sky.sun_dir).max(0.0);
+            let vis = shadows.visibility(f.world, n, ndl);
+            Some(albedo * (ndl * vis * sky.sun_color + sky.ambient(n)))
         });
     }
 }
@@ -269,7 +495,8 @@ fn draw_leaves(
     params: &SpeciesParams,
     vp: Mat4,
     eye: Vec3,
-    sun: Vec3,
+    sky: &lighting::SkyParams,
+    shadows: &ShadowMap,
     tex: Option<&Tex>,
 ) {
     let dims = tex_dims(tex);
@@ -316,26 +543,70 @@ fn draw_leaves(
                 return None;
             }
             let albedo = texel.xyz() * f.tint.xyz();
-            let wrapped = ((n.dot(sun) + 0.5) / 1.5).max(0.0);
-            let through = (-n).dot(sun).max(0.0);
-            let lobe = 0.35 + 0.65 * view.dot(-sun).max(0.0).powi(3);
+            let ndl = n.dot(sky.sun_dir).max(0.0);
+            let vis = shadows.visibility(f.world, n, ndl);
+            let wrapped = ((n.dot(sky.sun_dir) + 0.5) / 1.5).max(0.0);
+            let through = (-n).dot(sky.sun_dir).max(0.0);
+            let lobe = 0.35 + 0.65 * view.dot(-sky.sun_dir).max(0.0).powi(3);
             let transmitted = albedo * 0.9 * through * lobe;
-            let hemi = 0.14 + 0.16 * (n.y * 0.5 + 0.5);
-            Some((albedo * wrapped + transmitted) * 1.35 + albedo * hemi)
+            Some(
+                (albedo * wrapped * vis + transmitted * vis) * sky.sun_color
+                    + albedo * sky.ambient(n),
+            )
         });
+    }
+}
+
+fn lerp_vert(a: &Vert, b: &Vert, t: f32) -> Vert {
+    Vert {
+        clip: a.clip.lerp(b.clip, t),
+        world: a.world.lerp(b.world, t),
+        normal: a.normal.lerp(b.normal, t),
+        uv: a.uv.lerp(b.uv, t),
+        tint: a.tint.lerp(b.tint, t),
+        tex_size: a.tex_size,
+    }
+}
+
+/// Clips against the near plane, then fills. Geometry that reaches past the camera,
+/// which the ground plane always does, has to be cut there: a vertex behind the eye
+/// projects to nonsense, and dropping the whole triangle instead loses the ground.
+fn raster(t: &mut Target, v: &[Vert], shade: impl Fn(&Vert, f32) -> Option<Vec3>) {
+    const NEAR_W: f32 = 1e-3;
+    if v.iter().all(|x| x.clip.w > NEAR_W) {
+        raster_clipped(t, v, &shade);
+        return;
+    }
+    let mut poly: Vec<Vert> = Vec::with_capacity(4);
+    for i in 0..3 {
+        let a = &v[i];
+        let b = &v[(i + 1) % 3];
+        let (a_in, b_in) = (a.clip.w > NEAR_W, b.clip.w > NEAR_W);
+        if a_in {
+            poly.push(*a);
+        }
+        if a_in != b_in {
+            let denom = b.clip.w - a.clip.w;
+            if denom.abs() > 1e-9 {
+                poly.push(lerp_vert(a, b, (NEAR_W - a.clip.w) / denom));
+            }
+        }
+    }
+    if poly.len() < 3 {
+        return;
+    }
+    for i in 1..poly.len() - 1 {
+        raster_clipped(t, &[poly[0], poly[i], poly[i + 1]], &shade);
     }
 }
 
 /// Scanline fill with a depth test and perspective-correct attributes. `shade`
 /// returns None for a fragment the alpha test rejects.
-fn raster(t: &mut Target, v: &[Vert], shade: impl Fn(&Vert, f32) -> Option<Vec3>) {
+fn raster_clipped(t: &mut Target, v: &[Vert], shade: &impl Fn(&Vert, f32) -> Option<Vec3>) {
     let size = t.size as f32;
     let mut screen = [Vec3::ZERO; 3];
     for (k, vert) in v.iter().enumerate() {
-        if vert.clip.w <= 1e-4 {
-            return;
-        }
-        let ndc = vert.clip.xyz() / vert.clip.w;
+        let ndc = vert.clip.xyz() / vert.clip.w.max(1e-6);
         screen[k] = Vec3::new(
             (ndc.x * 0.5 + 0.5) * size,
             (1.0 - (ndc.y * 0.5 + 0.5)) * size,

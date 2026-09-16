@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gpu;
+mod lighting;
 mod mipmap;
 mod shaders;
 
@@ -15,9 +16,11 @@ use arbor_core::species::{builtin_presets, parse_species};
 use arbor_core::{build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
 
 use gpu::{
-    ColorPass, DepthPass, GpuLeaves, GpuLines, GpuMesh, LeafDepthPass, LeafDrawParams,
-    LeafMaterialParams, MaterialTextures, MeshDrawParams, ShadowTarget,
+    ColorPass, DepthPass, GpuGround, GpuLeaves, GpuLines, GpuMesh, GpuSky, GroundDrawParams,
+    LeafDepthPass, LeafDrawParams, LeafMaterialParams, MaterialTextures, MeshDrawParams,
+    ShadowTarget,
 };
+use lighting::{light_view_proj, SkyParams};
 
 const TEXTURE_DIR: &str = "assets/textures";
 
@@ -81,22 +84,6 @@ impl OrbitCamera {
     }
 }
 
-fn light_view_proj(aabb: ([f32; 3], [f32; 3]), sun_dir: Vec3) -> Mat4 {
-    let min = Vec3::from(aabb.0);
-    let max = Vec3::from(aabb.1);
-    let center = (min + max) * 0.5;
-    let radius = (max - min).length() * 0.5 + 1.0;
-    let eye = center + sun_dir.normalize_or(Vec3::Y) * (radius * 3.0);
-    let up = if sun_dir.y.abs() > 0.95 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    let view = Mat4::look_at_rh(eye, center, up);
-    let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.1, radius * 7.0);
-    proj * view
-}
-
 const LEVEL_COLORS: [[f32; 3]; 8] = [
     [0.95, 0.75, 0.35],
     [0.45, 0.95, 0.40],
@@ -117,6 +104,8 @@ struct App {
     depth_pass: Arc<DepthPass>,
     leaf_depth_pass: Arc<LeafDepthPass>,
     color_pass: Arc<ColorPass>,
+    sky_pass: Arc<GpuSky>,
+    ground_pass: Arc<GpuGround>,
     bark_material: MaterialTextures,
     leaf_material: Option<MaterialTextures>,
     loaded_bark: String,
@@ -136,6 +125,9 @@ struct App {
     wireframe: bool,
     shadows: bool,
     show_skeleton: bool,
+    show_ground: bool,
+    sky: SkyParams,
+    sun_intensity: f32,
     show_leaves: bool,
     leaf_translucency: f32,
     show_grid: bool,
@@ -167,6 +159,8 @@ impl App {
         let depth_pass = DepthPass::new(&gl);
         let leaf_depth_pass = LeafDepthPass::new(&gl);
         let color_pass = ColorPass::new(&gl);
+        let sky_pass = GpuSky::new(&gl);
+        let ground_pass = GpuGround::new(&gl);
         let loaded_bark = params.mesh.bark_texture.clone();
         let loaded_leaf = params.leaves.texture.clone();
         let bark_material = unsafe { gpu::load_material(&gl, TEXTURE_DIR, &loaded_bark) };
@@ -181,6 +175,8 @@ impl App {
             depth_pass: Arc::new(depth_pass),
             leaf_depth_pass: Arc::new(leaf_depth_pass),
             color_pass: Arc::new(color_pass),
+            sky_pass: Arc::new(sky_pass),
+            ground_pass: Arc::new(ground_pass),
             bark_material,
             leaf_material,
             loaded_bark,
@@ -197,7 +193,7 @@ impl App {
                 target: Vec3::new(0.0, 6.0, 0.0),
                 distance: 26.0,
                 yaw: 0.6,
-                pitch: 0.22,
+                pitch: 0.30,
                 fov_y: 50.0f32.to_radians(),
                 aspect: 1.6,
             },
@@ -207,12 +203,15 @@ impl App {
             wireframe: false,
             shadows: true,
             show_skeleton: false,
+            show_ground: true,
+            sky: SkyParams::dawn(),
+            sun_intensity: 1.0,
             show_leaves: true,
             leaf_translucency: 0.9,
-            show_grid: true,
+            show_grid: false,
             use_normal_map: true,
-            sun_azimuth: 40.0,
-            sun_elevation: 45.0,
+            sun_azimuth: 146.0,
+            sun_elevation: 16.0,
             auto_frame: true,
         };
         app.stats = app.skeleton.stats();
@@ -377,7 +376,9 @@ impl App {
             self.rebuild_overlay();
         }
         ui.add(egui::Slider::new(&mut self.sun_azimuth, 0.0..=360.0).text("Sun azimuth"));
-        ui.add(egui::Slider::new(&mut self.sun_elevation, 5.0..=85.0).text("Sun elevation"));
+        ui.add(egui::Slider::new(&mut self.sun_elevation, 1.0..=85.0).text("Sun elevation"));
+        ui.add(egui::Slider::new(&mut self.sun_intensity, 0.1..=3.0).text("Sun intensity"));
+        ui.checkbox(&mut self.show_ground, "Ground");
 
         ui.separator();
         ui.label("Foliage");
@@ -519,6 +520,13 @@ impl eframe::App for App {
                 let depth_pass = Arc::clone(&self.depth_pass);
                 let leaf_depth_pass = Arc::clone(&self.leaf_depth_pass);
                 let color_pass = Arc::clone(&self.color_pass);
+                let sky_pass = Arc::clone(&self.sky_pass);
+                let ground_pass = Arc::clone(&self.ground_pass);
+                let mut sky = self.sky;
+                sky.sun_dir = self.sun_dir();
+                sky.sun_color *= self.sun_intensity;
+                let show_ground = self.show_ground;
+                let tree_height = self.stats.height.max(1.0);
                 let bark_material = self.bark_material;
                 let leaf_material = self.leaf_material;
                 let leaf_params =
@@ -558,6 +566,12 @@ impl eframe::App for App {
                         let y0_gl = (sh as f32 - y0_top - h as f32).floor() as i32;
                         let clip = [x0.floor() as i32, y0_gl, w.max(1), h.max(1)];
 
+                        let (lvp, texel) =
+                            light_view_proj(aabb, sun_dir, shadow.size);
+                        // Enough to clear one shadow texel at a grazing angle, which
+                        // is where a low sun puts everything.
+                        let normal_bias = texel * 1.6;
+
                         unsafe {
                             if shadows {
                                 shadow.bind(gl);
@@ -567,7 +581,6 @@ impl eframe::App for App {
                                 gl.clear_depth_f32(1.0);
                                 gl.clear(glow::DEPTH_BUFFER_BIT);
                                 gl.use_program(Some(depth_pass.program));
-                                let lvp = light_view_proj(aabb, sun_dir);
                                 gl.uniform_matrix_4_f32_slice(
                                     Some(&depth_pass.u_light_view_proj),
                                     false,
@@ -598,12 +611,34 @@ impl eframe::App for App {
                             gl.clear_depth_f32(1.0);
                             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
 
+                            sky_pass.draw(gl, view_proj, cam.eye(), &sky);
+
+                            if show_ground {
+                                ground_pass.draw(
+                                    gl,
+                                    &GroundDrawParams {
+                                        view_proj,
+                                        light_view_proj: lvp,
+                                        cam_pos: cam.eye(),
+                                        sky: &sky,
+                                        shadow_depth: shadow.depth,
+                                        albedo: Vec3::new(0.062, 0.058, 0.044),
+                                        normal_bias,
+                                        // Far enough out that the plane always meets
+                                        // the horizon, whatever the camera does.
+                                        extent: (cam.distance + tree_height) * 12.0,
+                                    },
+                                );
+                            }
+
                             let draw_params = MeshDrawParams {
+                                sky: &sky,
+                                normal_bias,
                                 view_proj,
-                                light_view_proj: light_view_proj(aabb, sun_dir),
+                                light_view_proj: lvp,
                                 cam_pos: cam.eye(),
                                 sun_dir,
-                                sun_color: Vec3::new(2.4, 2.25, 2.05),
+                                sun_color: sky.sun_color,
                                 mode,
                                 use_normal_map,
                                 material: &bark_material,
@@ -615,11 +650,13 @@ impl eframe::App for App {
                                 leaves_gpu.draw(
                                     gl,
                                     &LeafDrawParams {
+                                        sky: &sky,
+                                        normal_bias,
                                         view_proj,
-                                        light_view_proj: light_view_proj(aabb, sun_dir),
+                                        light_view_proj: lvp,
                                         cam_pos: cam.eye(),
                                         sun_dir,
-                                        sun_color: Vec3::new(2.4, 2.25, 2.05),
+                                        sun_color: sky.sun_color,
                                         mode,
                                         material: &leaf_mat,
                                         shadow_depth: shadow.depth,

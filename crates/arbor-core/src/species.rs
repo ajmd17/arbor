@@ -104,6 +104,10 @@ pub struct StemParams {
     pub split_probability: f32,
     /// How far a co-dominant fork leans away from the stem it splits from.
     pub split_angle_deg: f32,
+    /// Length left behind when the crown prunes a stem on its very first segment.
+    /// Those are branches born outside the crown, which on a real conifer are the
+    /// dead stubs along the bare lower trunk. Zero removes them entirely.
+    pub dead_stub_length: f32,
     /// Earliest point along a stem, as a fraction of its length, where it may fork.
     /// Without it a trunk can split at ground level and grow a second pole flush
     /// against the first.
@@ -128,6 +132,7 @@ impl StemParams {
             vigor_falloff: 0.5,
             split_probability: 0.04,
             split_angle_deg: 22.0,
+            dead_stub_length: 0.0,
             split_start_fraction: 0.3,
             children: ChildParams::default(),
         }
@@ -150,6 +155,7 @@ impl Default for StemParams {
             vigor_falloff: 0.35,
             split_probability: 0.02,
             split_angle_deg: 25.0,
+            dead_stub_length: 0.0,
             split_start_fraction: 0.35,
             children: ChildParams::default(),
         }
@@ -163,10 +169,30 @@ pub struct ChildParams {
     pub start_fraction: f32,
     pub end_fraction: f32,
     pub crotch_angle_deg: f32,
+    /// Angle to use at the very tip of the parent. Conifer branches stand more
+    /// upright the nearer the leader they are, which is what draws the crown to a
+    /// spire; one angle for the whole stem gives a pincushion instead. The blend is
+    /// weighted hard toward the tip so the body of the crown keeps the angle
+    /// `crotch_angle_deg` asks for. Leave the two equal for a stem whose children
+    /// all leave at one angle.
+    pub crotch_angle_tip_deg: f32,
     pub crotch_variance_deg: f32,
     pub roll_variance_deg: f32,
     pub phyllotaxis_deg: f32,
     pub scale: f32,
+    /// Spread of `scale` between siblings. Without it every branch in a whorl gets
+    /// the same drive and so the same length, which reads as a wheel spoke pattern
+    /// rather than a tree.
+    pub scale_variance: f32,
+    /// How far children are pulled into the flat plane of the limb carrying them.
+    /// Conifer branchlets grow in a plane, and the flat sprays that makes are most
+    /// of what gives a fir its layered silhouette; at 0 they spiral around the limb
+    /// instead. The first branch off the trunk sets the plane, everything deeper on
+    /// that limb shares it.
+    pub planarity: f32,
+    /// Whorls vary by up to this many branches either way, and may come out empty,
+    /// which is what breaks the ladder rhythm of a whorl on every single node.
+    pub count_variance: u32,
 }
 
 impl Default for ChildParams {
@@ -176,10 +202,14 @@ impl Default for ChildParams {
             start_fraction: 0.2,
             end_fraction: 0.95,
             crotch_angle_deg: 45.0,
+            crotch_angle_tip_deg: 45.0,
             crotch_variance_deg: 8.0,
             roll_variance_deg: 10.0,
             phyllotaxis_deg: 137.5,
             scale: 0.5,
+            scale_variance: 0.0,
+            planarity: 0.0,
+            count_variance: 0,
         }
     }
 }

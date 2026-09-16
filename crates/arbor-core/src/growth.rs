@@ -93,6 +93,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
         ROOT_PATH,
         0,
         TRUNK_STEM,
+        Vec3::ZERO,
     );
     resolve_radii(params, &mut skeleton);
     skeleton
@@ -118,6 +119,9 @@ fn grow_stem(
     path: u64,
     split_depth: u32,
     stem: u32,
+    // Normal of the flat plane this stem and its children lie in, or zero for a
+    // stem that spreads in every direction.
+    spray: Vec3,
 ) {
     if skeleton.nodes.len() >= MAX_NODES {
         return;
@@ -153,7 +157,12 @@ fn grow_stem(
     let is_leader = level == 0 && split_depth == 0;
 
     for seg in 0..seg_count {
-        let jitter = rand_perpendicular(&mut rng, cur_dir);
+        let mut jitter = rand_perpendicular(&mut rng, cur_dir);
+        if spray != Vec3::ZERO {
+            // A stem that belongs to a flat spray has to wander within it, or the
+            // plane it was placed in dissolves over a few segments.
+            jitter = flatten_into(jitter, spray, 1.0);
+        }
         bend = ortho_unit(bend * (1.0 - BEND_WANDER) + jitter * BEND_WANDER, cur_dir);
         let next_dir = steer(ctx, sp, cur_dir, pos, bend, seg_len, shaped_by_envelope);
         frame = transport(cur_dir, next_dir, frame);
@@ -166,6 +175,13 @@ fn grow_stem(
         if shaped_by_envelope
             && ctx.env.density(pos - ctx.crown_offset(pos.y)) < ctx.params.envelope.kill_threshold
         {
+            // Pruned before it grew at all means this stem was born outside the
+            // crown. On the bare lower trunk of a conifer those are the dead stubs,
+            // so leave one behind rather than nothing.
+            if seg == 0 && sp.dead_stub_length > 0.0 {
+                let stub = base_pos + cur_dir * sp.dead_stub_length;
+                skeleton.push_node(Some(cur), stub, level, child_path(path, 0), v, 1.0, stem);
+            }
             break;
         }
 
@@ -195,6 +211,7 @@ fn grow_stem(
                 &mut azimuth,
                 &mut slot,
                 path,
+                spray,
             );
         }
 
@@ -223,6 +240,7 @@ fn grow_stem(
                 p,
                 split_depth + 1,
                 fork_stem,
+                spray,
             );
             // The parent gives up part of its drive to the fork instead of both
             // halves carrying on at full strength.
@@ -253,6 +271,7 @@ fn spawn_children(
     azimuth: &mut f32,
     slot: &mut u32,
     stem_path: u64,
+    spray: Vec3,
 ) {
     let child = &sp.children;
     let frac = (seg + 1) as f32 / seg_count as f32;
@@ -265,9 +284,28 @@ fn spawn_children(
 
     let spawn_one = |az: f32, skeleton: &mut Skeleton, slot: &mut u32, rng: &mut SmallRng| {
         *slot += 1;
-        let crotch_deg = child.crotch_angle_deg
-            + range_f32(rng, -child.crotch_variance_deg, child.crotch_variance_deg);
-        let d = child_dir(dir, frame, az, crotch_deg.to_radians().max(0.02));
+        // Children leave at a shallower or steeper angle depending how far along the
+        // parent they are, so a stem does not carry every child at one fixed angle.
+        // Weighted hard toward the tip: a conifer holds its branches out level
+        // through the body of the crown and only the last whorls stand up, so a
+        // straight blend would tilt the whole crown and flatten away its layers.
+        let t = frac.clamp(0.0, 1.0);
+        let along = child.crotch_angle_deg
+            + (child.crotch_angle_tip_deg - child.crotch_angle_deg) * t * t * t;
+        let crotch_deg =
+            along + range_f32(rng, -child.crotch_variance_deg, child.crotch_variance_deg);
+        let mut d = child_dir(dir, frame, az, crotch_deg.to_radians().max(0.02));
+        // Inside a spray the child is pulled into the plane; the first branch off a
+        // stem that has no plane is the one that sets it for everything below.
+        let child_spray = if spray != Vec3::ZERO {
+            d = flatten_into(d, spray, child.planarity);
+            spray
+        } else if child.planarity > 0.0 {
+            plane_of(d)
+        } else {
+            Vec3::ZERO
+        };
+        let drive = child.scale * (1.0 + range_f32(rng, -child.scale_variance, child.scale_variance));
         let p = child_path(stem_path, *slot);
         let child_stem = skeleton.nodes.len() as u32;
         grow_stem(
@@ -276,11 +314,12 @@ fn spawn_children(
             tree_rng,
             attach,
             d,
-            vigor * child.scale,
+            vigor * drive.max(0.02),
             child_level,
             p,
             0,
             child_stem,
+            child_spray,
         );
     };
 
@@ -288,8 +327,17 @@ fn spawn_children(
         ChildPattern::None => {}
         ChildPattern::Whorl { every, count } => {
             let every = every.max(1);
-            let count = count.max(1);
             if !((seg + 1) as u32).is_multiple_of(every) {
+                return;
+            }
+            // Real whorls are not all the same size, and a node that draws an empty
+            // one leaves a gap: without that every node carries a whorl and the
+            // trunk comes out looking like a ladder.
+            let spread = child.count_variance as f32;
+            let count = ((count as f32 + range_f32(rng, -spread, spread + 1.0).floor()).round()
+                as i32)
+                .max(0) as u32;
+            if count == 0 {
                 return;
             }
             // Roll the whole whorl on so successive whorls do not stack up in the
@@ -355,6 +403,30 @@ fn steer(
         }
     }
     norm_or_up(d)
+}
+
+/// Normal of the flat plane that contains `d` and lies as level as possible. A limb
+/// growing out from the trunk carries its spray in this plane.
+fn plane_of(d: Vec3) -> Vec3 {
+    let across = Vec3::Y.cross(d);
+    if across.length_squared() < 1e-6 {
+        // Straight up or down has no level plane to pick.
+        return Vec3::ZERO;
+    }
+    d.cross(across.normalize()).normalize_or_zero()
+}
+
+/// Pulls `dir` toward the plane with normal `plane`, by `amount` from 0 to 1.
+fn flatten_into(dir: Vec3, plane: Vec3, amount: f32) -> Vec3 {
+    if plane == Vec3::ZERO || amount <= 0.0 {
+        return dir;
+    }
+    let in_plane = dir - plane * dir.dot(plane);
+    if in_plane.length_squared() < 1e-8 {
+        return dir;
+    }
+    dir.lerp(in_plane.normalize(), amount.clamp(0.0, 1.0))
+        .normalize_or(dir)
 }
 
 /// The horizontal part of a position: how far the trunk has wandered from the axis
@@ -671,17 +743,37 @@ mod tests {
                 .collect();
             leader.sort_by(|a, b| a.y.total_cmp(&b.y));
 
+            // A dead stub is deliberately outside the crown: it is what is left of a
+            // branch the crown pruned the moment it appeared.
+            let mut stubs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            for run in sk.stem_runs() {
+                if run.len() != 1 {
+                    continue;
+                }
+                let node = &sk.nodes[run[0] as usize];
+                let Some(parent) = node.parent else { continue };
+                let expected = stem_params(&params, node.level)
+                    .map(|sp| sp.dead_stub_length)
+                    .unwrap_or(0.0);
+                let reach = (node.position - sk.nodes[parent as usize].position).length();
+                if expected > 0.0 && (reach - expected).abs() < 1e-3 {
+                    stubs.insert(run[0]);
+                }
+            }
+
             let mut checked = 0;
-            for node in &sk.nodes {
-                if node.level == 0 {
+            for (i, node) in sk.nodes.iter().enumerate() {
+                if node.level == 0 || stubs.contains(&(i as u32)) {
                     continue;
                 }
                 // Growth interpolates along the trunk, so the anchors it could have
                 // used are the whole polyline below the node, not just its vertices.
                 let mut best = env.density(node.position);
                 for pair in leader.windows(2) {
-                    for k in 0..=8 {
-                        let p = pair[0].lerp(pair[1], k as f32 / 8.0);
+                    // Fine enough that the sampled anchor matches the continuous one
+                    // growth used to within far less than the crown falloff.
+                    for k in 0..=64 {
+                        let p = pair[0].lerp(pair[1], k as f32 / 64.0);
                         if p.y > node.position.y + 1e-4 {
                             continue;
                         }
@@ -698,6 +790,165 @@ mod tests {
             }
             assert!(checked > 100, "{}: only {checked} nodes", params.name);
         }
+    }
+
+    /// Total length of a stem, counting the segment from its attachment point.
+    fn stem_length(sk: &Skeleton, run: &[u32]) -> f32 {
+        let first = &sk.nodes[run[0] as usize];
+        let from_parent = first
+            .parent
+            .map(|p| (first.position - sk.nodes[p as usize].position).length())
+            .unwrap_or(0.0);
+        from_parent
+            + run
+                .windows(2)
+                .map(|w| {
+                    (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position).length()
+                })
+                .sum::<f32>()
+    }
+
+    #[test]
+    fn a_spray_keeps_its_branchlets_in_one_plane() {
+        // Conifer branchlets grow in the flat plane of the limb carrying them, and
+        // those plates are most of what gives a fir its layered look. Without it the
+        // branchlets spiral around the limb and every spray reads as a bottle brush.
+        let params = parse_species(PINE_RON).unwrap();
+        assert!(
+            params.branch_levels[0].children.planarity > 0.5,
+            "this preset should use flat sprays"
+        );
+        let sk = grow(&params);
+
+        // Each limb established its plane from the direction it left the trunk on.
+        let mut limb_plane: std::collections::HashMap<u32, Vec3> = std::collections::HashMap::new();
+        for run in sk.stem_runs() {
+            let first = &sk.nodes[run[0] as usize];
+            if first.level != 1 {
+                continue;
+            }
+            let Some(parent) = first.parent else { continue };
+            // Only a limb leaving the trunk sets a plane. A fork of a limb is also
+            // level 1 but inherits the plane it was already growing in, so deriving
+            // one from its own direction would be the wrong plane to judge against.
+            if sk.nodes[parent as usize].level != 0 {
+                continue;
+            }
+            let dir = (first.position - sk.nodes[parent as usize].position).normalize_or(Vec3::Y);
+            limb_plane.insert(first.stem, plane_of(dir));
+        }
+
+        let mut checked = 0;
+        let mut worst: f32 = 0.0;
+        for run in sk.stem_runs() {
+            let first = &sk.nodes[run[0] as usize];
+            if first.level != 2 {
+                continue;
+            }
+            let Some(parent) = first.parent else { continue };
+            let Some(&plane) = limb_plane.get(&sk.nodes[parent as usize].stem) else {
+                continue;
+            };
+            if plane == Vec3::ZERO {
+                continue;
+            }
+            let dir = (first.position - sk.nodes[parent as usize].position).normalize_or(Vec3::Y);
+            worst = worst.max(dir.dot(plane).abs());
+            checked += 1;
+        }
+        assert!(checked > 100, "only {checked} branchlets");
+        assert!(
+            worst < 0.35,
+            "a branchlet leaves its spray plane by {worst}, so the sprays are not flat"
+        );
+    }
+
+    #[test]
+    fn a_bare_lower_trunk_keeps_its_dead_stubs() {
+        // Branches born below the crown are pruned the moment they appear. Leaving a
+        // short stub behind is what puts the dead branch remnants on the bare lower
+        // trunk of a conifer instead of a clean pole.
+        let params = parse_species(PINE_RON).unwrap();
+        let stub_len = params.branch_levels[0].dead_stub_length;
+        assert!(stub_len > 0.0, "this preset should keep stubs");
+        let crown_base = match params.envelope.volumes.first() {
+            Some(crate::envelope::EnvelopeVolume::Cone { base_y, .. }) => *base_y,
+            other => panic!("expected a cone crown, got {other:?}"),
+        };
+
+        let sk = grow(&params);
+        let stubs = sk
+            .stem_runs()
+            .iter()
+            .filter(|run| {
+                let n = &sk.nodes[run[0] as usize];
+                run.len() == 1 && n.level == 1 && n.position.y < crown_base
+            })
+            .count();
+        assert!(stubs > 5, "only {stubs} dead stubs below the crown");
+    }
+
+    #[test]
+    fn siblings_in_a_whorl_get_different_lengths() {
+        // Without a spread on the drive handed to children, every branch in a whorl
+        // gets the same vigor and so the same length, which reads as a wheel of
+        // identical spokes rather than a tree.
+        fn whorl_lengths(scale_variance: f32) -> Vec<f32> {
+            let mut params = SpeciesParams {
+                max_levels: 2,
+                max_split_depth: 0,
+                ..Default::default()
+            };
+            params.envelope.volumes = vec![crate::envelope::EnvelopeVolume::Ellipsoid {
+                center: [0.0, 0.0, 0.0],
+                radii: [500.0, 500.0, 500.0],
+            }];
+            params.trunk.split_probability = 0.0;
+            params.trunk.children.pattern = ChildPattern::Whorl {
+                every: 4,
+                count: 5,
+            };
+            params.trunk.children.scale_variance = scale_variance;
+            params.branch_levels[0].length_variance = 0.0;
+            params.branch_levels[0].split_probability = 0.0;
+
+            let sk = grow(&params);
+            // One whorl: the branches sharing the lowest attachment point.
+            let mut runs: Vec<(u32, f32)> = sk
+                .stem_runs()
+                .iter()
+                .filter(|r| sk.nodes[r[0] as usize].level == 1)
+                .filter_map(|r| {
+                    sk.nodes[r[0] as usize]
+                        .parent
+                        .map(|p| (p, stem_length(&sk, r)))
+                })
+                .collect();
+            runs.sort_by_key(|(p, _)| *p);
+            let first_attach = runs.first().expect("branches exist").0;
+            runs.iter()
+                .filter(|(p, _)| *p == first_attach)
+                .map(|(_, len)| *len)
+                .collect()
+        }
+
+        let uniform = whorl_lengths(0.0);
+        assert!(uniform.len() >= 3, "expected a whorl, got {uniform:?}");
+        let spread = |v: &[f32]| {
+            let hi = v.iter().copied().fold(f32::MIN, f32::max);
+            let lo = v.iter().copied().fold(f32::MAX, f32::min);
+            hi - lo
+        };
+        assert!(
+            spread(&uniform) < 1e-3,
+            "without a spread a whorl should be uniform, got {uniform:?}"
+        );
+
+        let varied = whorl_lengths(0.5);
+        assert!(
+            spread(&varied) > 0.2 * uniform[0],
+            "a spread of 0.5 barely changed the whorl: {varied:?}"
+        );
     }
 
     #[test]

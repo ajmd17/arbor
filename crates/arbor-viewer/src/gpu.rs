@@ -550,9 +550,12 @@ pub struct GpuMesh {
     u_metallic: glow::UniformLocation,
     u_mode: glow::UniformLocation,
     u_use_normal_map: glow::UniformLocation,
+    u_normal_bias: glow::UniformLocation,
 }
 
 pub struct MeshDrawParams<'a> {
+    pub sky: &'a SkyParams,
+    pub normal_bias: f32,
     pub view_proj: Mat4,
     pub light_view_proj: Mat4,
     pub cam_pos: Vec3,
@@ -623,6 +626,7 @@ impl GpuMesh {
                 u_metallic: u("u_metallic"),
                 u_mode: u("u_mode"),
                 u_use_normal_map: u("u_use_normal_map"),
+                u_normal_bias: u("u_normal_bias"),
             }
         }
     }
@@ -689,6 +693,8 @@ impl GpuMesh {
                 Some(&self.u_use_normal_map),
                 i32::from(p.use_normal_map),
             );
+            gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
+            p.sky.bind(gl, self.program);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE1);
@@ -795,6 +801,8 @@ impl LeafDepthPass {
 }
 
 pub struct LeafDrawParams<'a> {
+    pub sky: &'a SkyParams,
+    pub normal_bias: f32,
     pub view_proj: Mat4,
     pub light_view_proj: Mat4,
     pub cam_pos: Vec3,
@@ -826,6 +834,7 @@ pub struct GpuLeaves {
     u_alpha_cutoff: glow::UniformLocation,
     u_translucency: glow::UniformLocation,
     u_mode: glow::UniformLocation,
+    u_normal_bias: glow::UniformLocation,
 }
 
 impl GpuLeaves {
@@ -881,6 +890,7 @@ impl GpuLeaves {
                 u_alpha_cutoff: u("u_alpha_cutoff"),
                 u_translucency: u("u_translucency"),
                 u_mode: u("u_mode"),
+                u_normal_bias: u("u_normal_bias"),
                 program,
             }
         }
@@ -958,6 +968,8 @@ impl GpuLeaves {
             gl.uniform_1_f32(Some(&self.u_alpha_cutoff), m.alpha_cutoff);
             gl.uniform_1_f32(Some(&self.u_translucency), m.translucency);
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
+            gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
+            p.sky.bind(gl, self.program);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE2);
@@ -975,6 +987,249 @@ impl GpuLeaves {
             gl.disable(glow::CULL_FACE);
             gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
+        }
+    }
+}
+
+use crate::lighting::SkyParams;
+
+impl SkyParams {
+    unsafe fn bind(&self, gl: &glow::Context, program: glow::Program) {
+        unsafe {
+            let set = |name: &str, v: Vec3| {
+                if let Some(l) = gl.get_uniform_location(program, name) {
+                    gl.uniform_3_f32(Some(&l), v.x, v.y, v.z);
+                }
+            };
+            set("u_sky_zenith", self.zenith);
+            set("u_sky_horizon", self.horizon);
+            set("u_ground_bounce", self.ground_bounce);
+        }
+    }
+}
+
+/// Draws the sky as one full-screen triangle behind everything else.
+pub struct GpuSky {
+    program: glow::Program,
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    u_inv_view_proj: glow::UniformLocation,
+    u_cam_pos: glow::UniformLocation,
+    u_sun_dir: glow::UniformLocation,
+    u_sun_color: glow::UniformLocation,
+}
+
+impl GpuSky {
+    pub fn new(gl: &glow::Context) -> Self {
+        unsafe {
+            let program = compile_program(gl, shaders::SKY_VS, shaders::SKY_FS, &["a_pos"]);
+            let vao = gl.create_vertex_array().expect("sky vao");
+            let vbo = gl.create_buffer().expect("sky vbo");
+            // One oversized triangle covers the screen with no seam down the middle.
+            let verts: [f32; 9] = [-1.0, -1.0, 0.0, 3.0, -1.0, 0.0, -1.0, 3.0, 0.0];
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, cast_slice(&verts), glow::STATIC_DRAW);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            Self {
+                u_inv_view_proj: loc(gl, &program, "u_inv_view_proj"),
+                u_cam_pos: loc(gl, &program, "u_cam_pos"),
+                u_sun_dir: loc(gl, &program, "u_sun_dir"),
+                u_sun_color: loc(gl, &program, "u_sun_color"),
+                program,
+                vao,
+                vbo,
+            }
+        }
+    }
+
+    pub fn draw(&self, gl: &glow::Context, view_proj: Mat4, cam_pos: Vec3, sky: &SkyParams) {
+        unsafe {
+            // Behind everything, and it writes no depth of its own.
+            gl.depth_mask(false);
+            gl.disable(glow::DEPTH_TEST);
+            gl.use_program(Some(self.program));
+            gl.uniform_matrix_4_f32_slice(
+                Some(&self.u_inv_view_proj),
+                false,
+                &view_proj.inverse().to_cols_array(),
+            );
+            gl.uniform_3_f32(Some(&self.u_cam_pos), cam_pos.x, cam_pos.y, cam_pos.z);
+            gl.uniform_3_f32(
+                Some(&self.u_sun_dir),
+                sky.sun_dir.x,
+                sky.sun_dir.y,
+                sky.sun_dir.z,
+            );
+            gl.uniform_3_f32(
+                Some(&self.u_sun_color),
+                sky.sun_color.x,
+                sky.sun_color.y,
+                sky.sun_color.z,
+            );
+            sky.bind(gl, self.program);
+            gl.bind_vertex_array(Some(self.vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.bind_vertex_array(None);
+            gl.use_program(None);
+            gl.depth_mask(true);
+            gl.enable(glow::DEPTH_TEST);
+        }
+    }
+
+    pub fn delete(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_buffer(self.vbo);
+            gl.delete_vertex_array(self.vao);
+            gl.delete_program(self.program);
+        }
+    }
+}
+
+pub struct GroundDrawParams<'a> {
+    pub view_proj: Mat4,
+    pub light_view_proj: Mat4,
+    pub cam_pos: Vec3,
+    pub sky: &'a SkyParams,
+    pub shadow_depth: glow::Texture,
+    pub albedo: Vec3,
+    pub normal_bias: f32,
+    pub extent: f32,
+}
+
+/// A ground quad that receives the tree shadow.
+pub struct GpuGround {
+    program: glow::Program,
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    u_view_proj: glow::UniformLocation,
+    u_light_view_proj: glow::UniformLocation,
+    u_cam_pos: glow::UniformLocation,
+    u_sun_dir: glow::UniformLocation,
+    u_sun_color: glow::UniformLocation,
+    u_albedo_color: glow::UniformLocation,
+    u_normal_bias: glow::UniformLocation,
+    u_fade_start: glow::UniformLocation,
+    u_fade_end: glow::UniformLocation,
+}
+
+impl GpuGround {
+    pub fn new(gl: &glow::Context) -> Self {
+        unsafe {
+            let program = compile_program(gl, shaders::GROUND_VS, shaders::GROUND_FS, &["a_pos"]);
+            let vao = gl.create_vertex_array().expect("ground vao");
+            let vbo = gl.create_buffer().expect("ground vbo");
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            gl.use_program(Some(program));
+            gl.uniform_1_i32(Some(&loc(gl, &program, "u_shadow_tex")), 3);
+            gl.use_program(None);
+            Self {
+                u_view_proj: loc(gl, &program, "u_view_proj"),
+                u_light_view_proj: loc(gl, &program, "u_light_view_proj"),
+                u_cam_pos: loc(gl, &program, "u_cam_pos"),
+                u_sun_dir: loc(gl, &program, "u_sun_dir"),
+                u_sun_color: loc(gl, &program, "u_sun_color"),
+                u_albedo_color: loc(gl, &program, "u_albedo_color"),
+                u_normal_bias: loc(gl, &program, "u_normal_bias"),
+                u_fade_start: loc(gl, &program, "u_fade_start"),
+                u_fade_end: loc(gl, &program, "u_fade_end"),
+                program,
+                vao,
+                vbo,
+            }
+        }
+    }
+
+    /// The quad is rebuilt around the camera so it always reaches the horizon.
+    fn upload(&self, gl: &glow::Context, center: Vec3, extent: f32) {
+        unsafe {
+            let (x, z, e) = (center.x, center.z, extent);
+            let verts: [f32; 18] = [
+                x - e,
+                0.0,
+                z - e,
+                x + e,
+                0.0,
+                z - e,
+                x + e,
+                0.0,
+                z + e,
+                x - e,
+                0.0,
+                z - e,
+                x + e,
+                0.0,
+                z + e,
+                x - e,
+                0.0,
+                z + e,
+            ];
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, cast_slice(&verts), glow::DYNAMIC_DRAW);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        }
+    }
+
+    pub fn draw(&self, gl: &glow::Context, p: &GroundDrawParams) {
+        unsafe {
+            self.upload(gl, p.cam_pos, p.extent);
+            gl.use_program(Some(self.program));
+            gl.uniform_matrix_4_f32_slice(
+                Some(&self.u_view_proj),
+                false,
+                &p.view_proj.to_cols_array(),
+            );
+            gl.uniform_matrix_4_f32_slice(
+                Some(&self.u_light_view_proj),
+                false,
+                &p.light_view_proj.to_cols_array(),
+            );
+            gl.uniform_3_f32(Some(&self.u_cam_pos), p.cam_pos.x, p.cam_pos.y, p.cam_pos.z);
+            gl.uniform_3_f32(
+                Some(&self.u_sun_dir),
+                p.sky.sun_dir.x,
+                p.sky.sun_dir.y,
+                p.sky.sun_dir.z,
+            );
+            gl.uniform_3_f32(
+                Some(&self.u_sun_color),
+                p.sky.sun_color.x,
+                p.sky.sun_color.y,
+                p.sky.sun_color.z,
+            );
+            gl.uniform_3_f32(
+                Some(&self.u_albedo_color),
+                p.albedo.x,
+                p.albedo.y,
+                p.albedo.z,
+            );
+            gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
+            gl.uniform_1_f32(Some(&self.u_fade_start), p.extent * 0.10);
+            gl.uniform_1_f32(Some(&self.u_fade_end), p.extent * 0.62);
+            p.sky.bind(gl, self.program);
+            gl.active_texture(glow::TEXTURE3);
+            gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
+            gl.bind_vertex_array(Some(self.vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            gl.bind_vertex_array(None);
+            gl.active_texture(glow::TEXTURE0);
+            gl.use_program(None);
+        }
+    }
+
+    pub fn delete(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_buffer(self.vbo);
+            gl.delete_vertex_array(self.vao);
+            gl.delete_program(self.program);
         }
     }
 }
