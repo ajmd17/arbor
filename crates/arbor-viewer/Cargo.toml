@@ -1,0 +1,16 @@
+[package]
+name = "arbor-viewer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+arbor-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_glow.workspace = true
+glow.workspace = true
+glam.workspace = true
+rand.workspace = true
+bytemuck.workspace = true
+image.workspace = true

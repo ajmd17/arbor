@@ -1,0 +1,8 @@
+[package]
+name = "arbor-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+arbor-core.workspace = true

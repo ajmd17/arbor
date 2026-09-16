@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/arbor-core", "crates/arbor-viewer", "crates/arbor-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Andrew"]
+
+[workspace.dependencies]
+glam = "0.30"
+serde = { version = "1", features = ["derive"] }
+ron = "0.9"
+rand = { version = "0.9", features = ["small_rng"] }
+bytemuck = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.32"
+egui_glow = "0.32"
+glow = "0.16"
+
+arbor-core = { path = "crates/arbor-core" }

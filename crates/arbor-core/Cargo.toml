@@ -1,0 +1,11 @@
+[package]
+name = "arbor-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true
+rand.workspace = true
