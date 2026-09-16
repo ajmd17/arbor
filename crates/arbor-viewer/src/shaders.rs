@@ -155,3 +155,144 @@ out vec4 out_color;
 void main() {
     out_color = vec4(v_col, 1.0);
 }"#;
+
+pub const LEAF_VS: &str = r#"#version 150
+in vec3 a_pos;
+in vec3 a_normal;
+in vec2 a_uv;
+in vec4 a_tint;
+uniform mat4 u_view_proj;
+uniform mat4 u_light_view_proj;
+out vec3 v_world;
+out vec3 v_normal;
+out vec2 v_card_uv;
+out vec4 v_tint;
+out vec4 v_shadow;
+void main() {
+    v_world = a_pos;
+    v_normal = a_normal;
+    v_card_uv = a_uv;
+    v_tint = a_tint;
+    v_shadow = u_light_view_proj * vec4(a_pos, 1.0);
+    gl_Position = u_view_proj * vec4(a_pos, 1.0);
+}"#;
+
+pub const LEAF_FS: &str = r#"#version 150
+in vec3 v_world;
+in vec3 v_normal;
+in vec2 v_card_uv;
+in vec4 v_tint;
+in vec4 v_shadow;
+uniform vec3 u_cam_pos;
+uniform vec3 u_sun_dir;
+uniform vec3 u_sun_color;
+uniform vec2 u_atlas_scale;
+uniform vec2 u_atlas_front;
+uniform vec2 u_atlas_back;
+uniform float u_alpha_cutoff;
+uniform float u_translucency;
+uniform int u_mode;
+uniform sampler2D u_albedo_tex;
+uniform sampler2D u_rough_tex;
+uniform sampler2D u_shadow_tex;
+out vec4 out_color;
+
+float sample_shadow(vec4 sc, float ndl) {
+    vec3 proj = sc.xyz / sc.w * 0.5 + 0.5;
+    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
+        return 1.0;
+    }
+    float bias = max(0.004 * (1.0 - ndl), 0.0015);
+    vec2 texel = 1.0 / vec2(textureSize(u_shadow_tex, 0));
+    float sum = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            float d = texture(u_shadow_tex, proj.xy + vec2(float(x), float(y)) * texel).r;
+            sum += (proj.z - bias > d) ? 0.0 : 1.0;
+        }
+    }
+    return sum / 9.0;
+}
+
+vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main() {
+    // A leaf is one quad seen from both sides: the lit face and the underside are
+    // different cells of the same atlas, picked per fragment.
+    vec2 cell = gl_FrontFacing ? u_atlas_front : u_atlas_back;
+    vec2 uv = cell + v_card_uv * u_atlas_scale;
+    vec4 tex = texture(u_albedo_tex, uv);
+    if (tex.a < u_alpha_cutoff) {
+        discard;
+    }
+    if (u_mode == 1) {
+        float c = mod(floor(v_card_uv.x * 4.0) + floor(v_card_uv.y * 4.0), 2.0);
+        out_color = vec4(mix(vec3(0.2, 0.5, 0.2), vec3(0.85, 0.9, 0.5), c), 1.0);
+        return;
+    }
+    vec3 N = normalize(v_normal);
+    if (!gl_FrontFacing) {
+        N = -N;
+    }
+    if (u_mode == 2) {
+        out_color = vec4(N * 0.5 + 0.5, 1.0);
+        return;
+    }
+
+    vec3 albedo = tex.rgb * v_tint.rgb;
+    vec3 V = normalize(u_cam_pos - v_world);
+    float rough = clamp(texture(u_rough_tex, uv).r, 0.15, 1.0);
+    float ndl = max(dot(N, u_sun_dir), 0.0);
+    float shadow = sample_shadow(v_shadow, ndl);
+
+    // Wrapped diffuse: a thin blade scatters enough that it never goes fully black
+    // at grazing angles, and hard terminators across a canopy read as faceted.
+    float wrapped = max((dot(N, u_sun_dir) + 0.5) / 1.5, 0.0);
+    vec3 diffuse = albedo * wrapped * shadow;
+
+    // Light coming through the blade from behind. The view lobe peaks when the
+    // camera looks into the sun, but it keeps a floor so a leaf turned away from
+    // the sun is lit from behind instead of going black.
+    float through = max(dot(-N, u_sun_dir), 0.0);
+    float lobe = 0.35 + 0.65 * pow(max(dot(V, -u_sun_dir), 0.0), 3.0);
+    vec3 transmitted = albedo * u_translucency * through * lobe * shadow;
+
+    vec3 H = normalize(V + u_sun_dir);
+    float spec = pow(max(dot(N, H), 0.0), mix(60.0, 6.0, rough)) * (1.0 - rough) * 0.25 * shadow;
+
+    vec3 hemi = mix(vec3(0.13, 0.15, 0.12), vec3(0.34, 0.42, 0.56), N.y * 0.5 + 0.5);
+    vec3 color = (diffuse + transmitted + vec3(spec)) * u_sun_color + albedo * hemi;
+    // Leaves buried in the crown get less sky than the ones on the outside.
+    color *= v_tint.a;
+    color = aces(color);
+    color = pow(color, vec3(1.0 / 2.2));
+    out_color = vec4(color, 1.0);
+}"#;
+
+pub const LEAF_DEPTH_VS: &str = r#"#version 150
+in vec3 a_pos;
+in vec2 a_uv;
+uniform mat4 u_light_view_proj;
+out vec2 v_card_uv;
+void main() {
+    v_card_uv = a_uv;
+    gl_Position = u_light_view_proj * vec4(a_pos, 1.0);
+}"#;
+
+pub const LEAF_DEPTH_FS: &str = r#"#version 150
+in vec2 v_card_uv;
+uniform vec2 u_atlas_scale;
+uniform vec2 u_atlas_front;
+uniform float u_alpha_cutoff;
+uniform sampler2D u_albedo_tex;
+out vec4 out_color;
+void main() {
+    // Without the same alpha test the depth pass uses, every leaf would cast the
+    // shadow of its bounding quad.
+    if (texture(u_albedo_tex, u_atlas_front + v_card_uv * u_atlas_scale).a < u_alpha_cutoff) {
+        discard;
+    }
+    out_color = vec4(1.0);
+}"#;

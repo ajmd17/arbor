@@ -99,6 +99,8 @@ impl StemPath {
 
         let mut points = Vec::with_capacity(stem.len() + 1);
         let mut radii = Vec::with_capacity(stem.len() + 1);
+        // How wide the socket may get before it stops being swallowed by the parent.
+        let mut socket_ceiling = f32::INFINITY;
         if let Some(p) = sk.nodes[first].parent {
             // Anchor the stem on its parent so the two tubes overlap at the junction.
             let anchor = sk.nodes[p as usize].position;
@@ -106,6 +108,7 @@ impl StemPath {
                 points.push(anchor);
                 radii.push(sk.nodes[first].radius);
             }
+            socket_ceiling = sk.nodes[p as usize].radius;
         }
         for &i in stem {
             let node = &sk.nodes[i as usize];
@@ -156,6 +159,10 @@ impl StemPath {
         // The socket fades out over a few base radii, so the flare is sized by the
         // branch rather than by however finely the stem happens to be segmented.
         let socket_len = (radii[0] * 3.0).max(1e-4);
+        // Cap the flare at whatever the parent can hide. Where both stems are already
+        // at the radius floor there is nothing to hide it in, and an unclamped flare
+        // would leave a bud sticking out of the junction.
+        let max_scale = (socket_ceiling / radii[0].max(1e-5)).max(1.0);
         let socket = arc
             .iter()
             .map(|&s| {
@@ -163,7 +170,7 @@ impl StemPath {
                     1.0
                 } else {
                     let t = (s / socket_len).clamp(0.0, 1.0);
-                    1.0 + mp.socket_flare * (1.0 - t) * (1.0 - t)
+                    (1.0 + mp.socket_flare * (1.0 - t) * (1.0 - t)).min(max_scale)
                 }
             })
             .collect();
@@ -224,8 +231,9 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
 
     let mut ring_bases: Vec<u32> = Vec::with_capacity(path.len());
     let mut n = ortho_of(path.dirs[0]);
-    // Ring 0 frame, kept so the ground cap can be stitched from the same vertices.
-    let mut first_frame = (n, path.dirs[0].cross(n));
+    // Ring 0 frame, kept so the ground cap lands on exactly the same circle as the
+    // first swept ring rather than a recomputed one that could differ by an ulp.
+    let mut first_frame = None;
 
     for i in 0..path.len() {
         let d = path.dirs[i];
@@ -234,9 +242,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         }
         n = ortho_unit(n, d);
         let b = d.cross(n);
-        if i == 0 {
-            first_frame = (n, b);
-        }
+        first_frame.get_or_insert((n, b));
 
         // Neighbours used for the axial slope of the radius, so the normal follows
         // taper and flare instead of pointing straight out of the axis.
@@ -289,7 +295,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         // Only the trunk meets the ground, so it is the only stem that needs a disc.
         // The rim is duplicated with the cap normal to keep the edge crisp.
         let cap_n = -path.dirs[0];
-        let (n0, b0) = first_frame;
+        let (n0, b0) = first_frame.expect("every stem emits at least one ring");
         let rim = sink.vertex_offset();
         for j in 0..=radial {
             let a = j as f32 / radial as f32 * TAU;
@@ -324,7 +330,57 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{parse_species, PINE_RON};
+    use crate::species::{parse_species, OAK_RON, PINE_RON};
+
+    #[test]
+    fn every_branch_tube_starts_on_its_parent() {
+        // The whole tree is one welded surface only because each stem begins with a
+        // ring on the parent centreline. Starting at the first grown node instead
+        // leaves a segment-length hole at every junction.
+        for src in [OAK_RON, PINE_RON] {
+            let params = parse_species(src).unwrap();
+            let sk = crate::grow(&params);
+            let mut checked = 0;
+            for run in sk.stem_runs() {
+                let first = run[0] as usize;
+                let Some(p) = sk.nodes[first].parent else {
+                    continue;
+                };
+                let path = StemPath::build(&sk, &run, &params.mesh).expect("stem builds");
+                let anchor = sk.nodes[p as usize].position;
+                assert!(
+                    (path.points[0] - anchor).length() < 1e-4,
+                    "{}: stem starts {:?}, parent is at {:?}",
+                    params.name,
+                    path.points[0],
+                    anchor
+                );
+                checked += 1;
+            }
+            assert!(checked > 50, "{}: only {checked} junctions", params.name);
+        }
+    }
+
+    #[test]
+    fn stem_surfaces_overlap_at_every_junction() {
+        // A ring on the parent centreline is inside the parent only while the branch
+        // stays thinner than what it hangs off.
+        let params = parse_species(OAK_RON).unwrap();
+        let sk = crate::grow(&params);
+        for run in sk.stem_runs() {
+            let first = run[0] as usize;
+            let Some(p) = sk.nodes[first].parent else {
+                continue;
+            };
+            let parent_radius = sk.nodes[p as usize].radius;
+            let path = StemPath::build(&sk, &run, &params.mesh).expect("stem builds");
+            let base = path.radius_at(0, 0.0, &params.mesh, (0.0, 0.0));
+            assert!(
+                base <= parent_radius + 1e-4,
+                "branch base {base} pokes out of parent {parent_radius}"
+            );
+        }
+    }
 
     fn mesh_aabb_width_at_height(mesh: &Mesh, max_y: f32) -> f32 {
         let mut min_x = f32::MAX;

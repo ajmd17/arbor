@@ -11,9 +11,14 @@ use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
 use arbor_core::species::{builtin_presets, parse_species};
-use arbor_core::{build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
+use arbor_core::{build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
 
-use gpu::{ColorPass, DepthPass, GpuLines, GpuMesh, MeshDrawParams, ShadowTarget};
+use gpu::{
+    ColorPass, DepthPass, GpuLeaves, GpuLines, GpuMesh, LeafDepthPass, LeafDrawParams,
+    LeafMaterialParams, MaterialTextures, MeshDrawParams, ShadowTarget,
+};
+
+const TEXTURE_DIR: &str = "assets/textures";
 
 #[derive(Clone, Copy, PartialEq)]
 enum RenderMode {
@@ -28,6 +33,8 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1600.0, 950.0])
             .with_title("Arbor"),
         depth_buffer: 24,
+        // Foliage is all alpha-tested edges, and they crawl badly without it.
+        multisampling: 4,
         ..Default::default()
     };
     eframe::run_native("arbor", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
@@ -104,16 +111,22 @@ struct App {
     gl: Arc<glow::Context>,
     lines: Arc<Mutex<GpuLines>>,
     mesh_gpu: Arc<Mutex<GpuMesh>>,
+    leaves_gpu: Arc<Mutex<GpuLeaves>>,
     shadow: Arc<ShadowTarget>,
     depth_pass: Arc<DepthPass>,
+    leaf_depth_pass: Arc<LeafDepthPass>,
     color_pass: Arc<ColorPass>,
-    material: Arc<gpu::MaterialTextures>,
+    bark_material: MaterialTextures,
+    leaf_material: Option<MaterialTextures>,
+    loaded_bark: String,
+    loaded_leaf: String,
     presets: Vec<(&'static str, &'static str)>,
     preset_index: usize,
     params: SpeciesParams,
     skeleton: Skeleton,
     stats: SkeletonStats,
     mesh_stats: (usize, usize),
+    leaf_stats: (usize, usize),
     aabb: ([f32; 3], [f32; 3]),
     camera: OrbitCamera,
     dirty: bool,
@@ -122,6 +135,8 @@ struct App {
     wireframe: bool,
     shadows: bool,
     show_skeleton: bool,
+    show_leaves: bool,
+    leaf_translucency: f32,
     show_grid: bool,
     use_normal_map: bool,
     sun_azimuth: f32,
@@ -139,29 +154,43 @@ impl App {
         let aabb = mesh.aabb();
         let mesh_stats = (mesh.vertex_count(), mesh.triangle_count());
 
-        let mesh_gpu = GpuMesh::new(&gl);
-        let mut mesh_gpu = mesh_gpu;
+        let leaves = build_leaves(&skeleton, &params);
+        let leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
+
+        let mut mesh_gpu = GpuMesh::new(&gl);
         mesh_gpu.upload(&gl, &mesh);
+        let mut leaves_gpu = GpuLeaves::new(&gl);
+        leaves_gpu.upload(&gl, &leaves);
         let lines = GpuLines::new(&gl);
         let shadow = ShadowTarget::new(&gl, 2048);
         let depth_pass = DepthPass::new(&gl);
+        let leaf_depth_pass = LeafDepthPass::new(&gl);
         let color_pass = ColorPass::new(&gl);
-        let material = unsafe { gpu::load_material(&gl, "assets/textures") };
+        let loaded_bark = params.mesh.bark_texture.clone();
+        let loaded_leaf = params.leaves.texture.clone();
+        let bark_material = unsafe { gpu::load_material(&gl, TEXTURE_DIR, &loaded_bark) };
+        let leaf_material = unsafe { gpu::load_leaf_material(&gl, TEXTURE_DIR, &loaded_leaf) };
 
         let mut app = Self {
             gl: Arc::clone(&gl),
             lines: Arc::new(Mutex::new(lines)),
             mesh_gpu: Arc::new(Mutex::new(mesh_gpu)),
+            leaves_gpu: Arc::new(Mutex::new(leaves_gpu)),
             shadow: Arc::new(shadow),
             depth_pass: Arc::new(depth_pass),
+            leaf_depth_pass: Arc::new(leaf_depth_pass),
             color_pass: Arc::new(color_pass),
-            material: Arc::new(material),
+            bark_material,
+            leaf_material,
+            loaded_bark,
+            loaded_leaf,
             presets,
             preset_index: 0,
             params,
             skeleton,
             stats: SkeletonStats::default(),
             mesh_stats,
+            leaf_stats,
             aabb,
             camera: OrbitCamera {
                 target: Vec3::new(0.0, 6.0, 0.0),
@@ -177,6 +206,8 @@ impl App {
             wireframe: false,
             shadows: true,
             show_skeleton: false,
+            show_leaves: true,
+            leaf_translucency: 0.9,
             show_grid: true,
             use_normal_map: true,
             sun_azimuth: 40.0,
@@ -195,12 +226,35 @@ impl App {
         self.aabb = mesh.aabb();
         self.mesh_stats = (mesh.vertex_count(), mesh.triangle_count());
         self.mesh_gpu.lock().unwrap().upload(&self.gl, &mesh);
+        let leaves = build_leaves(&self.skeleton, &self.params);
+        self.leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
+        self.leaves_gpu.lock().unwrap().upload(&self.gl, &leaves);
+        self.sync_materials();
         self.gen_ms = t.elapsed().as_secs_f32() * 1000.0;
         self.stats = self.skeleton.stats();
         self.rebuild_overlay();
         if self.auto_frame {
             self.frame_camera();
             self.auto_frame = false;
+        }
+    }
+
+    /// Textures follow the species, so a preset switch has to swap them and hand the
+    /// old ones back rather than keep loading new ones on top.
+    fn sync_materials(&mut self) {
+        if self.params.mesh.bark_texture != self.loaded_bark {
+            self.bark_material.delete(&self.gl);
+            self.loaded_bark = self.params.mesh.bark_texture.clone();
+            self.bark_material =
+                unsafe { gpu::load_material(&self.gl, TEXTURE_DIR, &self.loaded_bark) };
+        }
+        if self.params.leaves.texture != self.loaded_leaf {
+            if let Some(old) = self.leaf_material.take() {
+                old.delete(&self.gl);
+            }
+            self.loaded_leaf = self.params.leaves.texture.clone();
+            self.leaf_material =
+                unsafe { gpu::load_leaf_material(&self.gl, TEXTURE_DIR, &self.loaded_leaf) };
         }
     }
 
@@ -302,6 +356,16 @@ impl App {
                 ui.selectable_value(&mut self.render_mode, RenderMode::UvChecker, "UV checker");
                 ui.selectable_value(&mut self.render_mode, RenderMode::Normals, "Normals");
             });
+        ui.checkbox(&mut self.show_leaves, "Leaves");
+        if self.leaf_material.is_none() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("no {}_albedo.png in {TEXTURE_DIR}", self.loaded_leaf),
+            );
+        }
+        ui.add(
+            egui::Slider::new(&mut self.leaf_translucency, 0.0..=2.0).text("Leaf translucency"),
+        );
         ui.checkbox(&mut self.wireframe, "Wireframe");
         ui.checkbox(&mut self.shadows, "Shadows");
         ui.checkbox(&mut self.use_normal_map, "Normal map");
@@ -315,6 +379,20 @@ impl App {
         ui.add(egui::Slider::new(&mut self.sun_elevation, 5.0..=85.0).text("Sun elevation"));
 
         ui.separator();
+        ui.label("Foliage");
+        let leaves = &mut self.params.leaves;
+        let mut leafy = leaves.enabled;
+        if ui.checkbox(&mut leafy, "Generate leaves").changed() {
+            leaves.enabled = leafy;
+            self.dirty = true;
+        }
+        shape_slider(ui, &mut self.params.leaves.density, 0.5..=60.0, "Leaves per metre", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.card_length, 0.03..=1.0, "Leaf length", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.card_width, 0.02..=1.0, "Leaf width", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.normal_blend, 0.0..=1.0, "Normal blend", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.droop_deg, -40.0..=70.0, "Leaf droop", &mut self.dirty);
+
+        ui.separator();
         ui.label("Stats");
         let s = &self.stats;
         ui.monospace(format!("nodes:  {}", s.node_count));
@@ -323,6 +401,8 @@ impl App {
         ui.monospace(format!("height: {:.1} m", s.height));
         ui.monospace(format!("verts:  {}", self.mesh_stats.0));
         ui.monospace(format!("tris:   {}", self.mesh_stats.1));
+        ui.monospace(format!("leaves: {}", self.leaf_stats.0));
+        ui.monospace(format!("l.tris: {}", self.leaf_stats.1));
         ui.monospace(format!("gen:    {:.2} ms", self.gen_ms));
 
         if ui.button("Frame tree").clicked() {
@@ -432,11 +512,17 @@ impl eframe::App for App {
                 self.camera_input(&resp, ctx);
 
                 let mesh_gpu = Arc::clone(&self.mesh_gpu);
+                let leaves_gpu = Arc::clone(&self.leaves_gpu);
                 let lines = Arc::clone(&self.lines);
                 let shadow = Arc::clone(&self.shadow);
                 let depth_pass = Arc::clone(&self.depth_pass);
+                let leaf_depth_pass = Arc::clone(&self.leaf_depth_pass);
                 let color_pass = Arc::clone(&self.color_pass);
-                let material = Arc::clone(&self.material);
+                let bark_material = self.bark_material;
+                let leaf_material = self.leaf_material;
+                let leaf_params =
+                    LeafMaterialParams::from_species(&self.params.leaves, self.leaf_translucency);
+                let draw_leaves = self.show_leaves && leaf_material.is_some();
                 let cam = self.camera;
                 let aabb = self.aabb;
                 let sun_dir = self.sun_dir();
@@ -456,6 +542,7 @@ impl eframe::App for App {
                     callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
                         let gl = painter.gl();
                         let mesh_gpu = mesh_gpu.lock().unwrap();
+                        let leaves_gpu = leaves_gpu.lock().unwrap();
                         let lines = lines.lock().unwrap();
                         let view_proj = cam.view_proj();
                         let mvp = view_proj.to_cols_array();
@@ -487,6 +574,17 @@ impl eframe::App for App {
                                 );
                                 mesh_gpu.bind_and_draw(gl);
                                 gl.use_program(None);
+                                // Leaves need their own alpha-tested depth pass or
+                                // the canopy casts the shadow of its solid quads.
+                                if let (true, Some(leaf_mat)) = (draw_leaves, leaf_material) {
+                                    leaf_depth_pass.draw(
+                                        gl,
+                                        &leaves_gpu,
+                                        lvp,
+                                        &leaf_mat,
+                                        leaf_params,
+                                    );
+                                }
                                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                             }
 
@@ -507,10 +605,27 @@ impl eframe::App for App {
                                 sun_color: Vec3::new(2.4, 2.25, 2.05),
                                 mode,
                                 use_normal_map,
-                                material: &material,
+                                material: &bark_material,
                                 shadow_depth: shadow.depth,
                             };
                             mesh_gpu.draw(gl, &draw_params);
+
+                            if let (true, Some(leaf_mat)) = (draw_leaves, leaf_material) {
+                                leaves_gpu.draw(
+                                    gl,
+                                    &LeafDrawParams {
+                                        view_proj,
+                                        light_view_proj: light_view_proj(aabb, sun_dir),
+                                        cam_pos: cam.eye(),
+                                        sun_dir,
+                                        sun_color: Vec3::new(2.4, 2.25, 2.05),
+                                        mode,
+                                        material: &leaf_mat,
+                                        shadow_depth: shadow.depth,
+                                        leaf: leaf_params,
+                                    },
+                                );
+                            }
 
                             if wire {
                                 color_pass.draw_wire(

@@ -5,7 +5,16 @@ use glam::{Mat4, Vec3};
 
 use crate::shaders;
 
-pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program {
+/// `attribs` names the vertex inputs in the order the VAO binds them. GLSL 150 has
+/// no `layout(location = ...)`, so without this the linker picks indices itself and a
+/// shader that skips an input silently shifts every later one. Binding a name the
+/// shader does not declare is ignored, so passing the full VAO layout is safe.
+pub unsafe fn compile_program(
+    gl: &glow::Context,
+    vs_src: &str,
+    fs_src: &str,
+    attribs: &[&str],
+) -> glow::Program {
     unsafe {
         let compile = |kind: u32, src: &str| {
             let shader = gl.create_shader(kind).expect("create_shader");
@@ -21,6 +30,9 @@ pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) ->
         let fs = compile(glow::FRAGMENT_SHADER, fs_src);
         gl.attach_shader(program, vs);
         gl.attach_shader(program, fs);
+        for (index, name) in attribs.iter().enumerate() {
+            gl.bind_attrib_location(program, index as u32, name);
+        }
         gl.link_program(program);
         if !gl.get_program_link_status(program) {
             panic!("program link: {}", gl.get_program_info_log(program));
@@ -47,7 +59,7 @@ pub struct GpuLines {
 impl GpuLines {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::LINES_VS, shaders::LINES_FS);
+            let program = compile_program(gl, shaders::LINES_VS, shaders::LINES_FS, &["a_pos", "a_col"]);
             let u_mvp = loc(gl, &program, "u_mvp");
             let vao = gl.create_vertex_array().expect("create vao");
             let vbo = gl.create_buffer().expect("create vbo");
@@ -115,13 +127,24 @@ impl GpuLines {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct MaterialTextures {
     pub albedo: glow::Texture,
     pub normal: glow::Texture,
     pub roughness: glow::Texture,
 }
 
-impl MaterialTextures {}
+impl MaterialTextures {
+    /// Materials are swapped whenever the species changes, so the old set has to go
+    /// back to the driver rather than leak one texture trio per switch.
+    pub fn delete(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_texture(self.albedo);
+            gl.delete_texture(self.normal);
+            gl.delete_texture(self.roughness);
+        }
+    }
+}
 
 pub unsafe fn create_texture(
     gl: &glow::Context,
@@ -267,10 +290,12 @@ pub fn procedural_bark_roughness() -> (Vec<u8>, u32, u32) {
     (px, S, S)
 }
 
-pub unsafe fn load_material(gl: &glow::Context, dir: &str) -> MaterialTextures {
+/// Loads `<dir>/<name>_albedo.png` and friends, falling back to the procedural bark
+/// so the viewer still runs against a bare checkout with no texture assets.
+pub unsafe fn load_material(gl: &glow::Context, dir: &str, name: &str) -> MaterialTextures {
     unsafe {
-        let load_or = |file: &str, fallback: fn() -> (Vec<u8>, u32, u32), srgb: bool| {
-            match load_image(&format!("{dir}/{file}")) {
+        let load_or = |suffix: &str, fallback: fn() -> (Vec<u8>, u32, u32), srgb: bool| {
+            match load_image(&format!("{dir}/{name}_{suffix}.png")) {
                 Some((data, w, h)) => create_texture(gl, &data, w, h, srgb),
                 None => {
                     let (data, w, h) = fallback();
@@ -279,10 +304,34 @@ pub unsafe fn load_material(gl: &glow::Context, dir: &str) -> MaterialTextures {
             }
         };
         MaterialTextures {
-            albedo: load_or("bark_albedo.png", procedural_bark_albedo, true),
-            normal: load_or("bark_normal.png", procedural_bark_normal, false),
-            roughness: load_or("bark_roughness.png", procedural_bark_roughness, false),
+            albedo: load_or("albedo", procedural_bark_albedo, true),
+            normal: load_or("normal", procedural_bark_normal, false),
+            roughness: load_or("roughness", procedural_bark_roughness, false),
         }
+    }
+}
+
+/// A leaf texture has no sensible procedural stand-in, so a missing one is reported
+/// rather than silently replaced by bark.
+pub unsafe fn load_leaf_material(
+    gl: &glow::Context,
+    dir: &str,
+    name: &str,
+) -> Option<MaterialTextures> {
+    unsafe {
+        let (data, w, h) = load_image(&format!("{dir}/{name}_albedo.png"))?;
+        let albedo = create_texture(gl, &data, w, h, true);
+        let load_or_flat = |suffix: &str, fill: u8| match load_image(&format!(
+            "{dir}/{name}_{suffix}.png"
+        )) {
+            Some((data, w, h)) => create_texture(gl, &data, w, h, false),
+            None => create_texture(gl, &[fill, fill, fill, 255], 1, 1, false),
+        };
+        Some(MaterialTextures {
+            albedo,
+            normal: load_or_flat("normal", 128),
+            roughness: load_or_flat("roughness", 200),
+        })
     }
 }
 
@@ -353,7 +402,7 @@ pub struct DepthPass {
 impl DepthPass {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::DEPTH_VS, shaders::DEPTH_FS);
+            let program = compile_program(gl, shaders::DEPTH_VS, shaders::DEPTH_FS, &["a_pos", "a_normal", "a_uv", "a_tangent"]);
             let u_light_view_proj = loc(gl, &program, "u_light_view_proj");
             Self {
                 program,
@@ -372,7 +421,7 @@ pub struct ColorPass {
 impl ColorPass {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::COLOR_VS, shaders::COLOR_FS);
+            let program = compile_program(gl, shaders::COLOR_VS, shaders::COLOR_FS, &["a_pos", "a_normal", "a_uv", "a_tangent"]);
             Self {
                 program,
                 u_view_proj: loc(gl, &program, "u_view_proj"),
@@ -440,7 +489,7 @@ pub struct MeshDrawParams<'a> {
 impl GpuMesh {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::MESH_VS, shaders::MESH_FS);
+            let program = compile_program(gl, shaders::MESH_VS, shaders::MESH_FS, &["a_pos", "a_normal", "a_uv", "a_tangent"]);
             let vao = gl.create_vertex_array().expect("mesh vao");
             let vbo_pos = gl.create_buffer().expect("vbo pos");
             let vbo_nrm = gl.create_buffer().expect("vbo nrm");
@@ -566,6 +615,263 @@ impl GpuMesh {
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.normal));
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
+            gl.active_texture(glow::TEXTURE3);
+            gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
+            self.bind_and_draw(gl);
+            gl.active_texture(glow::TEXTURE0);
+            gl.use_program(None);
+        }
+    }
+}
+
+/// Which atlas cells a leaf card samples, and how hard the alpha test bites.
+#[derive(Clone, Copy)]
+pub struct LeafMaterialParams {
+    pub atlas_scale: [f32; 2],
+    pub atlas_front: [f32; 2],
+    pub atlas_back: [f32; 2],
+    pub alpha_cutoff: f32,
+    pub translucency: f32,
+}
+
+impl LeafMaterialParams {
+    pub fn from_species(lp: &arbor_core::LeafParams, translucency: f32) -> Self {
+        let cols = lp.atlas_cols.max(1);
+        let rows = lp.atlas_rows.max(1);
+        let cell = |index: u32| {
+            let i = index.min(cols * rows - 1);
+            [
+                (i % cols) as f32 / cols as f32,
+                (i / cols) as f32 / rows as f32,
+            ]
+        };
+        Self {
+            atlas_scale: [1.0 / cols as f32, 1.0 / rows as f32],
+            atlas_front: cell(lp.atlas_front),
+            atlas_back: cell(lp.atlas_back),
+            alpha_cutoff: 0.35,
+            translucency,
+        }
+    }
+}
+
+pub struct LeafDepthPass {
+    pub program: glow::Program,
+    u_light_view_proj: glow::UniformLocation,
+    u_atlas_scale: glow::UniformLocation,
+    u_atlas_front: glow::UniformLocation,
+    u_alpha_cutoff: glow::UniformLocation,
+}
+
+impl LeafDepthPass {
+    pub fn new(gl: &glow::Context) -> Self {
+        unsafe {
+            let program = compile_program(gl, shaders::LEAF_DEPTH_VS, shaders::LEAF_DEPTH_FS, &["a_pos", "a_normal", "a_uv", "a_tint"]);
+            gl.use_program(Some(program));
+            gl.uniform_1_i32(Some(&loc(gl, &program, "u_albedo_tex")), 0);
+            gl.use_program(None);
+            Self {
+                u_light_view_proj: loc(gl, &program, "u_light_view_proj"),
+                u_atlas_scale: loc(gl, &program, "u_atlas_scale"),
+                u_atlas_front: loc(gl, &program, "u_atlas_front"),
+                u_alpha_cutoff: loc(gl, &program, "u_alpha_cutoff"),
+                program,
+            }
+        }
+    }
+
+    pub unsafe fn draw(
+        &self,
+        gl: &glow::Context,
+        leaves: &GpuLeaves,
+        light_view_proj: Mat4,
+        material: &MaterialTextures,
+        p: LeafMaterialParams,
+    ) {
+        unsafe {
+            gl.use_program(Some(self.program));
+            gl.uniform_matrix_4_f32_slice(
+                Some(&self.u_light_view_proj),
+                false,
+                &light_view_proj.to_cols_array(),
+            );
+            gl.uniform_2_f32(Some(&self.u_atlas_scale), p.atlas_scale[0], p.atlas_scale[1]);
+            gl.uniform_2_f32(Some(&self.u_atlas_front), p.atlas_front[0], p.atlas_front[1]);
+            gl.uniform_1_f32(Some(&self.u_alpha_cutoff), p.alpha_cutoff);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(material.albedo));
+            leaves.bind_and_draw(gl);
+            gl.use_program(None);
+        }
+    }
+}
+
+pub struct LeafDrawParams<'a> {
+    pub view_proj: Mat4,
+    pub light_view_proj: Mat4,
+    pub cam_pos: Vec3,
+    pub sun_dir: Vec3,
+    pub sun_color: Vec3,
+    pub mode: i32,
+    pub material: &'a MaterialTextures,
+    pub shadow_depth: glow::Texture,
+    pub leaf: LeafMaterialParams,
+}
+
+pub struct GpuLeaves {
+    program: glow::Program,
+    vao: glow::VertexArray,
+    vbo_pos: glow::Buffer,
+    vbo_nrm: glow::Buffer,
+    vbo_uv: glow::Buffer,
+    vbo_tint: glow::Buffer,
+    ibo: glow::Buffer,
+    index_count: i32,
+    u_view_proj: glow::UniformLocation,
+    u_light_view_proj: glow::UniformLocation,
+    u_cam_pos: glow::UniformLocation,
+    u_sun_dir: glow::UniformLocation,
+    u_sun_color: glow::UniformLocation,
+    u_atlas_scale: glow::UniformLocation,
+    u_atlas_front: glow::UniformLocation,
+    u_atlas_back: glow::UniformLocation,
+    u_alpha_cutoff: glow::UniformLocation,
+    u_translucency: glow::UniformLocation,
+    u_mode: glow::UniformLocation,
+}
+
+impl GpuLeaves {
+    pub fn new(gl: &glow::Context) -> Self {
+        unsafe {
+            let program = compile_program(gl, shaders::LEAF_VS, shaders::LEAF_FS, &["a_pos", "a_normal", "a_uv", "a_tint"]);
+            let vao = gl.create_vertex_array().expect("leaf vao");
+            let vbo_pos = gl.create_buffer().expect("leaf pos");
+            let vbo_nrm = gl.create_buffer().expect("leaf nrm");
+            let vbo_uv = gl.create_buffer().expect("leaf uv");
+            let vbo_tint = gl.create_buffer().expect("leaf tint");
+            let ibo = gl.create_buffer().expect("leaf ibo");
+
+            gl.bind_vertex_array(Some(vao));
+            for (slot, buffer, size, stride) in [
+                (0u32, vbo_pos, 3i32, 12i32),
+                (1, vbo_nrm, 3, 12),
+                (2, vbo_uv, 2, 8),
+                (3, vbo_tint, 4, 16),
+            ] {
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
+                gl.enable_vertex_attrib_array(slot);
+                gl.vertex_attrib_pointer_f32(slot, size, glow::FLOAT, false, stride, 0);
+            }
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
+
+            let u = |name: &str| loc(gl, &program, name);
+            gl.use_program(Some(program));
+            gl.uniform_1_i32(Some(&u("u_albedo_tex")), 0);
+            gl.uniform_1_i32(Some(&u("u_rough_tex")), 2);
+            gl.uniform_1_i32(Some(&u("u_shadow_tex")), 3);
+            gl.use_program(None);
+
+            Self {
+                vao,
+                vbo_pos,
+                vbo_nrm,
+                vbo_uv,
+                vbo_tint,
+                ibo,
+                index_count: 0,
+                u_view_proj: u("u_view_proj"),
+                u_light_view_proj: u("u_light_view_proj"),
+                u_cam_pos: u("u_cam_pos"),
+                u_sun_dir: u("u_sun_dir"),
+                u_sun_color: u("u_sun_color"),
+                u_atlas_scale: u("u_atlas_scale"),
+                u_atlas_front: u("u_atlas_front"),
+                u_atlas_back: u("u_atlas_back"),
+                u_alpha_cutoff: u("u_alpha_cutoff"),
+                u_translucency: u("u_translucency"),
+                u_mode: u("u_mode"),
+                program,
+            }
+        }
+    }
+
+    pub fn upload(&mut self, gl: &glow::Context, leaves: &arbor_core::LeafMesh) {
+        unsafe {
+            gl.bind_vertex_array(Some(self.vao));
+            for (buffer, data) in [
+                (self.vbo_pos, cast_slice(&leaves.positions)),
+                (self.vbo_nrm, cast_slice(&leaves.normals)),
+                (self.vbo_uv, cast_slice(&leaves.uvs)),
+                (self.vbo_tint, cast_slice(&leaves.tints)),
+            ] {
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STATIC_DRAW);
+            }
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(self.ibo));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                cast_slice(&leaves.indices),
+                glow::STATIC_DRAW,
+            );
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
+        }
+        self.index_count = leaves.indices.len() as i32;
+    }
+
+    pub unsafe fn bind_and_draw(&self, gl: &glow::Context) {
+        unsafe {
+            if self.index_count == 0 {
+                return;
+            }
+            // Cards are single quads lit from either side, so culling has to be off
+            // and the fragment shader decides which face it is looking at.
+            gl.disable(glow::CULL_FACE);
+            gl.bind_vertex_array(Some(self.vao));
+            gl.draw_elements(glow::TRIANGLES, self.index_count, glow::UNSIGNED_INT, 0);
+            gl.bind_vertex_array(None);
+        }
+    }
+
+    pub fn draw(&self, gl: &glow::Context, p: &LeafDrawParams) {
+        if self.index_count == 0 {
+            return;
+        }
+        unsafe {
+            gl.use_program(Some(self.program));
+            gl.uniform_matrix_4_f32_slice(
+                Some(&self.u_view_proj),
+                false,
+                &p.view_proj.to_cols_array(),
+            );
+            gl.uniform_matrix_4_f32_slice(
+                Some(&self.u_light_view_proj),
+                false,
+                &p.light_view_proj.to_cols_array(),
+            );
+            gl.uniform_3_f32(Some(&self.u_cam_pos), p.cam_pos.x, p.cam_pos.y, p.cam_pos.z);
+            gl.uniform_3_f32(Some(&self.u_sun_dir), p.sun_dir.x, p.sun_dir.y, p.sun_dir.z);
+            gl.uniform_3_f32(
+                Some(&self.u_sun_color),
+                p.sun_color.x,
+                p.sun_color.y,
+                p.sun_color.z,
+            );
+            let m = p.leaf;
+            gl.uniform_2_f32(Some(&self.u_atlas_scale), m.atlas_scale[0], m.atlas_scale[1]);
+            gl.uniform_2_f32(Some(&self.u_atlas_front), m.atlas_front[0], m.atlas_front[1]);
+            gl.uniform_2_f32(Some(&self.u_atlas_back), m.atlas_back[0], m.atlas_back[1]);
+            gl.uniform_1_f32(Some(&self.u_alpha_cutoff), m.alpha_cutoff);
+            gl.uniform_1_f32(Some(&self.u_translucency), m.translucency);
+            gl.uniform_1_i32(Some(&self.u_mode), p.mode);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE2);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
             gl.active_texture(glow::TEXTURE3);

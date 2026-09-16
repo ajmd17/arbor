@@ -62,6 +62,8 @@ pub struct MeshParams {
     pub flare_height: f32,
     pub tip_length: f32,
     pub socket_flare: f32,
+    /// Base name of the bark texture set under `assets/textures`.
+    pub bark_texture: String,
 }
 
 impl Default for MeshParams {
@@ -75,6 +77,7 @@ impl Default for MeshParams {
             flare_height: 1.4,
             tip_length: 0.06,
             socket_flare: 0.35,
+            bark_texture: "bark".to_string(),
         }
     }
 }
@@ -84,7 +87,12 @@ impl Default for MeshParams {
 pub struct StemParams {
     pub length: f32,
     pub length_variance: f32,
+    /// Base radius of a stem at this level growing at full vigor. The trunk uses it
+    /// directly; a branch takes the smaller of this and `radius_ratio` of whatever
+    /// its parent measures where it attaches.
     pub radius: f32,
+    /// Ceiling on a stem base radius as a fraction of its parent at the attachment
+    /// point. Applied once per stem, never per segment.
     pub radius_ratio: f32,
     pub taper: f32,
     pub da_vinci_exponent: f32,
@@ -94,6 +102,12 @@ pub struct StemParams {
     pub gravity: f32,
     pub vigor_falloff: f32,
     pub split_probability: f32,
+    /// How far a co-dominant fork leans away from the stem it splits from.
+    pub split_angle_deg: f32,
+    /// Earliest point along a stem, as a fraction of its length, where it may fork.
+    /// Without it a trunk can split at ground level and grow a second pole flush
+    /// against the first.
+    pub split_start_fraction: f32,
     pub children: ChildParams,
 }
 
@@ -113,6 +127,8 @@ impl StemParams {
             gravity: 0.012,
             vigor_falloff: 0.5,
             split_probability: 0.04,
+            split_angle_deg: 22.0,
+            split_start_fraction: 0.3,
             children: ChildParams::default(),
         }
     }
@@ -133,6 +149,8 @@ impl Default for StemParams {
             gravity: 0.005,
             vigor_falloff: 0.35,
             split_probability: 0.02,
+            split_angle_deg: 25.0,
+            split_start_fraction: 0.35,
             children: ChildParams::default(),
         }
     }
@@ -177,22 +195,72 @@ pub enum ChildPattern {
 #[serde(default)]
 pub struct LeafParams {
     pub enabled: bool,
-    pub card_size: f32,
+    /// Leaves grow on stems at this level and deeper, so the canopy sits on twigs
+    /// rather than on structural limbs.
+    pub min_level: u8,
+    /// Nothing thicker than this carries leaves, whatever its level.
+    pub max_twig_radius: f32,
+    /// Cards per metre of twig.
     pub density: f32,
+    pub card_length: f32,
+    pub card_width: f32,
+    pub size_variance: f32,
+    /// Angle between the leaf and the twig it grows from.
+    pub crotch_angle_deg: f32,
+    pub crotch_variance_deg: f32,
+    /// Roll between successive leaves around the twig.
+    pub phyllotaxis_deg: f32,
+    /// How far the blade hangs under its own weight.
+    pub droop_deg: f32,
+    /// Random roll of the blade about its own length.
+    pub twist_deg: f32,
+    /// How far the shading normal leans from the flat card toward the outward
+    /// direction of the crown. This is what makes a pile of quads light like a
+    /// canopy; at 0 every leaf shades as the flat plane it really is.
+    pub normal_blend: f32,
+    /// Bend applied to the normal across the width of a card, for a rounded blade.
+    pub curvature: f32,
+    /// Flat colour multiplier for the whole canopy, for pulling a leaf texture to
+    /// the colour a species wants without re-authoring the art.
+    pub tint: [f32; 3],
     pub hue_variance: f32,
-    pub atlas_col: u32,
-    pub atlas_row: u32,
+    /// Darkening applied to leaves deep inside the crown.
+    pub interior_shade: f32,
+    pub atlas_cols: u32,
+    pub atlas_rows: u32,
+    /// Atlas cells, counted left to right then top to bottom, for the lit face and
+    /// the underside of a leaf.
+    pub atlas_front: u32,
+    pub atlas_back: u32,
+    /// Base name of the texture set under `assets/textures`.
+    pub texture: String,
 }
 
 impl Default for LeafParams {
     fn default() -> Self {
         Self {
             enabled: false,
-            card_size: 0.35,
-            density: 0.7,
-            hue_variance: 0.1,
-            atlas_col: 0,
-            atlas_row: 0,
+            min_level: 2,
+            max_twig_radius: 0.08,
+            density: 14.0,
+            card_length: 0.22,
+            card_width: 0.16,
+            size_variance: 0.25,
+            crotch_angle_deg: 55.0,
+            crotch_variance_deg: 18.0,
+            phyllotaxis_deg: 137.5,
+            droop_deg: 22.0,
+            twist_deg: 35.0,
+            normal_blend: 0.55,
+            curvature: 0.35,
+            tint: [1.0, 1.0, 1.0],
+            hue_variance: 0.12,
+            interior_shade: 0.35,
+            atlas_cols: 1,
+            atlas_rows: 1,
+            atlas_front: 0,
+            atlas_back: 0,
+            texture: "leaf".to_string(),
         }
     }
 }

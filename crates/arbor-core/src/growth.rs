@@ -22,6 +22,11 @@ const BEND_WANDER: f32 = 0.22;
 /// A fork takes this share of the parent vigor; the original stem keeps the rest.
 const SPLIT_VIGOR: f32 = 0.72;
 const SPLIT_KEEP: f32 = 0.86;
+/// Length a stem keeps at zero vigor. Each level already declares its own `length`,
+/// so letting vigor scale length outright would shorten deep twigs twice over and
+/// collapse them into specks. Vigor modulates the declared length, it does not
+/// replace it.
+const LENGTH_FLOOR: f32 = 0.35;
 
 struct GrowCtx<'a> {
     params: &'a SpeciesParams,
@@ -86,9 +91,10 @@ fn grow_stem(
     };
     let mut rng = tree_rng.stream(path);
     let base_pos = skeleton.nodes[base_node as usize].position;
-    let vigor_clamped = vigor.clamp(0.1, 1.6);
+    let drive = vigor.clamp(0.0, 1.6);
+    let length_factor = (LENGTH_FLOOR + (1.0 - LENGTH_FLOOR) * drive).min(1.6);
     let stem_len = sp.length
-        * vigor_clamped
+        * length_factor
         * range_f32(&mut rng, 1.0 - sp.length_variance, 1.0 + sp.length_variance).max(0.2);
     let seg_count =
         ((stem_len / sp.segment_length.max(1e-3)).ceil() as usize).clamp(2, MAX_SEGMENTS);
@@ -104,17 +110,23 @@ fn grow_stem(
     let mut azimuth = range_f32(&mut rng, 0.0, std::f32::consts::TAU);
     let mut slot: u32 = 0;
     let can_spawn = level + 1 < ctx.levels_total;
+    // The leader keeps its own course, but a co-dominant fork is part of the crown
+    // and has to be shaped by the envelope like any branch, or the tree grows as a
+    // bundle of parallel poles.
+    let shaped_by_envelope = level > 0 || split_depth > 0;
 
     for seg in 0..seg_count {
         let jitter = rand_perpendicular(&mut rng, cur_dir);
         bend = ortho_unit(bend * (1.0 - BEND_WANDER) + jitter * BEND_WANDER, cur_dir);
-        let next_dir = steer(ctx, sp, cur_dir, pos, level, bend);
+        let next_dir = steer(ctx, sp, cur_dir, pos, bend, seg_len, shaped_by_envelope);
         frame = transport(cur_dir, next_dir, frame);
         bend = transport(cur_dir, next_dir, bend);
         cur_dir = next_dir;
         pos += cur_dir * seg_len;
 
-        if level > 0 && ctx.env.density(pos) < ctx.params.envelope.kill_threshold {
+        // Anything the envelope steers, it also prunes. Steering a stem that can
+        // never be cut just leaves it circling the crown boundary forever.
+        if shaped_by_envelope && ctx.env.density(pos) < ctx.params.envelope.kill_threshold {
             break;
         }
 
@@ -145,12 +157,14 @@ fn grow_stem(
         if can_spawn
             && split_depth < ctx.params.max_split_depth
             && sp.split_probability > 0.0
+            && frac >= sp.split_start_fraction
             && skeleton.nodes.len() < MAX_NODES
             && rng.random::<f32>() < sp.split_probability
         {
             slot += 1;
-            let az = azimuth + 1.5708 + range_f32(&mut rng, -0.6, 0.6);
-            let crotch = 0.21 + range_f32(&mut rng, 0.0, 0.35);
+            let az = azimuth + std::f32::consts::FRAC_PI_2 + range_f32(&mut rng, -0.6, 0.6);
+            let spread = sp.split_angle_deg.to_radians().max(0.02);
+            let crotch = spread * range_f32(&mut rng, 0.7, 1.3);
             let split_dir = child_dir(cur_dir, frame, az, crotch);
             let p = child_path(path, slot);
             let fork_stem = skeleton.nodes.len() as u32;
@@ -231,7 +245,7 @@ fn spawn_children(
         ChildPattern::Whorl { every, count } => {
             let every = every.max(1);
             let count = count.max(1);
-            if ((seg + 1) as u32) % every != 0 {
+            if !((seg + 1) as u32).is_multiple_of(every) {
                 return;
             }
             // Roll the whole whorl on so successive whorls do not stack up in the
@@ -263,19 +277,32 @@ fn child_dir(forward: Vec3, frame: Vec3, azimuth: f32, crotch: f32) -> Vec3 {
     norm_or_up(f * crotch.cos() + lateral * crotch.sin())
 }
 
-fn steer(ctx: &GrowCtx, sp: &StemParams, dir: Vec3, pos: Vec3, level: u8, bend: Vec3) -> Vec3 {
+fn steer(
+    ctx: &GrowCtx,
+    sp: &StemParams,
+    dir: Vec3,
+    pos: Vec3,
+    bend: Vec3,
+    seg_len: f32,
+    shaped_by_envelope: bool,
+) -> Vec3 {
     let mut d = dir
         + Vec3::Y * sp.phototropism * ctx.params.phototropism_multiplier
         - Vec3::Y * sp.gravity * ctx.params.gravity_multiplier;
     d += bend * sp.curvature;
 
-    if level > 0 {
+    if shaped_by_envelope {
         let dens = ctx.env.density(pos);
         if dens < 1.0 {
             let target = ctx.env.steer_target(pos);
             let pull = Vec3::new(target.x - pos.x, 0.0, target.z - pos.z);
-            if pull.length_squared() > 1e-8 {
-                d += pull.normalize() * ctx.env.pull_strength * (1.0 - dens);
+            let error = pull.length();
+            if error > 1e-4 {
+                // Ease off once the stem is within a step of where it is being
+                // steered, otherwise a fixed-strength pull overshoots the axis every
+                // segment and the stem snakes instead of settling.
+                let damp = (error / seg_len.max(1e-3)).min(1.0);
+                d += pull / error * ctx.env.pull_strength * (1.0 - dens) * damp;
             }
         }
     }
@@ -366,7 +393,108 @@ fn da_vinci_exp(params: &SpeciesParams, level: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{parse_species, PINE_RON};
+    use crate::species::{parse_species, OAK_RON, PINE_RON};
+
+    #[test]
+    fn trunk_keeps_its_thickness_up_the_stem() {
+        // The taper ratio applies once over a whole stem. Compounding it per segment
+        // instead shrinks the trunk to the radius floor within a couple of metres.
+        for src in [OAK_RON, PINE_RON] {
+            let params = parse_species(src).unwrap();
+            let sk = grow(&params);
+            let trunk_stem = sk.nodes[0].stem;
+            let mid = sk
+                .nodes
+                .iter()
+                .filter(|n| n.stem == trunk_stem)
+                .min_by(|a, b| {
+                    (a.stem_fraction - 0.5)
+                        .abs()
+                        .total_cmp(&(b.stem_fraction - 0.5).abs())
+                })
+                .expect("trunk has nodes");
+            assert!(
+                mid.radius > params.trunk.radius * 0.4,
+                "{}: trunk is {} at half its length, base is {}",
+                params.name,
+                mid.radius,
+                params.trunk.radius
+            );
+        }
+    }
+
+    #[test]
+    fn trunk_radius_decreases_monotonically() {
+        let params = parse_species(OAK_RON).unwrap();
+        let sk = grow(&params);
+        let trunk_stem = sk.nodes[0].stem;
+        let mut run: Vec<&crate::skeleton::SkeletonNode> =
+            sk.nodes.iter().filter(|n| n.stem == trunk_stem).collect();
+        run.sort_by(|a, b| a.stem_fraction.total_cmp(&b.stem_fraction));
+        for pair in run.windows(2) {
+            assert!(
+                pair[1].radius <= pair[0].radius + 1e-4,
+                "trunk widens going up: {} then {}",
+                pair[0].radius,
+                pair[1].radius
+            );
+        }
+    }
+
+    #[test]
+    fn deepest_twigs_are_not_degenerate() {
+        // Each level declares its own length, so vigor may only modulate it. Letting
+        // vigor scale length outright shortens twigs once per level and leaves the
+        // deepest ones as centimetre-long specks.
+        let params = parse_species(OAK_RON).unwrap();
+        let deepest = params.max_levels - 1;
+        let sk = grow(&params);
+        let mut lengths: Vec<f32> = sk
+            .stem_runs()
+            .iter()
+            .filter(|run| sk.nodes[run[0] as usize].level == deepest)
+            .map(|run| {
+                // A stem starts at its attachment point, which belongs to the parent
+                // run, so that first segment counts toward its length.
+                let first = &sk.nodes[run[0] as usize];
+                let from_parent = first
+                    .parent
+                    .map(|p| (first.position - sk.nodes[p as usize].position).length())
+                    .unwrap_or(0.0);
+                from_parent
+                    + run
+                        .windows(2)
+                        .map(|w| {
+                            (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position)
+                                .length()
+                        })
+                        .sum::<f32>()
+            })
+            .collect();
+        assert!(lengths.len() > 20, "expected twigs, got {}", lengths.len());
+        lengths.sort_by(f32::total_cmp);
+        let median = lengths[lengths.len() / 2];
+        assert!(median > 0.15, "median twig length is only {median}");
+    }
+
+    #[test]
+    fn a_stem_is_one_unbroken_run_of_nodes() {
+        let params = parse_species(OAK_RON).unwrap();
+        let sk = grow(&params);
+        for run in sk.stem_runs() {
+            for w in run.windows(2) {
+                let child = &sk.nodes[w[1] as usize];
+                assert_eq!(
+                    child.parent,
+                    Some(w[0]),
+                    "stem {} is not a chain: {} does not follow {}",
+                    child.stem,
+                    w[1],
+                    w[0]
+                );
+            }
+        }
+    }
 
     #[test]
     fn same_seed_gives_identical_skeleton() {

@@ -1,5 +1,5 @@
 use arbor_core::species::{builtin_presets, parse_species};
-use arbor_core::{build_mesh, grow, Mesh};
+use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -11,6 +11,7 @@ fn main() {
     let mut species_src: Option<String> = None;
     let mut seed_override: Option<u64> = None;
     let mut obj_out: Option<String> = None;
+    let mut no_leaves = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -23,6 +24,7 @@ fn main() {
                 i += 1;
                 obj_out = args.get(i).cloned();
             }
+            "--no-leaves" => no_leaves = true,
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -48,10 +50,14 @@ fn main() {
     if let Some(seed) = seed_override {
         params.seed = seed;
     }
+    if no_leaves {
+        params.leaves.enabled = false;
+    }
 
     let t = std::time::Instant::now();
     let skeleton = grow(&params);
     let mesh = build_mesh(&skeleton, &params);
+    let leaves = build_leaves(&skeleton, &params);
     let dt = t.elapsed();
     let stats = skeleton.stats();
 
@@ -60,10 +66,12 @@ fn main() {
     println!("{stats:#?}");
     println!("verts:   {}", mesh.vertex_count());
     println!("tris:    {}", mesh.triangle_count());
+    println!("leaves:  {}", leaves.leaf_count());
+    println!("l.tris:  {}", leaves.triangle_count());
     println!("gen:     {:.3} ms", dt.as_secs_f64() * 1000.0);
 
     if let Some(path) = obj_out {
-        write_obj(&mesh, &path).unwrap_or_else(|e| {
+        write_obj(&mesh, &leaves, &params, &path).unwrap_or_else(|e| {
             eprintln!("obj write failed: {e}");
             std::process::exit(1);
         });
@@ -71,26 +79,83 @@ fn main() {
     }
 }
 
-fn write_obj(mesh: &Mesh, path: &str) -> std::io::Result<()> {
+fn write_obj(
+    mesh: &Mesh,
+    leaves: &LeafMesh,
+    params: &SpeciesParams,
+    path: &str,
+) -> std::io::Result<()> {
     use std::fmt::Write as _;
     let mut out = String::from("# arbor tree mesh\n");
-    for p in &mesh.positions {
-        let _ = writeln!(out, "v {} {} {}", p[0], p[1], p[2]);
+    let emit = |out: &mut String,
+                group: &str,
+                positions: &[[f32; 3]],
+                uvs: &[[f32; 2]],
+                normals: &[[f32; 3]],
+                indices: &[u32],
+                base: u32| {
+        let _ = writeln!(out, "g {group}");
+        for p in positions {
+            let _ = writeln!(out, "v {} {} {}", p[0], p[1], p[2]);
+        }
+        for uv in uvs {
+            let _ = writeln!(out, "vt {} {}", uv[0], uv[1]);
+        }
+        for n in normals {
+            let _ = writeln!(out, "vn {} {} {}", n[0], n[1], n[2]);
+        }
+        for tri in indices.chunks_exact(3) {
+            let (a, b, c) = (
+                tri[0] + base + 1,
+                tri[1] + base + 1,
+                tri[2] + base + 1,
+            );
+            let _ = writeln!(out, "f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}");
+        }
+    };
+
+    emit(
+        &mut out,
+        "bark",
+        &mesh.positions,
+        &mesh.uvs,
+        &mesh.normals,
+        &mesh.indices,
+        0,
+    );
+
+    if !leaves.is_empty() {
+        // Leaf UVs are card-local so the viewer can flip a card to its back cell.
+        // An exported mesh has no such shader, so bake the front cell in.
+        let lp = &params.leaves;
+        let (cols, rows) = (lp.atlas_cols.max(1), lp.atlas_rows.max(1));
+        let cell = lp.atlas_front.min(cols * rows - 1);
+        let origin = [
+            (cell % cols) as f32 / cols as f32,
+            (cell / cols) as f32 / rows as f32,
+        ];
+        let scale = [1.0 / cols as f32, 1.0 / rows as f32];
+        let uvs: Vec<[f32; 2]> = leaves
+            .uvs
+            .iter()
+            .map(|uv| [origin[0] + uv[0] * scale[0], origin[1] + uv[1] * scale[1]])
+            .collect();
+        emit(
+            &mut out,
+            "leaves",
+            &leaves.positions,
+            &uvs,
+            &leaves.normals,
+            &leaves.indices,
+            mesh.positions.len() as u32,
+        );
     }
-    for uv in &mesh.uvs {
-        let _ = writeln!(out, "vt {} {}", uv[0], uv[1]);
-    }
-    for n in &mesh.normals {
-        let _ = writeln!(out, "vn {} {} {}", n[0], n[1], n[2]);
-    }
-    for tri in mesh.indices.chunks_exact(3) {
-        let (a, b, c) = (tri[0] as usize + 1, tri[1] as usize + 1, tri[2] as usize + 1);
-        let _ = writeln!(out, "f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}");
-    }
+
     std::fs::write(path, out)
 }
 
 fn print_usage() {
-    println!("arbor-cli <pine|oak|path/to/species.ron> [--seed N] [--obj out.obj]");
-    println!("Grows a tree, builds the mesh, prints stats. Writes triangle OBJ with --obj.");
+    println!("arbor-cli <pine|oak|path/to/species.ron> [--seed N] [--obj out.obj] [--no-leaves]");
+    println!("Grows a tree, builds bark and leaf meshes, prints stats.");
+    println!("--obj writes a triangle OBJ with separate `bark` and `leaves` groups.");
 }
