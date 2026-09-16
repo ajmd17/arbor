@@ -2,16 +2,25 @@
 //! from a terminal or a script.
 //!
 //! cargo run --release -p arbor-viewer --example preview -- \
-//!     <pine|oak|path.ron> out.png [--seed N] [--yaw R] [--size N] [--no-leaves]
+//!     <pine|oak|path.ron> out.png [--seed N] [--yaw R] [--size N] [--zoom F]
+//!     [--aim 0..1] [--no-leaves] [--plain-mips]
 //!
 //! This is a deliberately small software rasteriser that mirrors what the viewer
 //! shaders do — alpha-tested leaf cards sampled from their atlas, wrapped diffuse and
 //! backlit transmission — not a second renderer to keep in sync feature by feature.
+//!
+//! It samples a real mip chain, chosen per triangle, because the way a leaf texture
+//! is minified is exactly what decides whether a canopy survives being zoomed away
+//! from. `--plain-mips` swaps the coverage-preserving chain for a plain box-filtered
+//! one, which is what the disappearing-canopy bug looked like.
+
+#[path = "../src/mipmap.rs"]
+mod mipmap;
 
 use arbor_core::species::{builtin_presets, parse_species};
 use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
 use glam::{Mat4, Vec2, Vec3, Vec4, Vec4Swizzles};
-use image::{Rgb, RgbImage, RgbaImage};
+use image::{Rgb, RgbImage};
 
 const TEXTURE_DIR: &str = "assets/textures";
 const ALPHA_CUTOFF: f32 = 0.35;
@@ -31,6 +40,8 @@ struct Vert {
     normal: Vec3,
     uv: Vec2,
     tint: Vec4,
+    /// Size in texels of the region this triangle samples, for picking a mip level.
+    tex_size: Vec2,
 }
 
 fn main() {
@@ -41,6 +52,7 @@ fn main() {
     let yaw: f32 = flag("--yaw").and_then(|s| s.parse().ok()).unwrap_or(0.6);
     let size: usize = flag("--size").and_then(|s| s.parse().ok()).unwrap_or(1000);
     let want_leaves = !args.iter().any(|a| a == "--no-leaves");
+    let preserve_coverage = !args.iter().any(|a| a == "--plain-mips");
 
     let src = builtin_presets()
         .into_iter()
@@ -56,8 +68,14 @@ fn main() {
     let sk = grow(&params);
     let mesh = build_mesh(&sk, &params);
     let leaves = build_leaves(&sk, &params);
-    let bark = load(&format!("{TEXTURE_DIR}/{}_albedo.png", params.mesh.bark_texture));
-    let leaf_tex = load(&format!("{TEXTURE_DIR}/{}_albedo.png", params.leaves.texture));
+    let bark = Tex::load(
+        &format!("{TEXTURE_DIR}/{}_albedo.png", params.mesh.bark_texture),
+        false,
+    );
+    let leaf_tex = Tex::load(
+        &format!("{TEXTURE_DIR}/{}_albedo.png", params.leaves.texture),
+        preserve_coverage,
+    );
 
     let (min, max) = mesh.aabb();
     let mut lo = Vec3::from(min);
@@ -66,10 +84,15 @@ fn main() {
         lo = lo.min(Vec3::from(*p));
         hi = hi.max(Vec3::from(*p));
     }
-    let center = (lo + hi) * 0.5;
+    let zoom: f32 = flag("--zoom").and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let aim: f32 = flag("--aim").and_then(|s| s.parse().ok()).unwrap_or(-1.0);
+    let mut center = (lo + hi) * 0.5;
+    if aim >= 0.0 {
+        center.y = lo.y + (hi.y - lo.y) * aim;
+    }
     let extent = (hi - lo).length().max(1.0);
-    let dist = extent * 0.95;
-    let eye = center + Vec3::new(yaw.sin() * dist, extent * 0.08, yaw.cos() * dist);
+    let dist = extent * 0.95 / zoom.max(0.05);
+    let eye = center + Vec3::new(yaw.sin() * dist, extent * 0.08 / zoom.max(0.05), yaw.cos() * dist);
     let vp = Mat4::perspective_rh(50f32.to_radians(), 1.0, 0.05, dist * 6.0)
         * Mat4::look_at_rh(eye, center, Vec3::Y);
     let sun = Vec3::new(0.45, 0.72, 0.52).normalize();
@@ -102,43 +125,114 @@ fn main() {
     );
 }
 
-fn load(path: &str) -> Option<RgbaImage> {
-    let img = image::open(path).ok()?.to_rgba8();
-    println!("  texture {path} {}x{}", img.width(), img.height());
-    Some(img)
+/// A texture and its mip chain, sampled with a per-triangle level of detail.
+struct Tex {
+    levels: Vec<mipmap::MipLevel>,
 }
 
-fn sample(tex: Option<&RgbaImage>, uv: Vec2) -> Vec4 {
-    let Some(tex) = tex else {
-        return Vec4::new(0.45, 0.38, 0.3, 1.0);
-    };
-    let (w, h) = (tex.width(), tex.height());
-    let x = ((uv.x.rem_euclid(1.0)) * w as f32) as u32 % w;
-    let y = ((uv.y.rem_euclid(1.0)) * h as f32) as u32 % h;
-    let p = tex.get_pixel(x, y).0;
-    // The textures are sRGB; shading happens in linear space.
-    let lin = |v: u8| (v as f32 / 255.0).powf(2.2);
-    Vec4::new(lin(p[0]), lin(p[1]), lin(p[2]), p[3] as f32 / 255.0)
+impl Tex {
+    fn load(path: &str, preserve_coverage: bool) -> Option<Tex> {
+        let img = image::open(path).ok()?.to_rgba8();
+        let (w, h) = (img.width(), img.height());
+        let px = img.into_raw();
+        let levels = if preserve_coverage {
+            mipmap::coverage_preserving_chain(&px, w, h, ALPHA_CUTOFF)
+        } else {
+            let mut chain: Vec<mipmap::MipLevel> = vec![(px, w, h)];
+            while chain.last().map(|(_, w, h)| *w > 1 || *h > 1) == Some(true) {
+                let (s, sw, sh) = chain.last().expect("chain is never empty").clone();
+                chain.push(mipmap::halve(&s, sw, sh));
+            }
+            chain
+        };
+        println!("  texture {path} {w}x{h}, {} mips", levels.len());
+        Some(Tex { levels })
+    }
+
+    fn texel(&self, level: usize, x: i64, y: i64) -> Vec4 {
+        let (px, w, h) = &self.levels[level.min(self.levels.len() - 1)];
+        let x = x.clamp(0, *w as i64 - 1) as u32;
+        let y = y.clamp(0, *h as i64 - 1) as u32;
+        let i = ((y * w + x) * 4) as usize;
+        // The textures are sRGB; shading happens in linear space.
+        let lin = |v: u8| (v as f32 / 255.0).powf(2.2);
+        Vec4::new(
+            lin(px[i]),
+            lin(px[i + 1]),
+            lin(px[i + 2]),
+            px[i + 3] as f32 / 255.0,
+        )
+    }
+
+    fn bilinear(&self, level: usize, uv: Vec2) -> Vec4 {
+        let level = level.min(self.levels.len() - 1);
+        let (_, w, h) = self.levels[level];
+        let fx = uv.x.rem_euclid(1.0) * w as f32 - 0.5;
+        let fy = uv.y.rem_euclid(1.0) * h as f32 - 0.5;
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0, fy - y0);
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let top = self.texel(level, x0, y0).lerp(self.texel(level, x0 + 1, y0), tx);
+        let bot = self
+            .texel(level, x0, y0 + 1)
+            .lerp(self.texel(level, x0 + 1, y0 + 1), tx);
+        top.lerp(bot, ty)
+    }
+
+    /// Trilinear: blends the two levels around `lod`, as the GPU does.
+    fn sample(&self, uv: Vec2, lod: f32) -> Vec4 {
+        let top = self.levels.len() as f32 - 1.0;
+        let lod = lod.clamp(0.0, top);
+        let lo = lod.floor();
+        let frac = lod - lo;
+        let a = self.bilinear(lo as usize, uv);
+        if frac < 1e-3 {
+            return a;
+        }
+        a.lerp(self.bilinear(lo as usize + 1, uv), frac)
+    }
 }
 
-fn project(vp: Mat4, world: Vec3, normal: Vec3, uv: Vec2, tint: Vec4) -> Vert {
+fn sample(tex: Option<&Tex>, uv: Vec2, lod: f32) -> Vec4 {
+    match tex {
+        Some(t) => t.sample(uv, lod),
+        None => Vec4::new(0.45, 0.38, 0.3, 1.0),
+    }
+}
+
+/// Mip level for a triangle, from how many texels it covers per pixel. Per triangle
+/// rather than per pixel, which for leaf cards is a couple of pixels wide is exact
+/// enough to show the minification behaviour.
+fn triangle_lod(uv: [Vec2; 3], screen_area: f32, tex_w: f32, tex_h: f32) -> f32 {
+    let e1 = uv[1] - uv[0];
+    let e2 = uv[2] - uv[0];
+    let uv_area = (e1.x * e2.y - e1.y * e2.x).abs() * tex_w * tex_h;
+    if screen_area.abs() < 1e-9 || uv_area <= 0.0 {
+        return 0.0;
+    }
+    0.5 * (uv_area / screen_area.abs()).log2()
+}
+
+fn project(vp: Mat4, world: Vec3, normal: Vec3, uv: Vec2, tint: Vec4, tex_size: Vec2) -> Vert {
     Vert {
         clip: vp * world.extend(1.0),
         world,
         normal,
         uv,
         tint,
+        tex_size,
     }
 }
 
-fn draw_bark(
-    t: &mut Target,
-    mesh: &Mesh,
-    vp: Mat4,
-    eye: Vec3,
-    sun: Vec3,
-    tex: Option<&RgbaImage>,
-) {
+fn tex_dims(tex: Option<&Tex>) -> Vec2 {
+    match tex {
+        Some(t) => Vec2::new(t.levels[0].1 as f32, t.levels[0].2 as f32),
+        None => Vec2::splat(1.0),
+    }
+}
+
+fn draw_bark(t: &mut Target, mesh: &Mesh, vp: Mat4, eye: Vec3, sun: Vec3, tex: Option<&Tex>) {
+    let dims = tex_dims(tex);
     for tri in mesh.indices.chunks_exact(3) {
         let v: Vec<Vert> = tri
             .iter()
@@ -150,11 +244,12 @@ fn draw_bark(
                     Vec3::from(mesh.normals[i]),
                     Vec2::from(mesh.uvs[i]) * 0.5,
                     Vec4::ONE,
+                    dims,
                 )
             })
             .collect();
-        raster(t, &v, |f| {
-            let albedo = sample(tex, f.uv).xyz();
+        raster(t, &v, |f, lod| {
+            let albedo = sample(tex, f.uv, lod).xyz();
             let mut n = f.normal.normalize_or_zero();
             let view = (eye - f.world).normalize_or_zero();
             if n.dot(view) < 0.0 {
@@ -175,8 +270,9 @@ fn draw_leaves(
     vp: Mat4,
     eye: Vec3,
     sun: Vec3,
-    tex: Option<&RgbaImage>,
+    tex: Option<&Tex>,
 ) {
+    let dims = tex_dims(tex);
     let lp = &params.leaves;
     let cols = lp.atlas_cols.max(1) as f32;
     let rows = lp.atlas_rows.max(1) as f32;
@@ -197,12 +293,15 @@ fn draw_leaves(
                     vp,
                     Vec3::from(leaves.positions[i]),
                     Vec3::from(leaves.normals[i]),
-                    Vec2::from(leaves.uvs[i]),
+                    // The card samples one atlas cell, so a card-local step covers
+                    // only that fraction of the texture when picking a mip level.
+                    Vec2::from(leaves.uvs[i]) * scale,
                     Vec4::from(leaves.tints[i]),
+                    dims,
                 )
             })
             .collect();
-        raster(t, &v, |f| {
+        raster(t, &v, |f, lod| {
             let mut n = f.normal.normalize_or_zero();
             let view = (eye - f.world).normalize_or_zero();
             // The shader picks the atlas cell from the facing of the triangle; here
@@ -212,7 +311,7 @@ fn draw_leaves(
                 n = -n;
             }
             let base = if facing_camera { front } else { back };
-            let texel = sample(tex, base + f.uv * scale);
+            let texel = sample(tex, base + f.uv, lod);
             if texel.w < ALPHA_CUTOFF {
                 return None;
             }
@@ -229,7 +328,7 @@ fn draw_leaves(
 
 /// Scanline fill with a depth test and perspective-correct attributes. `shade`
 /// returns None for a fragment the alpha test rejects.
-fn raster(t: &mut Target, v: &[Vert], shade: impl Fn(&Vert) -> Option<Vec3>) {
+fn raster(t: &mut Target, v: &[Vert], shade: impl Fn(&Vert, f32) -> Option<Vec3>) {
     let size = t.size as f32;
     let mut screen = [Vec3::ZERO; 3];
     for (k, vert) in v.iter().enumerate() {
@@ -247,6 +346,8 @@ fn raster(t: &mut Target, v: &[Vert], shade: impl Fn(&Vert) -> Option<Vec3>) {
     if area.abs() < 1e-7 {
         return;
     }
+    let uv_tri = [v[0].uv, v[1].uv, v[2].uv];
+    let lod = triangle_lod(uv_tri, area, v[0].tex_size.x, v[0].tex_size.y);
     let min_x = screen.iter().map(|p| p.x).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
     let max_x = screen.iter().map(|p| p.x).fold(f32::MIN, f32::max).ceil().min(size - 1.0);
     let min_y = screen.iter().map(|p| p.y).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
@@ -287,8 +388,9 @@ fn raster(t: &mut Target, v: &[Vert], shade: impl Fn(&Vert) -> Option<Vec3>) {
                 normal: v[0].normal * a + v[1].normal * b + v[2].normal * c,
                 uv: v[0].uv * a + v[1].uv * b + v[2].uv * c,
                 tint: v[0].tint * a + v[1].tint * b + v[2].tint * c,
+                tex_size: v[0].tex_size,
             };
-            if let Some(color) = shade(&frag) {
+            if let Some(color) = shade(&frag, lod) {
                 t.depth[di] = depth;
                 t.color[di] = aces(color * frag.tint.w);
             }

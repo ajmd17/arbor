@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use glam::Vec3;
 use rand::rngs::SmallRng;
 use rand::Rng;
@@ -32,6 +34,39 @@ struct GrowCtx<'a> {
     params: &'a SpeciesParams,
     env: EnvelopeParams,
     levels_total: u8,
+    /// The leader centreline, appended to as the trunk climbs. The crown envelope is
+    /// described around a vertical axis, so a trunk that leans would grow out of its
+    /// own crown and everything on the upper trunk would be pruned at birth. Hanging
+    /// the envelope off this instead makes the whole crown lean with the tree.
+    leader: RefCell<Vec<Vec3>>,
+}
+
+impl GrowCtx<'_> {
+    fn record_leader(&self, pos: Vec3) {
+        self.leader.borrow_mut().push(pos);
+    }
+
+    /// Where the trunk sits horizontally at height `y`. Above the part of the trunk
+    /// grown so far it holds at the last known point, which is what a branch just
+    /// spawned there should see.
+    fn crown_offset(&self, y: f32) -> Vec3 {
+        let leader = self.leader.borrow();
+        let Some(first) = leader.first() else {
+            return Vec3::ZERO;
+        };
+        if y <= first.y {
+            return horizontal(*first);
+        }
+        for pair in leader.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if y <= b.y {
+                let span = b.y - a.y;
+                let t = if span > 1e-5 { (y - a.y) / span } else { 0.0 };
+                return horizontal(a.lerp(b, t.clamp(0.0, 1.0)));
+            }
+        }
+        horizontal(*leader.last().expect("leader is not empty"))
+    }
 }
 
 pub fn grow(params: &SpeciesParams) -> Skeleton {
@@ -44,6 +79,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
             .min(params.branch_levels.len() as u8 + 1)
             .max(1),
         params,
+        leader: RefCell::new(Vec::new()),
     };
     let tree_rng = TreeRng::new(params.seed);
     grow_stem(
@@ -114,6 +150,7 @@ fn grow_stem(
     // and has to be shaped by the envelope like any branch, or the tree grows as a
     // bundle of parallel poles.
     let shaped_by_envelope = level > 0 || split_depth > 0;
+    let is_leader = level == 0 && split_depth == 0;
 
     for seg in 0..seg_count {
         let jitter = rand_perpendicular(&mut rng, cur_dir);
@@ -126,13 +163,20 @@ fn grow_stem(
 
         // Anything the envelope steers, it also prunes. Steering a stem that can
         // never be cut just leaves it circling the crown boundary forever.
-        if shaped_by_envelope && ctx.env.density(pos) < ctx.params.envelope.kill_threshold {
+        if shaped_by_envelope
+            && ctx.env.density(pos - ctx.crown_offset(pos.y)) < ctx.params.envelope.kill_threshold
+        {
             break;
         }
 
         let frac = (seg + 1) as f32 / seg_count as f32;
         let seg_path = child_path(path, seg as u32);
         cur = skeleton.push_node(Some(cur), pos, level, seg_path, v, frac, stem);
+        if is_leader {
+            // Recorded before anything spawns here, so branches born at this height
+            // already see the trunk they are hanging off.
+            ctx.record_leader(pos);
+        }
 
         if can_spawn {
             spawn_children(
@@ -292,9 +336,13 @@ fn steer(
     d += bend * sp.curvature;
 
     if shaped_by_envelope {
-        let dens = ctx.env.density(pos);
+        // The envelope is described around the origin, so growth is measured in that
+        // space and the answer brought back to where the crown actually sits.
+        let crown_offset = ctx.crown_offset(pos.y);
+        let local = pos - crown_offset;
+        let dens = ctx.env.density(local);
         if dens < 1.0 {
-            let target = ctx.env.steer_target(pos);
+            let target = ctx.env.steer_target(local) + crown_offset;
             let pull = Vec3::new(target.x - pos.x, 0.0, target.z - pos.z);
             let error = pull.length();
             if error > 1e-4 {
@@ -307,6 +355,12 @@ fn steer(
         }
     }
     norm_or_up(d)
+}
+
+/// The horizontal part of a position: how far the trunk has wandered from the axis
+/// the envelope is described around.
+fn horizontal(v: Vec3) -> Vec3 {
+    Vec3::new(v.x, 0.0, v.z)
 }
 
 fn norm_or_up(v: Vec3) -> Vec3 {
@@ -442,17 +496,41 @@ mod tests {
     }
 
     #[test]
-    fn deepest_twigs_are_not_degenerate() {
-        // Each level declares its own length, so vigor may only modulate it. Letting
-        // vigor scale length outright shortens twigs once per level and leaves the
-        // deepest ones as centimetre-long specks.
-        let params = parse_species(OAK_RON).unwrap();
-        let deepest = params.max_levels - 1;
+    fn low_vigor_modulates_stem_length_instead_of_erasing_it() {
+        // Each level already declares its own length, so vigor may only modulate it.
+        // Multiplying length by vigor as well shortens a stem once per level, and by
+        // the deepest level that compounds into centimetre-long specks.
+        //
+        // Built from a bare species rather than a preset so the only thing varying is
+        // vigor: one branch level, a crown big enough that nothing is pruned, and
+        // children handed a fraction of what drives the trunk.
+        let mut params = SpeciesParams {
+            max_levels: 2,
+            max_split_depth: 0,
+            ..Default::default()
+        };
+        params.envelope.volumes = vec![crate::envelope::EnvelopeVolume::Ellipsoid {
+            center: [0.0, 0.0, 0.0],
+            radii: [500.0, 500.0, 500.0],
+        }];
+        params.trunk.split_probability = 0.0;
+        params.trunk.children.pattern = ChildPattern::Continuous { density: 1.0 };
+        // Low, but above MIN_VIGOR: below it a stem is cut off after one segment,
+        // which is a separate rule and would mask what is being measured here.
+        params.trunk.children.scale = 0.1;
+        params.trunk.vigor_falloff = 0.0;
+        let branch = &mut params.branch_levels[0];
+        branch.length = 4.0;
+        branch.length_variance = 0.0;
+        branch.vigor_falloff = 0.0;
+        branch.split_probability = 0.0;
+
+        let declared = params.branch_levels[0].length;
         let sk = grow(&params);
-        let mut lengths: Vec<f32> = sk
+        let lengths: Vec<f32> = sk
             .stem_runs()
             .iter()
-            .filter(|run| sk.nodes[run[0] as usize].level == deepest)
+            .filter(|run| sk.nodes[run[0] as usize].level == 1)
             .map(|run| {
                 // A stem starts at its attachment point, which belongs to the parent
                 // run, so that first segment counts toward its length.
@@ -471,10 +549,19 @@ mod tests {
                         .sum::<f32>()
             })
             .collect();
-        assert!(lengths.len() > 20, "expected twigs, got {}", lengths.len());
-        lengths.sort_by(f32::total_cmp);
-        let median = lengths[lengths.len() / 2];
-        assert!(median > 0.15, "median twig length is only {median}");
+
+        assert!(lengths.len() > 5, "expected branches, got {}", lengths.len());
+        let shortest = lengths.iter().copied().fold(f32::MAX, f32::min);
+        // Vigor here is near zero, so every stem should sit at the floor. Scaling
+        // length by vigor directly would put them near zero instead.
+        assert!(
+            shortest >= declared * LENGTH_FLOOR - 1e-3,
+            "a branch at minimum vigor is {shortest} of a declared {declared}"
+        );
+        assert!(
+            shortest <= declared + 1e-3,
+            "vigor should not lengthen a stem past what it declares: {shortest}"
+        );
     }
 
     #[test]
@@ -567,19 +654,82 @@ mod tests {
 
     #[test]
     fn branch_nodes_stay_inside_envelope() {
+        // The crown hangs off the trunk rather than the world axis, so a node is
+        // judged against the crown anchored somewhere on the trunk at or below it.
+        // That set of anchors is exactly what was available while it grew: the trunk
+        // is only known up to the height reached so far.
+        for src in [PINE_RON, OAK_RON] {
+            let params = parse_species(src).unwrap();
+            let env = params.envelope.scaled(params.envelope_scale);
+            let sk = grow(&params);
+            let trunk_stem = sk.nodes[0].stem;
+            let mut leader: Vec<Vec3> = sk
+                .nodes
+                .iter()
+                .filter(|n| n.stem == trunk_stem)
+                .map(|n| n.position)
+                .collect();
+            leader.sort_by(|a, b| a.y.total_cmp(&b.y));
+
+            let mut checked = 0;
+            for node in &sk.nodes {
+                if node.level == 0 {
+                    continue;
+                }
+                // Growth interpolates along the trunk, so the anchors it could have
+                // used are the whole polyline below the node, not just its vertices.
+                let mut best = env.density(node.position);
+                for pair in leader.windows(2) {
+                    for k in 0..=8 {
+                        let p = pair[0].lerp(pair[1], k as f32 / 8.0);
+                        if p.y > node.position.y + 1e-4 {
+                            continue;
+                        }
+                        best = best.max(env.density(node.position - horizontal(p)));
+                    }
+                }
+                assert!(
+                    best >= params.envelope.kill_threshold - 1e-4,
+                    "{}: node at {:?} is outside every crown the trunk offers, best {best}",
+                    params.name,
+                    node.position
+                );
+                checked += 1;
+            }
+            assert!(checked > 100, "{}: only {checked} nodes", params.name);
+        }
+    }
+
+    #[test]
+    fn the_crown_follows_a_leaning_trunk() {
+        // A trunk that drifts sideways used to leave its own crown behind: branches
+        // near the top were measured against a cone still centred on the world axis,
+        // so they were pruned the moment they were born and the leader came out bare.
         let params = parse_species(PINE_RON).unwrap();
         let env = params.envelope.scaled(params.envelope_scale);
         let sk = grow(&params);
-        for node in &sk.nodes {
-            if node.level > 0 {
-                let d = env.density(node.position);
-                assert!(
-                    d >= params.envelope.kill_threshold - 1e-4,
-                    "node at {:?} has density {d}",
-                    node.position
-                );
-            }
-        }
+
+        let trunk_stem = sk.nodes[0].stem;
+        let top = sk
+            .nodes
+            .iter()
+            .filter(|n| n.stem == trunk_stem)
+            .max_by(|a, b| a.position.y.total_cmp(&b.position.y))
+            .expect("trunk has nodes");
+        let drift = horizontal(top.position).length();
+        assert!(drift > 0.5, "this preset should lean; drift is only {drift}");
+        assert!(
+            env.density(top.position) < params.envelope.kill_threshold,
+            "the leaning top should be outside a world-centred crown for this to mean anything"
+        );
+
+        // Branches have to reach the upper trunk, where the old behaviour left a gap.
+        let upper = sk
+            .nodes
+            .iter()
+            .filter(|n| n.level > 0 && n.position.y > top.position.y - 2.0)
+            .count();
+        assert!(upper > 20, "only {upper} branch nodes near the leaning top");
     }
 
     #[test]

@@ -76,9 +76,6 @@ void main() {
         N = normalize(T * nm.x + B * nm.y + N * nm.z);
     }
     vec3 V = normalize(u_cam_pos - v_world);
-    if (dot(N, V) < 0.0) {
-        N = -N;
-    }
     if (u_mode == 2) {
         out_color = vec4(N * 0.5 + 0.5, 1.0);
         return;
@@ -224,7 +221,12 @@ void main() {
     vec2 cell = gl_FrontFacing ? u_atlas_front : u_atlas_back;
     vec2 uv = cell + v_card_uv * u_atlas_scale;
     vec4 tex = texture(u_albedo_tex, uv);
-    if (tex.a < u_alpha_cutoff) {
+    // Resolve the cutout edge over roughly one pixel instead of snapping to it. With
+    // alpha-to-coverage on, this hands the hardware a real coverage fraction, so a
+    // leaf thins out smoothly at distance rather than flickering in and out.
+    float edge = max(fwidth(tex.a), 1e-4);
+    float mask = clamp((tex.a - u_alpha_cutoff) / edge + 0.5, 0.0, 1.0);
+    if (mask <= 0.0) {
         discard;
     }
     if (u_mode == 1) {
@@ -268,7 +270,7 @@ void main() {
     color *= v_tint.a;
     color = aces(color);
     color = pow(color, vec3(1.0 / 2.2));
-    out_color = vec4(color, 1.0);
+    out_color = vec4(color, mask);
 }"#;
 
 pub const LEAF_DEPTH_VS: &str = r#"#version 150

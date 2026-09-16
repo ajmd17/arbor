@@ -333,6 +333,41 @@ mod tests {
     use crate::species::{parse_species, OAK_RON, PINE_RON};
 
     #[test]
+    fn triangles_wind_counter_clockwise_when_seen_from_outside() {
+        // Consistent winding is what lets the renderer cull back faces and trust the
+        // normal it was given, instead of flipping normals toward the viewer to hide
+        // not knowing which way a triangle faces.
+        for src in [OAK_RON, PINE_RON] {
+            let params = parse_species(src).unwrap();
+            let mesh = build_mesh(&crate::grow(&params), &params);
+            let mut checked = 0;
+            for tri in mesh.indices.chunks_exact(3) {
+                let p: Vec<Vec3> = tri
+                    .iter()
+                    .map(|&i| Vec3::from(mesh.positions[i as usize]))
+                    .collect();
+                let geometric = (p[1] - p[0]).cross(p[2] - p[0]);
+                if geometric.length() < 1e-9 {
+                    continue;
+                }
+                // The shading normals are built outward by construction, so they say
+                // which side is outside.
+                let shading: Vec3 = tri
+                    .iter()
+                    .map(|&i| Vec3::from(mesh.normals[i as usize]))
+                    .sum();
+                assert!(
+                    geometric.normalize().dot(shading.normalize_or_zero()) > 0.0,
+                    "{}: triangle {tri:?} is wound inward",
+                    params.name
+                );
+                checked += 1;
+            }
+            assert!(checked > 1000, "{}: only {checked} triangles", params.name);
+        }
+    }
+
+    #[test]
     fn every_branch_tube_starts_on_its_parent() {
         // The whole tree is one welded surface only because each stem begins with a
         // ring on the parent centreline. Starting at the first grown node instead

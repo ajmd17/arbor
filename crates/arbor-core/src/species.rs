@@ -200,8 +200,14 @@ pub struct LeafParams {
     pub min_level: u8,
     /// Nothing thicker than this carries leaves, whatever its level.
     pub max_twig_radius: f32,
-    /// Cards per metre of twig.
+    /// Cluster anchors per metre of twig. Each anchor carries `cluster_size` cards.
     pub density: f32,
+    /// Leaves emitted together at one point on a twig. Real foliage grows in tufts,
+    /// and clumping the cards gives a canopy of masses and gaps instead of a uniform
+    /// spray, for the same number of triangles.
+    pub cluster_size: u32,
+    /// How far the cards in one cluster fan out from its shared direction.
+    pub cluster_spread_deg: f32,
     pub card_length: f32,
     pub card_width: f32,
     pub size_variance: f32,
@@ -243,6 +249,8 @@ impl Default for LeafParams {
             min_level: 2,
             max_twig_radius: 0.08,
             density: 14.0,
+            cluster_size: 3,
+            cluster_spread_deg: 38.0,
             card_length: 0.22,
             card_width: 0.16,
             size_variance: 0.25,

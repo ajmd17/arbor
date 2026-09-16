@@ -156,12 +156,40 @@ fn place_on_stem(
             if radius > lp.max_twig_radius {
                 continue;
             }
-            out.push(make_card(lp, &mut rng, a + dir * travelled, dir, frame, radius, &mut azimuth));
+            let at = a + dir * travelled;
+            // Every card in a cluster shares one anchor and one base direction, and
+            // fans out from it, so the canopy reads as tufts rather than a uniform
+            // spray of evenly spaced leaves.
+            azimuth += lp.phyllotaxis_deg.to_radians();
+            let base_azimuth = azimuth;
+            for k in 0..lp.cluster_size.max(1) {
+                if out.len() >= MAX_LEAVES {
+                    return;
+                }
+                let fan = if lp.cluster_size > 1 {
+                    let step = std::f32::consts::TAU / lp.cluster_size as f32;
+                    k as f32 * step
+                        + range_f32(&mut rng, -lp.cluster_spread_deg, lp.cluster_spread_deg)
+                            .to_radians()
+                } else {
+                    0.0
+                };
+                out.push(make_card(
+                    lp,
+                    &mut rng,
+                    at,
+                    dir,
+                    frame,
+                    radius,
+                    base_azimuth + fan,
+                ));
+            }
         }
         until_next -= seg_len - travelled;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_card(
     lp: &LeafParams,
     rng: &mut rand::rngs::SmallRng,
@@ -169,9 +197,8 @@ fn make_card(
     twig_dir: Vec3,
     frame: Vec3,
     twig_radius: f32,
-    azimuth: &mut f32,
+    azimuth: f32,
 ) -> Card {
-    *azimuth += lp.phyllotaxis_deg.to_radians();
     let u = ortho_unit(frame, twig_dir);
     let v = twig_dir.cross(u);
     let radial = (u * azimuth.cos() + v * azimuth.sin()).normalize_or(u);

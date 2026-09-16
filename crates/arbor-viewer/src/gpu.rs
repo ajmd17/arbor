@@ -186,6 +186,84 @@ pub unsafe fn create_texture(
     }
 }
 
+/// Uploads an alpha-cutout texture with a mip chain built to hold its alpha coverage.
+///
+/// `glGenerateMipmap` just averages alpha, and for a cutout that occupies a fraction
+/// of its cell the fully-averaged bottom levels fall under the alpha test entirely.
+/// The texture then vanishes at distance rather than fading, which is why leaves
+/// disappear as the camera pulls back.
+pub unsafe fn create_cutout_texture(
+    gl: &glow::Context,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    cutoff: f32,
+) -> glow::Texture {
+    unsafe {
+        let chain = crate::mipmap::coverage_preserving_chain(rgba, width, height, cutoff);
+        let texture = gl.create_texture().expect("create texture");
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        for (level, (px, w, h)) in chain.iter().enumerate() {
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                level as i32,
+                glow::SRGB8_ALPHA8 as i32,
+                *w as i32,
+                *h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(px)),
+            );
+        }
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAX_LEVEL,
+            chain.len() as i32 - 1,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR_MIPMAP_LINEAR as i32,
+        );
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        // Cells of an atlas must not bleed into each other at their edges.
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        set_max_anisotropy(gl);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        texture
+    }
+}
+
+/// Foliage is mostly viewed at glancing angles, where isotropic filtering blurs a
+/// whole card into mush. Skipped silently where the driver does not offer it.
+unsafe fn set_max_anisotropy(gl: &glow::Context) {
+    const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
+    const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
+    unsafe {
+        if !gl
+            .supported_extensions()
+            .contains("GL_EXT_texture_filter_anisotropic")
+        {
+            return;
+        }
+        let max = gl.get_parameter_f32(MAX_TEXTURE_MAX_ANISOTROPY);
+        if max > 1.0 {
+            gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, max.min(8.0));
+        }
+    }
+}
+
 unsafe fn load_image(path: &str) -> Option<(Vec<u8>, u32, u32)> {
     let img = image::open(path).ok()?;
     let rgba = img.to_rgba8();
@@ -320,7 +398,7 @@ pub unsafe fn load_leaf_material(
 ) -> Option<MaterialTextures> {
     unsafe {
         let (data, w, h) = load_image(&format!("{dir}/{name}_albedo.png"))?;
-        let albedo = create_texture(gl, &data, w, h, true);
+        let albedo = create_cutout_texture(gl, &data, w, h, LEAF_ALPHA_CUTOFF);
         let load_or_flat = |suffix: &str, fill: u8| match load_image(&format!(
             "{dir}/{name}_{suffix}.png"
         )) {
@@ -619,12 +697,20 @@ impl GpuMesh {
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
             gl.active_texture(glow::TEXTURE3);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
+            // Turns the coverage the shader computes into real multisample coverage.
+            // Without MSAA the driver ignores it, so this is safe either way.
+            gl.enable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             self.bind_and_draw(gl);
+            gl.disable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
         }
     }
 }
+
+/// Threshold the leaf alpha test uses. The mip chain of a leaf texture is built
+/// around this value, so the two have to agree.
+pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
 
 /// Which atlas cells a leaf card samples, and how hard the alpha test bites.
 #[derive(Clone, Copy)]
@@ -651,7 +737,7 @@ impl LeafMaterialParams {
             atlas_scale: [1.0 / cols as f32, 1.0 / rows as f32],
             atlas_front: cell(lp.atlas_front),
             atlas_back: cell(lp.atlas_back),
-            alpha_cutoff: 0.35,
+            alpha_cutoff: LEAF_ALPHA_CUTOFF,
             translucency,
         }
     }
@@ -836,6 +922,8 @@ impl GpuLeaves {
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_elements(glow::TRIANGLES, self.index_count, glow::UNSIGNED_INT, 0);
             gl.bind_vertex_array(None);
+            // Left disabled on purpose: that is the state the rest of the frame runs
+            // in, and the bark tubes have never been checked for consistent winding.
         }
     }
 
@@ -876,7 +964,15 @@ impl GpuLeaves {
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
             gl.active_texture(glow::TEXTURE3);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
+            // Bark tubes are closed and wound counter-clockwise when seen from
+            // outside, so their interior is never worth rasterising. Culling it also
+            // means a fragment always faces the camera, which is what lets the shader
+            // use the normal it was handed instead of flipping it toward the viewer.
+            gl.front_face(glow::CCW);
+            gl.cull_face(glow::BACK);
+            gl.enable(glow::CULL_FACE);
             self.bind_and_draw(gl);
+            gl.disable(glow::CULL_FACE);
             gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
         }

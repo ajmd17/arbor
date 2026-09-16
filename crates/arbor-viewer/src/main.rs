@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gpu;
+mod mipmap;
 mod shaders;
 
 use std::sync::{Arc, Mutex};
