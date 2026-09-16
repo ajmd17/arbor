@@ -43,7 +43,7 @@ uniform sampler2D u_rough_tex;
 uniform sampler2D u_shadow_tex;
 out vec4 out_color;
 
-const float PI = 3.14159265;
+const float PI = 3.14159265359;
 
 // One sky model shared by everything that shades: a warm band at the horizon under a
 // cold zenith, which is what a low sun does to the dome, plus the bounce coming back
@@ -64,6 +64,50 @@ vec3 sky_ambient(vec3 n) {
     return sky_color(n) * 0.55 + u_sky_horizon * 0.12;
 }
 
+// Trowbridge-Reitz normal distribution. `a2` is the square of the perceptual-to-linear
+// roughness, so rough^4.
+float d_ggx(float ndh, float a2) {
+    float d = ndh * ndh * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d + 1e-7);
+}
+
+// Height-correlated Smith visibility, with the 1/(4 NdotL NdotV) folded in.
+float v_smith(float ndv, float ndl, float a2) {
+    float lambda_v = ndl * sqrt(ndv * ndv * (1.0 - a2) + a2);
+    float lambda_l = ndv * sqrt(ndl * ndl * (1.0 - a2) + a2);
+    return 0.5 / max(lambda_v + lambda_l, 1e-5);
+}
+
+vec3 f_schlick(float u, vec3 f0) {
+    return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
+}
+
+// Analytic fit of the split-sum environment BRDF, so the sky reflection costs no
+// precomputed lookup. A scales Fresnel and B is the grazing lobe.
+vec2 env_brdf(float ndv, float rough) {
+    vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = rough * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// Sky ambient for a surface: split-sum diffuse and specular, with the multiple
+// scattering the single-scatter term loses at high roughness added back, which is
+// what keeps a rough metal from going dull.
+vec3 sky_ibl(vec3 albedo, vec3 f0, float metallic, vec3 n, vec3 v, float rough) {
+    float ndv = max(dot(n, v), 0.0) + 1e-4;
+    vec2 ab = env_brdf(ndv, rough);
+    vec3 f_ss = f0 * ab.x + ab.y;
+    float e_ss = ab.x + ab.y;
+    float e_ms = 1.0 - e_ss;
+    vec3 f_avg = f0 + (vec3(1.0) - f0) / 21.0;
+    vec3 f_ms = f_ss * f_avg / max(1.0 - e_ms * f_avg, vec3(1e-4));
+    vec3 irradiance = sky_ambient(n);
+    vec3 radiance = mix(sky_color(reflect(-v, n)), irradiance, rough);
+    return albedo * irradiance * (1.0 - f_ss) * (1.0 - metallic)
+        + radiance * (f_ss + f_ms * e_ms);
+}
 
 float sample_shadow(vec4 sc, float ndl) {
     vec3 proj = sc.xyz / sc.w * 0.5 + 0.5;
@@ -105,29 +149,25 @@ void main() {
         return;
     }
     vec3 albedo = texture(u_albedo_tex, v_uv).rgb * u_albedo_color;
-    float rough = clamp(texture(u_rough_tex, v_uv).r * u_roughness, 0.04, 1.0);
-    float ndl = max(dot(N, u_sun_dir), 0.0);
-    float shadow = 1.0;
-    if (ndl > -0.05) {
-        shadow = sample_shadow(v_shadow, ndl);
-    }
+    float rough = clamp(texture(u_rough_tex, v_uv).r * u_roughness, 0.045, 1.0);
+    float metallic = clamp(u_metallic, 0.0, 1.0);
+
+    // Direct sun, one Cook-Torrance lobe. The diffuse is scaled by whatever the
+    // interface did not reflect, so a glossy or metallic surface does not also glow
+    // as a diffuse one.
+    float ndv = max(dot(N, V), 0.0) + 1e-4;
+    float ndl_raw = dot(N, u_sun_dir);
+    float ndl = max(ndl_raw, 0.0);
+    float shadow = ndl_raw > -0.05 ? sample_shadow(v_shadow, ndl) : 1.0;
+    float a2 = rough * rough * rough * rough;
+    vec3 f0 = mix(vec3(0.04), albedo, metallic);
     vec3 H = normalize(V + u_sun_dir);
-    float ndv = max(dot(N, V), 0.0001);
-    float ndh = max(dot(N, H), 0.0);
-    float vdh = max(dot(V, H), 0.0);
-    float a = rough * rough;
-    float a2 = a * a;
-    float den = ndh * ndh * (a2 - 1.0) + 1.0;
-    float D = a2 / (PI * den * den);
-    float k = rough + 1.0;
-    k = k * k / 8.0;
-    float G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
-    vec3 F0 = mix(vec3(0.04), albedo, u_metallic);
-    vec3 F = F0 + (1.0 - F0) * pow(1.0 - vdh, 5.0);
-    vec3 spec = (D * G * F) / (4.0 * ndv * max(ndl, 0.001) + 0.001) * ndl;
-    vec3 diff = albedo * (1.0 - u_metallic) / PI * ndl;
-    vec3 color = (diff + spec) * u_sun_color * shadow + albedo * sky_ambient(N);
-    color = aces(color);
+    vec3 F = f_schlick(max(dot(V, H), 0.0), f0);
+    vec3 spec = d_ggx(max(dot(N, H), 0.0), a2) * v_smith(ndv, ndl, a2) * F;
+    vec3 direct = (albedo * (1.0 - F) * (1.0 - metallic) / PI + spec)
+        * u_sun_color * ndl * shadow;
+
+    vec3 color = aces(direct + sky_ibl(albedo, f0, metallic, N, V, rough));
     color = pow(color, vec3(1.0 / 2.2));
     out_color = vec4(color, 1.0);
 }"#;
@@ -211,6 +251,8 @@ uniform vec2 u_atlas_scale;
 uniform vec2 u_atlas_front;
 uniform vec2 u_atlas_back;
 uniform float u_alpha_cutoff;
+// Mip level at which coverage starts giving way to a hard cutoff.
+uniform float u_coverage_lod;
 uniform float u_translucency;
 uniform int u_mode;
 uniform sampler2D u_albedo_tex;
@@ -235,6 +277,53 @@ vec3 sky_color(vec3 dir) {
 // surface turns to face down.
 vec3 sky_ambient(vec3 n) {
     return sky_color(n) * 0.55 + u_sky_horizon * 0.12;
+}
+
+const float PI = 3.14159265359;
+
+// Trowbridge-Reitz normal distribution. `a2` is the square of the perceptual-to-linear
+// roughness, so rough^4.
+float d_ggx(float ndh, float a2) {
+    float d = ndh * ndh * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d + 1e-7);
+}
+
+// Height-correlated Smith visibility, with the 1/(4 NdotL NdotV) folded in.
+float v_smith(float ndv, float ndl, float a2) {
+    float lambda_v = ndl * sqrt(ndv * ndv * (1.0 - a2) + a2);
+    float lambda_l = ndv * sqrt(ndl * ndl * (1.0 - a2) + a2);
+    return 0.5 / max(lambda_v + lambda_l, 1e-5);
+}
+
+vec3 f_schlick(float u, vec3 f0) {
+    return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
+}
+
+// Analytic fit of the split-sum environment BRDF, so the sky reflection costs no
+// precomputed lookup. A scales Fresnel and B is the grazing lobe.
+vec2 env_brdf(float ndv, float rough) {
+    vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = rough * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// Sky ambient for a surface: split-sum diffuse and specular, with the multiple
+// scattering the single-scatter term loses at high roughness added back, which is
+// what keeps a rough metal from going dull.
+vec3 sky_ibl(vec3 albedo, vec3 f0, float metallic, vec3 n, vec3 v, float rough) {
+    float ndv = max(dot(n, v), 0.0) + 1e-4;
+    vec2 ab = env_brdf(ndv, rough);
+    vec3 f_ss = f0 * ab.x + ab.y;
+    float e_ss = ab.x + ab.y;
+    float e_ms = 1.0 - e_ss;
+    vec3 f_avg = f0 + (vec3(1.0) - f0) / 21.0;
+    vec3 f_ms = f_ss * f_avg / max(1.0 - e_ms * f_avg, vec3(1e-4));
+    vec3 irradiance = sky_ambient(n);
+    vec3 radiance = mix(sky_color(reflect(-v, n)), irradiance, rough);
+    return albedo * irradiance * (1.0 - f_ss) * (1.0 - metallic)
+        + radiance * (f_ss + f_ms * e_ms);
 }
 
 float sample_shadow(vec4 sc, float ndl) {
@@ -264,12 +353,25 @@ void main() {
     vec2 cell = gl_FrontFacing ? u_atlas_front : u_atlas_back;
     vec2 uv = cell + v_card_uv * u_atlas_scale;
     vec4 tex = texture(u_albedo_tex, uv);
-    // Resolve the cutout edge over roughly one pixel instead of snapping to it. With
-    // alpha-to-coverage on, this hands the hardware a real coverage fraction, so a
-    // leaf thins out smoothly at distance rather than flickering in and out.
-    float edge = max(fwidth(tex.a), 1e-4);
-    float mask = clamp((tex.a - u_alpha_cutoff) / edge + 0.5, 0.0, 1.0);
-    if (mask <= 0.0) {
+
+    // While a card is bigger than a pixel its filtered alpha *is* its coverage, and
+    // handing that straight to alpha-to-coverage gives a properly soft cutout edge.
+    //
+    // Under minification that stops being true, for two reasons at once. A leaf fills
+    // only part of its atlas cell, so the average falls toward that fraction however
+    // dense the canopy really is. And alpha-to-coverage derives its sample mask from
+    // the coverage value alone, so cards stacked over one pixel pick the same samples
+    // and never accumulate: the nearest wins and the rest add nothing. Together they
+    // wash a distant canopy out to the sky behind it. Past that point the cutoff is
+    // what holds the canopy together, and the mip chain keeps the share of texels
+    // passing it constant so the density stays put.
+    vec2 texels = vec2(textureSize(u_albedo_tex, 0)) * u_atlas_scale;
+    vec2 du = dFdx(v_card_uv * texels);
+    vec2 dv = dFdy(v_card_uv * texels);
+    float lod = 0.5 * log2(max(dot(du, du), dot(dv, dv)) + 1e-8);
+    float snap = clamp((lod - u_coverage_lod) * 0.5, 0.0, 1.0);
+    float coverage = mix(tex.a, step(u_alpha_cutoff, tex.a), snap);
+    if (coverage < 1.0 / 255.0) {
         discard;
     }
     if (u_mode == 1) {
@@ -278,6 +380,9 @@ void main() {
         return;
     }
     vec3 N = normalize(v_normal);
+    // Foliage picks up the dome from both faces, so the ambient keeps the geometric
+    // side while the direct terms use the flipped one and never go flat black.
+    vec3 geometric = N;
     if (!gl_FrontFacing) {
         N = -N;
     }
@@ -288,14 +393,23 @@ void main() {
 
     vec3 albedo = tex.rgb * v_tint.rgb;
     vec3 V = normalize(u_cam_pos - v_world);
-    float rough = clamp(texture(u_rough_tex, uv).r, 0.15, 1.0);
+    // The source map calls a leaf glossy, around 0.29, and at that roughness the
+    // environment lobe hands each blade a mirror of the sky dome. Nothing here
+    // occludes that dome, so a needle buried in the canopy reflects as much sky as
+    // one on the outside and the whole crown washes out to the colour behind it.
+    // Until the ambient is occluded, foliage is held to a matte floor.
+    float rough = clamp(texture(u_rough_tex, uv).r, 0.55, 1.0);
     float ndl = max(dot(N, u_sun_dir), 0.0);
     float shadow = sample_shadow(v_shadow, ndl);
 
     // Wrapped diffuse: a thin blade scatters enough that it never goes fully black
-    // at grazing angles, and hard terminators across a canopy read as faceted.
+    // at grazing angles, and hard terminators across a canopy read as faceted. The
+    // reflection term still takes its cut so the blade does not also glow.
     float wrapped = max((dot(N, u_sun_dir) + 0.5) / 1.5, 0.0);
-    vec3 diffuse = albedo * wrapped * shadow;
+    vec3 f0 = vec3(0.04);
+    vec3 H = normalize(V + u_sun_dir);
+    vec3 F = f_schlick(max(dot(V, H), 0.0), f0);
+    vec3 diffuse = albedo * (1.0 - F) / PI * wrapped * shadow;
 
     // Light coming through the blade from behind. The view lobe peaks when the
     // camera looks into the sun, but it keeps a floor so a leaf turned away from
@@ -304,17 +418,21 @@ void main() {
     float lobe = 0.35 + 0.65 * pow(max(dot(V, -u_sun_dir), 0.0), 3.0);
     vec3 transmitted = albedo * u_translucency * through * lobe * shadow;
 
-    vec3 H = normalize(V + u_sun_dir);
-    float spec = pow(max(dot(N, H), 0.0), mix(60.0, 6.0, rough)) * (1.0 - rough) * 0.25 * shadow;
+    // The same Cook-Torrance lobe the bark uses, so a waxy blade catches a highlight
+    // that tracks the roughness map instead of a fixed Blinn-Phong exponent.
+    float a2 = rough * rough * rough * rough;
+    vec3 spec = d_ggx(max(dot(N, H), 0.0), a2)
+        * v_smith(max(dot(N, V), 0.0) + 1e-4, ndl, a2) * F * ndl * shadow;
 
     // Foliage picks up the dome from both faces, so the ambient uses the geometric
     // side rather than the flipped one and never goes flat black underneath.
-    vec3 color = (diffuse + transmitted + vec3(spec)) * u_sun_color + albedo * sky_ambient(N);
+    vec3 color = (diffuse + transmitted + spec) * u_sun_color
+        + sky_ibl(albedo, f0, 0.0, geometric, V, rough);
     // Leaves buried in the crown get less sky than the ones on the outside.
     color *= v_tint.a;
     color = aces(color);
     color = pow(color, vec3(1.0 / 2.2));
-    out_color = vec4(color, mask);
+    out_color = vec4(color, coverage);
 }"#;
 
 pub const LEAF_DEPTH_VS: &str = r#"#version 150
@@ -472,7 +590,11 @@ void main() {
     vec3 albedo = u_albedo_color * (0.84 + 0.32 * grain);
     float ndl = max(dot(N, u_sun_dir), 0.0);
     float shadow = sample_shadow(v_shadow, ndl);
-    vec3 color = albedo * (ndl * shadow * u_sun_color + sky_ambient(N));
+    // Same convention as the bark and the leaves: u_sun_color is irradiance, so a
+    // Lambert surface returns albedo / PI of it. Without that the ground came back
+    // PI times brighter than everything standing on it.
+    const float PI = 3.14159265359;
+    vec3 color = albedo * (ndl * shadow * u_sun_color / PI + sky_ambient(N));
 
     // Dissolve into the sky at range so the plane has no visible rim.
     vec3 view = normalize(v_world - u_cam_pos);

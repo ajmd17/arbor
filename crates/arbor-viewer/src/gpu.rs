@@ -3,6 +3,9 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
+use arbor_core::cluster::{bake_cluster, Bitmap, LeafMaps};
+use arbor_core::species::LeafParams;
+
 use crate::shaders;
 
 /// `attribs` names the vertex inputs in the order the VAO binds them. GLSL 150 has
@@ -186,21 +189,23 @@ pub unsafe fn create_texture(
     }
 }
 
-/// Uploads an alpha-cutout texture with a mip chain built to hold its alpha coverage.
+/// Uploads a foliage cutout with the mip chain that holds its alpha coverage.
 ///
-/// `glGenerateMipmap` just averages alpha, and for a cutout that occupies a fraction
-/// of its cell the fully-averaged bottom levels fall under the alpha test entirely.
-/// The texture then vanishes at distance rather than fading, which is why leaves
-/// disappear as the camera pulls back.
+/// Averaged alpha is the right coverage for alpha-to-coverage only while a card is
+/// bigger than a pixel. Once it is not, two things break at once: a leaf that fills a
+/// fraction of its cell averages down to that fraction, and alpha-to-coverage hands
+/// equal coverages the same sample mask, so cards stacked over one pixel never add
+/// up. The shader falls back to a cutoff there, and this is the chain that keeps a
+/// cutoff honest.
 pub unsafe fn create_cutout_texture(
     gl: &glow::Context,
     rgba: &[u8],
     width: u32,
     height: u32,
-    cutoff: f32,
 ) -> glow::Texture {
     unsafe {
-        let chain = crate::mipmap::coverage_preserving_chain(rgba, width, height, cutoff);
+        let chain =
+            crate::mipmap::coverage_preserving_chain(rgba, width, height, LEAF_ALPHA_CUTOFF);
         let texture = gl.create_texture().expect("create texture");
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         for (level, (px, w, h)) in chain.iter().enumerate() {
@@ -391,24 +396,58 @@ pub unsafe fn load_material(gl: &glow::Context, dir: &str, name: &str) -> Materi
 
 /// A leaf texture has no sensible procedural stand-in, so a missing one is reported
 /// rather than silently replaced by bark.
+///
+/// When the species clusters, the art on disk is a single leaf and the atlas actually
+/// sampled is grown from it here. That keeps one leaf in the repository instead of a
+/// baked sheet per species, and lets the arrangement be retuned by editing numbers.
 pub unsafe fn load_leaf_material(
     gl: &glow::Context,
     dir: &str,
-    name: &str,
+    lp: &LeafParams,
 ) -> Option<MaterialTextures> {
     unsafe {
-        let (data, w, h) = load_image(&format!("{dir}/{name}_albedo.png"))?;
-        let albedo = create_cutout_texture(gl, &data, w, h, LEAF_ALPHA_CUTOFF);
-        let load_or_flat = |suffix: &str, fill: u8| match load_image(&format!(
-            "{dir}/{name}_{suffix}.png"
-        )) {
-            Some((data, w, h)) => create_texture(gl, &data, w, h, false),
+        let read = |suffix: &str| {
+            load_image(&format!("{dir}/{}_{suffix}.png", lp.texture))
+                .and_then(|(data, w, h)| Bitmap::from_rgba(w, h, data))
+        };
+        let mut albedo = read("albedo")?;
+        let mut normal = read("normal");
+        let mut roughness = read("roughness");
+
+        if let Some(cluster) = &lp.cluster {
+            let started = std::time::Instant::now();
+            let baked = bake_cluster(
+                cluster,
+                lp.atlas_cols,
+                lp.atlas_rows,
+                LeafMaps {
+                    albedo: &albedo,
+                    normal: normal.as_ref(),
+                    roughness: roughness.as_ref(),
+                },
+            );
+            println!(
+                "clustered {} into {}x{} from {} leaves, coverage {:.3} ({:.0} ms)",
+                lp.texture,
+                baked.albedo.width,
+                baked.albedo.height,
+                cluster.count,
+                baked.albedo.mean_alpha(),
+                started.elapsed().as_secs_f32() * 1000.0
+            );
+            albedo = baked.albedo;
+            normal = baked.normal;
+            roughness = baked.roughness;
+        }
+
+        let upload = |map: Option<Bitmap>, fill: u8| match map {
+            Some(m) => create_texture(gl, &m.pixels, m.width, m.height, false),
             None => create_texture(gl, &[fill, fill, fill, 255], 1, 1, false),
         };
         Some(MaterialTextures {
-            albedo,
-            normal: load_or_flat("normal", 128),
-            roughness: load_or_flat("roughness", 200),
+            albedo: create_cutout_texture(gl, &albedo.pixels, albedo.width, albedo.height),
+            normal: upload(normal, 128),
+            roughness: upload(roughness, 200),
         })
     }
 }
@@ -437,15 +476,24 @@ impl ShadowTarget {
             );
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            // Outside the map is fully lit, not a repeat of whatever depth happened to
+            // sit on the border. Clamping to the edge instead smears that last row of
+            // texels outward, and with a low sun one shadow texel covers metres of
+            // ground, so the smear reads as long straight bands lying across it.
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
+                glow::CLAMP_TO_BORDER as i32,
             );
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
+                glow::CLAMP_TO_BORDER as i32,
+            );
+            gl.tex_parameter_f32_slice(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_BORDER_COLOR,
+                &[1.0, 1.0, 1.0, 1.0],
             );
             let fbo = gl.create_framebuffer().expect("shadow fbo");
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
@@ -508,10 +556,13 @@ impl ColorPass {
         }
     }
 
+    /// Wireframes whatever is handed in. Leaf cards are most of a tree by triangle
+    /// count, so a wireframe that only showed bark hid where the triangles were.
     pub unsafe fn draw_wire(
         &self,
         gl: &glow::Context,
         mesh: &GpuMesh,
+        leaves: Option<&GpuLeaves>,
         view_proj: Mat4,
         color: [f32; 4],
     ) {
@@ -525,6 +576,9 @@ impl ColorPass {
             gl.uniform_4_f32(Some(&self.u_color), color[0], color[1], color[2], color[3]);
             gl.polygon_mode(glow::FRONT_AND_BACK, glow::LINE);
             mesh.bind_and_draw(gl);
+            if let Some(leaves) = leaves {
+                leaves.bind_and_draw(gl);
+            }
             gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
             gl.use_program(None);
         }
@@ -703,19 +757,16 @@ impl GpuMesh {
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
             gl.active_texture(glow::TEXTURE3);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
-            // Turns the coverage the shader computes into real multisample coverage.
-            // Without MSAA the driver ignores it, so this is safe either way.
-            gl.enable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             self.bind_and_draw(gl);
-            gl.disable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
         }
     }
 }
 
-/// Threshold the leaf alpha test uses. The mip chain of a leaf texture is built
-/// around this value, so the two have to agree.
+/// Threshold the leaf shadow pass tests alpha against to carve its silhouette. The
+/// colour pass resolves the same cutout with alpha-to-coverage instead, so it does not
+/// share this value.
 pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
 
 /// Which atlas cells a leaf card samples, and how hard the alpha test bites.
@@ -725,6 +776,8 @@ pub struct LeafMaterialParams {
     pub atlas_front: [f32; 2],
     pub atlas_back: [f32; 2],
     pub alpha_cutoff: f32,
+    /// Mip level where soft coverage gives way to the cutoff.
+    pub coverage_lod: f32,
     pub translucency: f32,
 }
 
@@ -744,6 +797,11 @@ impl LeafMaterialParams {
             atlas_front: cell(lp.atlas_front),
             atlas_back: cell(lp.atlas_back),
             alpha_cutoff: LEAF_ALPHA_CUTOFF,
+            // Late on purpose. The mip chain already rescales alpha to hold coverage,
+            // so soft coverage stays dense well into the distance and the cutoff only
+            // has to take over once a card is down to about a pixel. Crossing over
+            // early costs nothing but the antialiasing on every leaf edge.
+            coverage_lod: 9.0,
             translucency,
         }
     }
@@ -832,6 +890,7 @@ pub struct GpuLeaves {
     u_atlas_front: glow::UniformLocation,
     u_atlas_back: glow::UniformLocation,
     u_alpha_cutoff: glow::UniformLocation,
+    u_coverage_lod: glow::UniformLocation,
     u_translucency: glow::UniformLocation,
     u_mode: glow::UniformLocation,
     u_normal_bias: glow::UniformLocation,
@@ -888,6 +947,7 @@ impl GpuLeaves {
                 u_atlas_front: u("u_atlas_front"),
                 u_atlas_back: u("u_atlas_back"),
                 u_alpha_cutoff: u("u_alpha_cutoff"),
+                u_coverage_lod: u("u_coverage_lod"),
                 u_translucency: u("u_translucency"),
                 u_mode: u("u_mode"),
                 u_normal_bias: u("u_normal_bias"),
@@ -966,6 +1026,7 @@ impl GpuLeaves {
             gl.uniform_2_f32(Some(&self.u_atlas_front), m.atlas_front[0], m.atlas_front[1]);
             gl.uniform_2_f32(Some(&self.u_atlas_back), m.atlas_back[0], m.atlas_back[1]);
             gl.uniform_1_f32(Some(&self.u_alpha_cutoff), m.alpha_cutoff);
+            gl.uniform_1_f32(Some(&self.u_coverage_lod), m.coverage_lod);
             gl.uniform_1_f32(Some(&self.u_translucency), m.translucency);
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
             gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
@@ -983,7 +1044,15 @@ impl GpuLeaves {
             gl.front_face(glow::CCW);
             gl.cull_face(glow::BACK);
             gl.enable(glow::CULL_FACE);
+            // The filtered alpha becomes real per-sample coverage rather than a blend,
+            // so a minified canopy resolves to its true density with no sorting and no
+            // fringe. Blending on top of that would composite the leaf twice, once in
+            // the coverage resolve and once in the blend, so it has to be off.
+            gl.enable(glow::SAMPLE_ALPHA_TO_COVERAGE);
+            gl.disable(glow::BLEND);
             self.bind_and_draw(gl);
+            gl.enable(glow::BLEND);
+            gl.disable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             gl.disable(glow::CULL_FACE);
             gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
@@ -1012,7 +1081,6 @@ impl SkyParams {
 pub struct GpuSky {
     program: glow::Program,
     vao: glow::VertexArray,
-    vbo: glow::Buffer,
     u_inv_view_proj: glow::UniformLocation,
     u_cam_pos: glow::UniformLocation,
     u_sun_dir: glow::UniformLocation,
@@ -1041,7 +1109,6 @@ impl GpuSky {
                 u_sun_color: loc(gl, &program, "u_sun_color"),
                 program,
                 vao,
-                vbo,
             }
         }
     }
@@ -1080,13 +1147,6 @@ impl GpuSky {
         }
     }
 
-    pub fn delete(&self, gl: &glow::Context) {
-        unsafe {
-            gl.delete_buffer(self.vbo);
-            gl.delete_vertex_array(self.vao);
-            gl.delete_program(self.program);
-        }
-    }
 }
 
 pub struct GroundDrawParams<'a> {
@@ -1225,11 +1285,4 @@ impl GpuGround {
         }
     }
 
-    pub fn delete(&self, gl: &glow::Context) {
-        unsafe {
-            gl.delete_buffer(self.vbo);
-            gl.delete_vertex_array(self.vao);
-            gl.delete_program(self.program);
-        }
-    }
 }

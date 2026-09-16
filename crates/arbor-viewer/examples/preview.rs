@@ -28,6 +28,9 @@ use image::{Rgb, RgbImage};
 const TEXTURE_DIR: &str = "assets/textures";
 const ALPHA_CUTOFF: f32 = 0.35;
 const SHADOW_SIZE: i32 = 2048;
+/// The shaders treat `sun_color` as irradiance, so a Lambert surface returns this
+/// fraction of it. Mirrored here or the preview comes out several times too bright.
+const INV_PI: f32 = std::f32::consts::FRAC_1_PI;
 
 struct Target {
     color: Vec<Vec3>,
@@ -93,8 +96,10 @@ impl ShadowMap {
             }
         };
         raster_into(&mesh.positions, &mesh.indices, None, None);
-        if !leaves.is_empty() {
-            if let Some(t) = tex {
+        if !leaves.is_empty()
+            && let Some(t) = tex
+        {
+            {
                 let lp = &params.leaves;
                 let (cols, rows) = (lp.atlas_cols.max(1) as f32, lp.atlas_rows.max(1) as f32);
                 let scale = Vec2::new(1.0 / cols, 1.0 / rows);
@@ -218,7 +223,7 @@ fn main() {
 
     // The same fit the viewer uses, so the shadow seen here is the shadow it draws.
     let mut lo_all = lo;
-    let mut hi_all = hi;
+    let hi_all = hi;
     lo_all.y = lo_all.y.min(0.0);
     let (light_vp, texel) = lighting::light_view_proj(
         (lo_all.to_array(), hi_all.to_array()),
@@ -243,7 +248,7 @@ fn main() {
     if !args.iter().any(|a| a == "--no-ground") {
         draw_ground(&mut target, vp, eye, &sky, &shadows, extent * 14.0);
     }
-    draw_bark(&mut target, &mesh, vp, eye, &sky, &shadows, bark.as_ref());
+    draw_bark(&mut target, &mesh, vp, &sky, &shadows, bark.as_ref());
     if params.leaves.enabled {
         draw_leaves(
             &mut target,
@@ -427,7 +432,7 @@ fn draw_ground(
             let albedo = albedo_base * (0.84 + 0.32 * grain);
             let ndl = n.dot(sky.sun_dir).max(0.0);
             let vis = shadows.visibility(f.world, n, ndl);
-            let mut color = albedo * (ndl * vis * sky.sun_color + sky.ambient(n));
+            let mut color = albedo * (ndl * vis * sky.sun_color * INV_PI + sky.ambient(n));
             let view = (f.world - eye).normalize_or(Vec3::Y);
             let fade = smoothstep(fade_start, fade_end, (f.world.xz() - eye.xz()).length());
             color = color.lerp(sky.background(view), fade);
@@ -457,7 +462,6 @@ fn draw_bark(
     t: &mut Target,
     mesh: &Mesh,
     vp: Mat4,
-    eye: Vec3,
     sky: &lighting::SkyParams,
     shadows: &ShadowMap,
     tex: Option<&Tex>,
@@ -483,7 +487,7 @@ fn draw_bark(
             let n = f.normal.normalize_or_zero();
             let ndl = n.dot(sky.sun_dir).max(0.0);
             let vis = shadows.visibility(f.world, n, ndl);
-            Some(albedo * (ndl * vis * sky.sun_color + sky.ambient(n)))
+            Some(albedo * (ndl * vis * sky.sun_color * INV_PI + sky.ambient(n)))
         });
     }
 }
@@ -550,7 +554,7 @@ fn draw_leaves(
             let lobe = 0.35 + 0.65 * view.dot(-sky.sun_dir).max(0.0).powi(3);
             let transmitted = albedo * 0.9 * through * lobe;
             Some(
-                (albedo * wrapped * vis + transmitted * vis) * sky.sun_color
+                (albedo * wrapped * vis * INV_PI + transmitted * vis) * sky.sun_color
                     + albedo * sky.ambient(n),
             )
         });

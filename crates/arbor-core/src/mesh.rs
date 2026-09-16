@@ -93,6 +93,12 @@ struct StemPath {
 }
 
 impl StemPath {
+    /// A branch that only ever got one segment: an anchor ring and a single node.
+    /// Most of a tree is these, so what they cost decides what the mesh costs.
+    fn is_single_segment(&self) -> bool {
+        !self.is_trunk && self.points.len() == 2
+    }
+
     fn build(sk: &Skeleton, stem: &[u32], mp: &MeshParams) -> Option<StemPath> {
         let first = *stem.first()? as usize;
         let is_trunk = sk.nodes[first].parent.is_none();
@@ -221,6 +227,47 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
     sink.mesh
 }
 
+/// One cone: the anchor ring of a stem drawn straight to its tip.
+fn emit_spike(
+    sink: &mut MeshSink,
+    path: &StemPath,
+    mp: &MeshParams,
+    phase: (f32, f32),
+    radial: u32,
+) {
+    let d = path.dirs[0];
+    let n = ortho_unit(ortho_of(d), d);
+    let b = d.cross(n);
+    let arc = path.arc[1];
+
+    let base = sink.vertex_offset();
+    for j in 0..=radial {
+        let a = j as f32 / radial as f32 * TAU;
+        let e_r = n * a.cos() + b * a.sin();
+        let e_a = b * a.cos() - n * a.sin();
+        let r = path.radius_at(0, a, mp, phase);
+        // The cone narrows to nothing over its length, so the normal leans back
+        // along the axis by that slope instead of pointing straight out.
+        let slope = if arc > 1e-6 { -r / arc } else { 0.0 };
+        let normal = norm_or_zero(e_r - d * slope);
+        let normal = if normal == Vec3::ZERO { e_r } else { normal };
+        let uv = [
+            j as f32 / radial as f32 * path.radii[0] * TAU / mp.uv_scale.max(1e-4),
+            0.0,
+        ];
+        sink.push_vertex(path.points[0] + e_r * r, normal, e_a, uv);
+    }
+
+    let tip = path.points[1] + path.dirs[1] * mp.tip_length.max(path.radii[1] * 1.2);
+    let apex = sink.vertex_offset();
+    sink.push_vertex(tip, path.dirs[1], ortho_of(path.dirs[1]), [0.0, arc]);
+    for j in 0..radial {
+        sink.mesh
+            .indices
+            .extend_from_slice(&[base + j, base + j + 1, apex]);
+    }
+}
+
 fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32, f32)) {
     let last = path.len() - 1;
     // Resolution follows the thickest ring so a tapering stem keeps its silhouette
@@ -228,6 +275,15 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     let r_max = path.radii.iter().copied().fold(0.0f32, f32::max) * path.socket[0];
     let radial = ((mp.radial_per_meter * r_max).round() as i32)
         .clamp(mp.min_radial.max(3) as i32, mp.max_radial.max(3) as i32) as u32;
+
+    // A single-segment branch is drawn as one cone from its anchor ring to a point,
+    // rather than a ring pair swept into a tube and then capped with a cone as well.
+    // The shape is the same at the scale these appear, for a third of the triangles,
+    // and the tree is overwhelmingly made of them.
+    if path.is_single_segment() {
+        emit_spike(sink, path, mp, phase, radial);
+        return;
+    }
 
     let mut ring_bases: Vec<u32> = Vec::with_capacity(path.len());
     let mut n = ortho_of(path.dirs[0]);

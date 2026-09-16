@@ -71,7 +71,7 @@ impl Default for MeshParams {
         Self {
             uv_scale: 1.2,
             radial_per_meter: 44.0,
-            min_radial: 6,
+            min_radial: 4,
             max_radial: 24,
             root_flare: 0.9,
             flare_height: 1.4,
@@ -221,6 +221,63 @@ pub enum ChildPattern {
     Continuous { density: f32 },
 }
 
+/// How a single-leaf texture is grown into a leaf-cluster one.
+///
+/// Leaves are laid down a shoot, alternating sides, splayed wide at the base and
+/// closing toward the tip. Angles are measured off the length of the cell, and
+/// positions are fractions of it, so a cluster describes itself in the same terms
+/// whatever resolution it is generated at.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LeafClusterParams {
+    /// Leaves composited into one cell. More of them fills the card without costing
+    /// a single triangle, which is the whole trade clustering exists to make.
+    pub count: u32,
+    /// Length of a leaf at the base of the shoot, as a fraction of the cell. Together
+    /// with `card_length` this is what fixes the real-world size of a leaf.
+    pub leaf_length: f32,
+    /// Angle off the shoot at its base, and at its tip.
+    pub base_angle_deg: f32,
+    pub tip_angle_deg: f32,
+    /// Size of a tip leaf against a base one.
+    pub tip_scale: f32,
+    /// Width of a placed leaf against its natural width. A conifer has no needle art
+    /// of its own: below about a quarter, a broad blade narrows into one, which at
+    /// card scale is all a needle is.
+    pub leaf_narrow: f32,
+    pub angle_variance_deg: f32,
+    /// Where along the cell the first and last leaves attach, 1.0 being the base.
+    pub shoot_base: f32,
+    pub shoot_tip: f32,
+    /// Width against length of the card the source leaf texture was authored for.
+    /// Leaves are rotated in pixels, so a cell whose pixels are not square in world
+    /// terms has to be stretched first or every rotated leaf comes out sheared.
+    pub source_aspect: f32,
+    /// Resolution of one generated cell. Cells are square, so a species that clusters
+    /// wants a square card as well.
+    pub cell_size: u32,
+    pub seed: u64,
+}
+
+impl Default for LeafClusterParams {
+    fn default() -> Self {
+        Self {
+            count: 24,
+            leaf_length: 0.45,
+            base_angle_deg: 72.0,
+            tip_angle_deg: 26.0,
+            tip_scale: 0.55,
+            leaf_narrow: 1.0,
+            angle_variance_deg: 11.0,
+            shoot_base: 0.99,
+            shoot_tip: 0.26,
+            source_aspect: 1.0,
+            cell_size: 1024,
+            seed: 7,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LeafParams {
@@ -262,6 +319,11 @@ pub struct LeafParams {
     pub hue_variance: f32,
     /// Darkening applied to leaves deep inside the crown.
     pub interior_shade: f32,
+    /// When set, the leaf texture named below is a single leaf, and the atlas the
+    /// renderer actually samples is generated from it at load. `atlas_cols` and
+    /// `atlas_rows` describe both, since clustering maps each source cell to one
+    /// cluster cell.
+    pub cluster: Option<LeafClusterParams>,
     pub atlas_cols: u32,
     pub atlas_rows: u32,
     /// Atlas cells, counted left to right then top to bottom, for the lit face and
@@ -294,6 +356,7 @@ impl Default for LeafParams {
             tint: [1.0, 1.0, 1.0],
             hue_variance: 0.12,
             interior_shade: 0.35,
+            cluster: None,
             atlas_cols: 1,
             atlas_rows: 1,
             atlas_front: 0,

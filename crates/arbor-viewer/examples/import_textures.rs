@@ -2,16 +2,21 @@
 //! `assets/textures`. Run it again to re-import from a different source pack.
 //!
 //! cargo run --release -p arbor-viewer --example import_textures -- \
-//!     <out-name> --albedo a.png [--alpha m.png] [--normal n.png] [--rough r.png] [--size 1024]
+//!     <out-name> --albedo a.png [--alpha m.png] [--normal n.png]
+//!         [--rough r.png | --spec s.png] [--size 1024]
 //!
 //! The albedo gets its alpha from `--alpha` (red channel) and has its colour bled
-//! outward into the transparent region. Without that bleed, both the downscale here
-//! and the mip chain on the GPU average leaf colour against the black background and
-//! every leaf picks up a dark halo.
+//! outward into the transparent region.
+//!
+//! `--spec` takes a specular-intensity map instead of a roughness one and inverts it,
+//! since bright specular means a smooth surface. Art authored for a specular workflow
+//! ships that map rather than the roughness the shader here wants.
 
-use image::{imageops, Rgba, RgbaImage};
+use image::{imageops, RgbaImage};
 
-const BLEED_PASSES: u32 = 24;
+#[path = "common/texture.rs"]
+mod texture;
+use texture::{from_bitmap, open, save, to_bitmap};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,7 +44,11 @@ fn main() {
                 }
             }
         }
-        bleed_color_outward(&mut img);
+        // Core owns the bleed, so the conditioning here and the cluster generation
+        // the renderer does at load cannot drift apart.
+        let mut bitmap = to_bitmap(&img);
+        arbor_core::cluster::bleed_color_outward(&mut bitmap);
+        let img = from_bitmap(&bitmap);
         let out = imageops::resize(&img, size, size, imageops::FilterType::Triangle);
         save(&out, out_dir, &name, "albedo");
     }
@@ -50,12 +59,15 @@ fn main() {
             save(&out, out_dir, &name, suffix);
         }
     }
-}
-
-fn open(path: &str) -> RgbaImage {
-    image::open(path)
-        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
-        .to_rgba8()
+    if let Some(path) = opt("--spec") {
+        let mut img = open(&path);
+        for p in img.pixels_mut() {
+            let rough = 255 - p.0[0];
+            p.0 = [rough, rough, rough, 255];
+        }
+        let out = imageops::resize(&img, size, size, imageops::FilterType::Triangle);
+        save(&out, out_dir, &name, "roughness");
+    }
 }
 
 fn apply_alpha(img: &mut RgbaImage, mask: &RgbaImage) {
@@ -69,97 +81,4 @@ fn apply_alpha(img: &mut RgbaImage, mask: &RgbaImage) {
             img.get_pixel_mut(x, y).0[3] = mask.get_pixel(mx, my).0[0];
         }
     }
-}
-
-/// Flood the colour of opaque pixels outward across the transparent background so
-/// filtering never mixes leaf colour with whatever was behind it.
-fn bleed_color_outward(img: &mut RgbaImage) {
-    let (w, h) = img.dimensions();
-    let mut known: Vec<bool> = img.pixels().map(|p| p.0[3] > 0).collect();
-    if !known.iter().any(|&k| k) {
-        return;
-    }
-
-    for _ in 0..BLEED_PASSES {
-        let source = known.clone();
-        let mut filled_any = false;
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) as usize;
-                if source[i] {
-                    continue;
-                }
-                let (mut sum, mut n) = ([0u32; 3], 0u32);
-                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                        continue;
-                    }
-                    let ni = (ny as u32 * w + nx as u32) as usize;
-                    if !source[ni] {
-                        continue;
-                    }
-                    let p = img.get_pixel(nx as u32, ny as u32).0;
-                    for k in 0..3 {
-                        sum[k] += p[k] as u32;
-                    }
-                    n += 1;
-                }
-                if n == 0 {
-                    continue;
-                }
-                let a = img.get_pixel(x, y).0[3];
-                img.put_pixel(
-                    x,
-                    y,
-                    Rgba([
-                        (sum[0] / n) as u8,
-                        (sum[1] / n) as u8,
-                        (sum[2] / n) as u8,
-                        a,
-                    ]),
-                );
-                known[i] = true;
-                filled_any = true;
-            }
-        }
-        if !filled_any {
-            break;
-        }
-    }
-
-    // Anything the bleed never reached keeps filtering neutral by taking the mean.
-    let (mut sum, mut n) = ([0u64; 3], 0u64);
-    for (i, p) in img.pixels().enumerate() {
-        if known[i] {
-            for (k, total) in sum.iter_mut().enumerate() {
-                *total += p.0[k] as u64;
-            }
-            n += 1;
-        }
-    }
-    if n == 0 {
-        return;
-    }
-    let mean = [
-        (sum[0] / n) as u8,
-        (sum[1] / n) as u8,
-        (sum[2] / n) as u8,
-    ];
-    for y in 0..h {
-        for x in 0..w {
-            if !known[(y * w + x) as usize] {
-                let a = img.get_pixel(x, y).0[3];
-                img.put_pixel(x, y, Rgba([mean[0], mean[1], mean[2], a]));
-            }
-        }
-    }
-}
-
-fn save(img: &RgbaImage, dir: &std::path::Path, name: &str, suffix: &str) {
-    let path = dir.join(format!("{name}_{suffix}.png"));
-    img.save(&path).unwrap_or_else(|e| panic!("write {path:?}: {e}"));
-    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    println!("{} ({} KB)", path.display(), bytes / 1024);
 }

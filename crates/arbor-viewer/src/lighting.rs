@@ -13,6 +13,10 @@ pub struct SkyParams {
     pub sun_color: Vec3,
 }
 
+// The viewer sends these numbers to the shaders rather than evaluating them on the
+// CPU, so from the binary alone the evaluators look unused; the offline preview in
+// examples/preview.rs shades with them, and the tests below check them.
+#[allow(dead_code)]
 impl SkyParams {
     /// Low warm sun under a cold dome, with a warm bounce coming back off the
     /// ground: the light of the first half hour after sunrise.
@@ -22,7 +26,9 @@ impl SkyParams {
             horizon: Vec3::new(0.62, 0.34, 0.22),
             ground_bounce: Vec3::new(0.085, 0.065, 0.055),
             sun_dir: Vec3::new(0.0, 0.22, 1.0).normalize(),
-            sun_color: Vec3::new(4.2, 2.05, 0.85),
+            // Irradiance, not radiance: every surface divides by PI on its way to
+            // Lambert, so this reads high for what is a dim, very warm sun.
+            sun_color: Vec3::new(11.0, 5.4, 2.25),
         }
     }
 

@@ -12,7 +12,7 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
-use arbor_core::species::{builtin_presets, parse_species};
+use arbor_core::species::{builtin_presets, parse_species, LeafClusterParams};
 use arbor_core::{build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
 
 use gpu::{
@@ -31,7 +31,60 @@ enum RenderMode {
     Normals,
 }
 
+/// Asks the viewer to save what it drew and quit, so a capture comes from the real
+/// renderer rather than from anything that merely imitates it.
+#[derive(Clone)]
+struct Capture {
+    path: String,
+    /// Frames to let pass first: the tree is rebuilt on the first update and the
+    /// camera frames itself a frame later.
+    settle: u32,
+}
+
+/// Overrides a capture run can set, so a frame can be taken with one thing changed
+/// and the difference attributed to it.
+#[derive(Default)]
+struct Startup {
+    capture: Option<Capture>,
+    species: Option<String>,
+    seed: Option<u64>,
+    leaves: Option<bool>,
+    shadows: Option<bool>,
+    translucency: Option<f32>,
+    sun_elevation: Option<f32>,
+    sun_azimuth: Option<f32>,
+    sun_intensity: Option<f32>,
+    yaw: Option<f32>,
+    pitch: Option<f32>,
+    distance: Option<f32>,
+    target_y: Option<f32>,
+    coverage_lod: Option<f32>,
+}
+
 fn main() -> eframe::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let flag = |key: &str| args.iter().position(|a| a == key).and_then(|i| args.get(i + 1));
+    let num = |key: &str| -> Option<f32> { flag(key).and_then(|s| s.parse().ok()) };
+    let startup = Startup {
+        capture: flag("--screenshot").map(|path| Capture {
+            path: path.clone(),
+            settle: flag("--settle").and_then(|s| s.parse().ok()).unwrap_or(8),
+        }),
+        species: flag("--species").cloned(),
+        seed: flag("--seed").and_then(|s| s.parse().ok()),
+        leaves: args.iter().any(|a| a == "--no-leaves").then_some(false),
+        shadows: args.iter().any(|a| a == "--no-shadows").then_some(false),
+        translucency: num("--translucency"),
+        sun_elevation: num("--sun-elevation"),
+        sun_azimuth: num("--sun-azimuth"),
+        sun_intensity: num("--sun-intensity"),
+        yaw: num("--yaw"),
+        pitch: num("--pitch"),
+        distance: num("--distance"),
+        target_y: num("--target-y"),
+        coverage_lod: num("--coverage-lod"),
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1600.0, 950.0])
@@ -41,7 +94,28 @@ fn main() -> eframe::Result<()> {
         multisampling: 4,
         ..Default::default()
     };
-    eframe::run_native("arbor", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native(
+        "arbor",
+        options,
+        Box::new(move |cc| Ok(Box::new(App::new(cc, startup)))),
+    )
+}
+
+/// Writes an egui screenshot out as a PNG.
+fn save_screenshot(image: &egui::ColorImage, path: &str) {
+    let [w, h] = image.size;
+    let mut out = image::RgbaImage::new(w as u32, h as u32);
+    for (i, px) in image.pixels.iter().enumerate() {
+        out.put_pixel(
+            (i % w) as u32,
+            (i / w) as u32,
+            image::Rgba([px.r(), px.g(), px.b(), 255]),
+        );
+    }
+    match out.save(path) {
+        Ok(()) => println!("wrote {path} ({w}x{h})"),
+        Err(e) => eprintln!("screenshot failed: {e}"),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -109,7 +183,9 @@ struct App {
     bark_material: MaterialTextures,
     leaf_material: Option<MaterialTextures>,
     loaded_bark: String,
-    loaded_leaf: String,
+    /// Texture name and cluster arrangement the leaf material was built from.
+    /// Both go in the key, because changing either has to rebuild the atlas.
+    loaded_leaf: (String, Option<LeafClusterParams>),
     presets: Vec<(&'static str, &'static str)>,
     preset_index: usize,
     params: SpeciesParams,
@@ -135,13 +211,26 @@ struct App {
     sun_azimuth: f32,
     sun_elevation: f32,
     auto_frame: bool,
+    capture: Option<Capture>,
+    frames: u32,
+    /// Mip level where soft leaf coverage gives way to a hard cutoff.
+    coverage_lod: f32,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         let gl = cc.gl.clone().expect("eframe must run with the glow renderer");
         let presets = builtin_presets();
-        let params = parse_species(presets[0].1).expect("embedded pine preset parses");
+        let preset_index = startup
+            .species
+            .as_deref()
+            .and_then(|want| presets.iter().position(|(n, _)| *n == want))
+            .unwrap_or(0);
+        let mut params =
+            parse_species(presets[preset_index].1).expect("embedded preset parses");
+        if let Some(seed) = startup.seed {
+            params.seed = seed;
+        }
         let skeleton = grow(&params);
         let mesh = build_mesh(&skeleton, &params);
         let aabb = mesh.aabb();
@@ -162,9 +251,9 @@ impl App {
         let sky_pass = GpuSky::new(&gl);
         let ground_pass = GpuGround::new(&gl);
         let loaded_bark = params.mesh.bark_texture.clone();
-        let loaded_leaf = params.leaves.texture.clone();
+        let loaded_leaf = (params.leaves.texture.clone(), params.leaves.cluster.clone());
         let bark_material = unsafe { gpu::load_material(&gl, TEXTURE_DIR, &loaded_bark) };
-        let leaf_material = unsafe { gpu::load_leaf_material(&gl, TEXTURE_DIR, &loaded_leaf) };
+        let leaf_material = unsafe { gpu::load_leaf_material(&gl, TEXTURE_DIR, &params.leaves) };
 
         let mut app = Self {
             gl: Arc::clone(&gl),
@@ -182,7 +271,7 @@ impl App {
             loaded_bark,
             loaded_leaf,
             presets,
-            preset_index: 0,
+            preset_index,
             params,
             skeleton,
             stats: SkeletonStats::default(),
@@ -213,7 +302,46 @@ impl App {
             sun_azimuth: 146.0,
             sun_elevation: 16.0,
             auto_frame: true,
+            capture: startup.capture,
+            frames: 0,
+            coverage_lod: 9.0,
         };
+        if let Some(v) = startup.leaves {
+            app.show_leaves = v;
+            app.params.leaves.enabled = v;
+        }
+        if let Some(v) = startup.shadows {
+            app.shadows = v;
+        }
+        if let Some(v) = startup.translucency {
+            app.leaf_translucency = v;
+        }
+        if let Some(v) = startup.sun_elevation {
+            app.sun_elevation = v;
+        }
+        if let Some(v) = startup.sun_azimuth {
+            app.sun_azimuth = v;
+        }
+        if let Some(v) = startup.sun_intensity {
+            app.sun_intensity = v;
+        }
+        if let Some(v) = startup.yaw {
+            app.camera.yaw = v;
+        }
+        if let Some(v) = startup.pitch {
+            app.camera.pitch = v;
+        }
+        if let Some(v) = startup.distance {
+            app.camera.distance = v;
+            app.auto_frame = false;
+        }
+        if let Some(v) = startup.target_y {
+            app.camera.target.y = v;
+            app.auto_frame = false;
+        }
+        if let Some(v) = startup.coverage_lod {
+            app.coverage_lod = v;
+        }
         app.stats = app.skeleton.stats();
         app.rebuild_overlay();
         app
@@ -248,13 +376,17 @@ impl App {
             self.bark_material =
                 unsafe { gpu::load_material(&self.gl, TEXTURE_DIR, &self.loaded_bark) };
         }
-        if self.params.leaves.texture != self.loaded_leaf {
+        let leaf_key = (
+            self.params.leaves.texture.clone(),
+            self.params.leaves.cluster.clone(),
+        );
+        if leaf_key != self.loaded_leaf {
             if let Some(old) = self.leaf_material.take() {
                 old.delete(&self.gl);
             }
-            self.loaded_leaf = self.params.leaves.texture.clone();
+            self.loaded_leaf = leaf_key;
             self.leaf_material =
-                unsafe { gpu::load_leaf_material(&self.gl, TEXTURE_DIR, &self.loaded_leaf) };
+                unsafe { gpu::load_leaf_material(&self.gl, TEXTURE_DIR, &self.params.leaves) };
         }
     }
 
@@ -360,11 +492,14 @@ impl App {
         if self.leaf_material.is_none() {
             ui.colored_label(
                 egui::Color32::YELLOW,
-                format!("no {}_albedo.png in {TEXTURE_DIR}", self.loaded_leaf),
+                format!("no {}_albedo.png in {TEXTURE_DIR}", self.loaded_leaf.0),
             );
         }
         ui.add(
             egui::Slider::new(&mut self.leaf_translucency, 0.0..=2.0).text("Leaf translucency"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.coverage_lod, 0.0..=10.0).text("Leaf coverage LOD"),
         );
         ui.checkbox(&mut self.wireframe, "Wireframe");
         ui.checkbox(&mut self.shadows, "Shadows");
@@ -494,6 +629,27 @@ fn push_skeleton(skeleton: &Skeleton, verts: &mut Vec<f32>) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // A capture run draws a few frames, asks egui for the finished image, writes
+        // it and quits. What lands on disk is the real renderer, not a stand-in.
+        if let Some(capture) = self.capture.clone() {
+            self.frames += 1;
+            if self.frames == capture.settle {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                    egui::UserData::default(),
+                ));
+            }
+            let shot = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(image) = shot {
+                save_screenshot(&image, &capture.path);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
         let screen = ctx.screen_rect();
         self.camera.aspect = screen.width() / screen.height().max(1.0);
 
@@ -529,8 +685,9 @@ impl eframe::App for App {
                 let tree_height = self.stats.height.max(1.0);
                 let bark_material = self.bark_material;
                 let leaf_material = self.leaf_material;
-                let leaf_params =
+                let mut leaf_params =
                     LeafMaterialParams::from_species(&self.params.leaves, self.leaf_translucency);
+                leaf_params.coverage_lod = self.coverage_lod;
                 let draw_leaves = self.show_leaves && leaf_material.is_some();
                 let cam = self.camera;
                 let aabb = self.aabb;
@@ -573,13 +730,28 @@ impl eframe::App for App {
                         let normal_bias = texel * 1.6;
 
                         unsafe {
-                            if shadows {
+                            {
+                                // The map is cleared whether or not it is drawn into:
+                                // the lit passes sample it either way, and an
+                                // uncleared depth texture reads as everything being
+                                // in shadow.
                                 shadow.bind(gl);
                                 gl.viewport(0, 0, shadow.size, shadow.size);
+                                // glClear obeys both the scissor box and the depth
+                                // mask. egui has a scissor rect set when this callback
+                                // runs, so without turning it off only the part of the
+                                // shadow map under that rect is cleared and the rest
+                                // keeps whatever was in it last frame. That stale
+                                // depth reads as shadow, which is the hard-edged slab
+                                // and the long straight bands lying across the ground.
+                                gl.disable(glow::SCISSOR_TEST);
+                                gl.depth_mask(true);
                                 gl.enable(glow::DEPTH_TEST);
                                 gl.depth_func(glow::LEQUAL);
                                 gl.clear_depth_f32(1.0);
                                 gl.clear(glow::DEPTH_BUFFER_BIT);
+                            }
+                            if shadows {
                                 gl.use_program(Some(depth_pass.program));
                                 gl.uniform_matrix_4_f32_slice(
                                     Some(&depth_pass.u_light_view_proj),
@@ -599,8 +771,10 @@ impl eframe::App for App {
                                         leaf_params,
                                     );
                                 }
-                                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                             }
+                            // Back to the screen whether or not casters were drawn,
+                            // or the whole frame lands in the shadow map.
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
                             gl.viewport(0, 0, sw.max(1), sh.max(1));
                             gl.enable(glow::SCISSOR_TEST);
@@ -669,6 +843,7 @@ impl eframe::App for App {
                                 color_pass.draw_wire(
                                     gl,
                                     &mesh_gpu,
+                                    draw_leaves.then_some(&*leaves_gpu),
                                     view_proj,
                                     [0.02, 0.02, 0.03, 1.0],
                                 );
