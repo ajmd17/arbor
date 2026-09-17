@@ -101,7 +101,7 @@
             children: (
                 pattern: Continuous(density: 4.6),
                 start_fraction: 0.15,
-                end_fraction: 1.0,
+                end_fraction: 0.98,
                 crotch_angle_deg: 54.0,
                 crotch_angle_tip_deg: 30.0,
                 crotch_variance_deg: 14.0,
@@ -135,7 +135,7 @@
             children: (
                 pattern: Continuous(density: 6.0),
                 start_fraction: 0.2,
-                end_fraction: 1.0,
+                end_fraction: 0.98,
                 crotch_angle_deg: 44.0,
                 crotch_variance_deg: 14.0,
                 roll_variance_deg: 14.0,

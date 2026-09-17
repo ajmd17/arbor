@@ -155,7 +155,13 @@ fn write_obj(
 }
 
 fn print_usage() {
-    println!("arbor-cli <pine|oak|path/to/species.ron> [--seed N] [--obj out.obj] [--no-leaves]");
+    // Listed from the presets themselves, so adding a species does not leave the
+    // usage line quietly out of date.
+    let names: Vec<&str> = builtin_presets().into_iter().map(|(n, _)| n).collect();
+    println!(
+        "arbor-cli <{}|path/to/species.ron> [--seed N] [--obj out.obj] [--no-leaves]",
+        names.join("|")
+    );
     println!("Grows a tree, builds bark and leaf meshes, prints stats.");
     println!("--obj writes a triangle OBJ with separate `bark` and `leaves` groups.");
 }

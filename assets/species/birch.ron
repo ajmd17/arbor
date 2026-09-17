@@ -113,7 +113,7 @@
             children: (
                 pattern: Continuous(density: 3.2),
                 start_fraction: 0.2,
-                end_fraction: 1.0,
+                end_fraction: 0.98,
                 crotch_angle_deg: 34.0,
                 crotch_variance_deg: 10.0,
                 roll_variance_deg: 14.0,
@@ -129,7 +129,7 @@
             // Where the weeping starts. These are short enough that they cannot bend
             // far on their own, so most of the hang comes from leaving an already
             // arching parent at a wide angle rather than from curving afterwards.
-            length: 1.25,
+            length: 1.70,
             length_variance: 0.24,
             radius: 0.015,
             radius_ratio: 0.5,
@@ -151,7 +151,7 @@
             children: (
                 pattern: Continuous(density: 2.6),
                 start_fraction: 0.2,
-                end_fraction: 1.0,
+                end_fraction: 0.98,
                 crotch_angle_deg: 30.0,
                 crotch_variance_deg: 10.0,
                 roll_variance_deg: 15.0,
@@ -164,7 +164,7 @@
             ),
         ),
         (
-            length: 0.58,
+            length: 0.82,
             length_variance: 0.26,
             radius: 0.0075,
             radius_ratio: 0.46,
@@ -186,7 +186,7 @@
             children: (
                 pattern: Continuous(density: 3.0),
                 start_fraction: 0.15,
-                end_fraction: 1.0,
+                end_fraction: 0.98,
                 crotch_angle_deg: 28.0,
                 crotch_variance_deg: 11.0,
                 roll_variance_deg: 16.0,
@@ -202,7 +202,7 @@
             // The hanging shoots. They leave their parent pointing more down than out
             // and are too short to be bent back up by anything, which is the whole of
             // the weeping habit.
-            length: 0.26,
+            length: 0.38,
             length_variance: 0.30,
             radius: 0.004,
             radius_ratio: 0.44,
@@ -243,7 +243,7 @@
         // A birch leaf is a third the length of an oak's, so the same art is baked
         // small and packed hard. The canopy is thinner than the oak's on purpose:
         // seeing the sky through a birch is most of what it looks like.
-        density: 2.3,
+        density: 3.0,
         spacing_variance: 0.85,
         leafy_length: 0.30,
         cluster_size: 3,

@@ -5,9 +5,15 @@ use crate::envelope::EnvelopeParams;
 pub const PINE_RON: &str = include_str!("../../../assets/species/pine.ron");
 pub const OAK_RON: &str = include_str!("../../../assets/species/oak.ron");
 pub const BIRCH_RON: &str = include_str!("../../../assets/species/birch.ron");
+pub const FIR_RON: &str = include_str!("../../../assets/species/fir.ron");
 
 pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
-    vec![("pine", PINE_RON), ("oak", OAK_RON), ("birch", BIRCH_RON)]
+    vec![
+        ("pine", PINE_RON),
+        ("oak", OAK_RON),
+        ("birch", BIRCH_RON),
+        ("fir", FIR_RON),
+    ]
 }
 
 pub fn parse_species(ron_src: &str) -> Result<SpeciesParams, String> {

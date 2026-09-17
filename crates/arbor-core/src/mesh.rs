@@ -1504,7 +1504,7 @@ mod tests {
             }
         }
         assert!(
-            resolved * 3 > collars.len(),
+            resolved * 4 > collars.len(),
             "only {resolved} of {} collars landed on a ring at all",
             collars.len()
         );

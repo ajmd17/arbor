@@ -1,4 +1,4 @@
-use arbor_core::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON};
+use arbor_core::species::{parse_species, BIRCH_RON, FIR_RON, OAK_RON, PINE_RON};
 use arbor_core::grow;
 
 fn stems_at_level(
@@ -48,6 +48,55 @@ fn oak_has_split_trunk_and_dense_canopy() {
     assert!(trunk_forks >= 1, "oak should fork into co-dominant stems, got {trunk_forks} forks");
     let (level3_stems, _) = stems_at_level(&sk, 3);
     assert!(level3_stems > 20, "oak level-3 twigs: {level3_stems}");
+}
+
+/// What separates the fir from the pine, which is the preset it is nearest to: it
+/// keeps one leader for its whole height, and it wears its crown nearly to the ground
+/// rather than on a bare pole.
+#[test]
+fn fir_keeps_one_leader_and_a_crown_to_the_ground() {
+    let params = parse_species(FIR_RON).unwrap();
+    let sk = grow(&params);
+    let stats = sk.stats();
+    assert!(stats.height > 22.0, "fir height {}", stats.height);
+
+    // split_evenness is 0, so a fork must stay a side branch: no two level-0 runs may
+    // both be a substantial share of the tree, or the leader has been given up.
+    let mut trunk_runs: Vec<f32> = sk
+        .stem_runs()
+        .into_iter()
+        .filter(|r| r.len() > 1 && sk.nodes[r[0] as usize].level == 0)
+        .map(|r| {
+            r.windows(2)
+                .map(|w| {
+                    (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position).length()
+                })
+                .sum()
+        })
+        .collect();
+    trunk_runs.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    if let Some(second) = trunk_runs.get(1) {
+        assert!(
+            *second < trunk_runs[0] * 0.5,
+            "fir grew a co-dominant trunk: runs of {:.1} m and {second:.1} m",
+            trunk_runs[0]
+        );
+    }
+
+    // Foliage in the bottom fifth of the tree, which is what a pine does not have.
+    let leaves = arbor_core::build_leaves(&sk, &params);
+    // Counted in card corners, which is all the mesh keeps; four to a card.
+    let low = leaves
+        .positions
+        .iter()
+        .filter(|p| p[1] < stats.height * 0.2)
+        .count();
+    assert!(
+        low > 400,
+        "fir carries only {} cards below {:.1} m",
+        low / 4,
+        stats.height * 0.2
+    );
 }
 
 #[test]
@@ -101,7 +150,12 @@ fn worst_stem_turn(sk: &arbor_core::Skeleton) -> (f32, f32) {
 
 #[test]
 fn stems_arc_without_curling_round_on_themselves() {
-    for (name, ron) in [("pine", PINE_RON), ("oak", OAK_RON), ("birch", BIRCH_RON)] {
+    for (name, ron) in [
+        ("pine", PINE_RON),
+        ("oak", OAK_RON),
+        ("birch", BIRCH_RON),
+        ("fir", FIR_RON),
+    ] {
         let params = parse_species(ron).unwrap();
         for seed in 1..=8u64 {
             let mut params = params.clone();

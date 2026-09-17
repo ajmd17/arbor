@@ -1,6 +1,6 @@
 //! What the branch structure actually measures, level by level.
 //!
-//! cargo run --release -p arbor-core --example morphology -- [pine|oak]
+//! cargo run --release -p arbor-core --example morphology -- <preset>
 //!
 //! Screenshots say a crown looks wrong; they do not say why. These are the numbers a
 //! forester would take off a real tree, so a preset can be argued with rather than
@@ -19,7 +19,8 @@ use arbor_core::{grow, Skeleton};
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "oak".into());
     let Some((_, src)) = builtin_presets().into_iter().find(|(n, _)| *n == name) else {
-        eprintln!("usage: morphology [pine|oak]");
+        let names: Vec<&str> = builtin_presets().into_iter().map(|(n, _)| n).collect();
+        eprintln!("usage: morphology [{}]", names.join("|"));
         std::process::exit(2);
     };
     let params = parse_species(src).expect("preset parses");

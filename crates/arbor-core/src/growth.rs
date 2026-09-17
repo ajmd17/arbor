@@ -48,16 +48,28 @@ const SPLIT_EVEN: f32 = 0.86;
 /// of one season's shoot: fine enough to tell the inside of a crown from its surface,
 /// coarse enough that a stem is not judged by its own thickness.
 const CROWDING_CELL: f32 = 1.2;
-/// Longest a lateral may grow against the stem it leaves, as a share of it.
+/// Longest a lateral may grow, as a share of the stem it leaves.
 ///
-/// A branch is not longer than the branch it grows out of. Nothing else in the model
-/// says so: length comes from the level's own figure scaled by drive, and the skewed
-/// draw that makes a few siblings dominant is quite capable of handing a twig more
-/// length than the branchlet carrying it. Those come out as spears laid across the
-/// branchwork, and no amount of angle tuning hides them, because the problem is the
-/// length rather than the direction. A co-dominant fork is exempt: it is the same axis
-/// carrying on, not a lateral off it.
+/// Measured against what the parent actually grew rather than what it set out to, so a
+/// stem the crown cut short does not hand its children a budget drawn from length it
+/// never reached. A co-dominant fork is exempt: it is the same axis carrying on, not a
+/// lateral off it.
 const LATERAL_MAX_SHARE: f32 = 0.8;
+/// Where along a stem a lateral starts being held down by how little is left in front
+/// of it, as a share of the stem's length.
+///
+/// A branch is subordinate to the axis it grows off, and out near the tip there is
+/// hardly any axis left to be subordinate to: a full-length limb hanging off the last
+/// few centimetres of a tapering branch reads as weight the branch could not hold, and
+/// it is where the long thin whips come from too. Inside this much of the tip the
+/// allowance ramps to nothing; behind it nothing changes, which is deliberate — every
+/// preset here was tuned against the unrestricted figure and the fault being fixed is
+/// only ever at the end of a stem.
+const LATERAL_TIP_SHARE: f32 = 0.35;
+/// Shortest the ramp above may make a lateral, as a share of the stem it leaves. A
+/// lateral allowed to reach zero is a stem with no segments, which the mesher cannot
+/// sweep; a twig at the very tip should be small, not absent.
+const LATERAL_MIN_SHARE: f32 = 0.08;
 /// Most children one node of a parent may carry, so a runaway rate cannot spend the
 /// whole node budget at one point on one stem.
 const MAX_CHILDREN_PER_NODE: u32 = 8;
@@ -84,6 +96,8 @@ const LENGTH_FLOOR: f32 = 0.15;
 /// climbing — how long it actually turned out to be.
 struct Pending {
     attach: u32,
+    /// How far along the parent it leaves, in metres of the parent actually grown.
+    at_len: f32,
     dir: Vec3,
     vigor: f32,
     level: u8,
@@ -181,7 +195,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
         TRUNK_STEM,
         Vec3::ZERO,
         f32::MAX,
-        0.0,
+        f32::INFINITY,
     );
     resolve_radii(params, &mut skeleton);
     mark_dieback(params, &mut skeleton);
@@ -381,8 +395,9 @@ fn grow_stem(
     // fresh budget at every fork would let a limb come round through them one fork at
     // a time. A child at the next level down is a new limb and starts full.
     budget: f32,
-    // Length of the stem this one leaves, or 0 for the trunk, which leaves nothing.
-    parent_len: f32,
+    // The longest this stem may grow, worked out by whatever spawned it. Infinite for
+    // the trunk, which leaves nothing and answers to nothing.
+    max_len: f32,
 ) {
     if skeleton.nodes.len() >= MAX_NODES {
         return;
@@ -403,9 +418,7 @@ fn grow_stem(
     let mut stem_len = sp.length
         * length_factor
         * range_f32(&mut rng, 1.0 - sp.length_variance, 1.0 + sp.length_variance).max(0.2);
-    if parent_len > 0.0 {
-        stem_len = stem_len.min(parent_len * LATERAL_MAX_SHARE);
-    }
+    stem_len = stem_len.min(max_len);
     let seg_count =
         ((stem_len / sp.segment_length.max(1e-3)).ceil() as usize).clamp(2, MAX_SEGMENTS);
     let seg_len = stem_len / seg_count as f32;
@@ -513,6 +526,7 @@ fn grow_stem(
                 seg,
                 seg_count,
                 seg_len,
+                grown_len,
                 &mut azimuth,
                 &mut slot,
                 path,
@@ -555,7 +569,7 @@ fn grow_stem(
                 fork_stem,
                 spray,
                 turn_budget,
-                parent_len,
+                max_len,
             );
             // The parent gives up part of its drive to the fork instead of both
             // halves carrying on at full strength.
@@ -590,7 +604,7 @@ fn grow_stem(
             child_stem,
             child.spray,
             MAX_STEM_TURN,
-            grown_len,
+            lateral_cap(grown_len, child.at_len),
         );
     }
 }
@@ -607,6 +621,7 @@ fn spawn_children(
     seg: usize,
     seg_count: usize,
     seg_len: f32,
+    at_len: f32,
     azimuth: &mut f32,
     slot: &mut u32,
     stem_path: u64,
@@ -664,6 +679,7 @@ fn spawn_children(
         let drive = child.scale * spread * lottery.max(0.0) * acro.max(0.05);
         pending.push(Pending {
             attach,
+            at_len,
             dir: d,
             vigor: vigor * drive.max(0.02),
             level: child_level,
@@ -799,6 +815,20 @@ fn steer(
     let out = turn_toward(dir, d, limit);
     *turn_budget -= dir.dot(out).clamp(-1.0, 1.0).acos();
     out
+}
+
+/// The longest a lateral leaving `at` along a stem of `grown` may be.
+///
+/// Flat at `LATERAL_MAX_SHARE` of the stem for most of its length, then ramping to
+/// nothing over the last `LATERAL_TIP_SHARE` of it, where there is progressively less
+/// axis left for a branch to be subordinate to.
+fn lateral_cap(grown: f32, at: f32) -> f32 {
+    if !grown.is_finite() || grown <= 0.0 {
+        return f32::INFINITY;
+    }
+    let beyond = (grown - at).max(0.0);
+    let held = (beyond / (grown * LATERAL_TIP_SHARE)).clamp(0.0, 1.0);
+    grown * (LATERAL_MAX_SHARE * held).max(LATERAL_MIN_SHARE)
 }
 
 /// Rotates `dir` toward `goal` by `angle` radians, stopping at `goal` rather than
@@ -1096,15 +1126,22 @@ mod tests {
             }
             params.trunk.children.acrotony = acrotony;
             let sk = grow(&params);
-            let lengths: Vec<(f32, f32)> = stems(&sk)
-                .iter()
-                .filter(|(l, ..)| *l >= 2)
-                .map(|(_, len, _, attach)| (*attach, *len))
-                .collect();
-            // Weighted by how much stem each attachment point actually grew: what
-            // acrotony moves is the drive, not the count.
-            let total: f32 = lengths.iter().map(|(_, len)| *len).sum();
-            lengths.iter().map(|(a, len)| a * len).sum::<f32>() / total.max(1e-4)
+            // Weighted by the drive each child came away with, which is the thing
+            // acrotony moves. Weighting by length instead reads the cap that holds a
+            // lateral down near the tip of its parent, and the two work against each
+            // other: what acrotony hands the distal children in drive, the cap takes
+            // straight back off them in length.
+            let (mut sum, mut total) = (0.0f32, 0.0f32);
+            for node in &sk.nodes {
+                let Some(p) = node.parent else { continue };
+                let parent = &sk.nodes[p as usize];
+                if node.level < 2 || node.level == parent.level || node.stem == parent.stem {
+                    continue;
+                }
+                sum += parent.stem_fraction * node.vigor;
+                total += node.vigor;
+            }
+            sum / total.max(1e-4)
         };
         // Both ends of the range rather than one: children only spawn between
         // `start_fraction` and `end_fraction`, so the measure sits near 0.6 before
@@ -1162,9 +1199,25 @@ mod tests {
                 else {
                     continue;
                 };
+                // How far along the parent this one leaves, walking its parent's run
+                // back to where that stem began.
+                let mut at = 0.0f32;
+                let mut walk = node.parent.expect("a head has a parent");
+                while let Some(up) = sk.nodes[walk as usize].parent {
+                    if sk.nodes[up as usize].stem != parent.stem {
+                        break;
+                    }
+                    at += (sk.nodes[walk as usize].position - sk.nodes[up as usize].position)
+                        .length();
+                    walk = up;
+                }
+                // `at` misses the first segment, which belongs to the parent's run but
+                // is measured from the grandparent; that makes the bound generous by one
+                // segment rather than wrong.
+                let cap = lateral_cap(theirs, at);
                 assert!(
-                    mine <= theirs * LATERAL_MAX_SHARE + 1e-3,
-                    "{}: a level {} stem ran {mine:.2} m off a level {} stem of {theirs:.2} m",
+                    mine <= cap + 1e-3,
+                    "{}: a level {} stem ran {mine:.2} m off a level {} stem of                      {theirs:.2} m, {at:.2} m along it, where the most it may be is                      {cap:.2} m",
                     params.name,
                     node.level,
                     parent.level

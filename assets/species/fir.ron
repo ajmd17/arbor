@@ -1,0 +1,358 @@
+(
+    name: "Douglas Fir",
+    seed: 1,
+    max_levels: 5,
+    max_split_depth: 1,
+    // A Douglas fir is a pine's habit stretched and narrowed. It holds one leader for
+    // its whole life like any conifer, but it carries it half again as high on a bole
+    // that barely tapers, hangs its branchlets where a pine holds them out, and wears
+    // the crown nearly to the ground. Almost everything below is one of those four.
+    trunk: (
+        length: 27.0,
+        length_variance: 0.1,
+        radius: 0.45,
+        radius_ratio: 0.6,
+        // The straightest timber tree here and the slowest to taper: nearly a metre
+        // through at the foot and still holding its girth well up the bole. That is
+        // what carries a crown to thirty metres without the spire going spindly.
+        taper: 0.075,
+        da_vinci_exponent: 2.45,
+        segment_length: 0.6,
+        curvature: 0.008,
+        phototropism: 0.042,
+        gravity: 0.003,
+        zigzag_deg: 0.0,
+        vigor_falloff: 0.22,
+        split_probability: 0.015,
+        split_angle_deg: 9.0,
+        // Zero, and later up the bole than the pine allows. A fir that forked low would
+        // be a different tree; what the occasional fork gives is the forked top of an
+        // old one, never a second trunk.
+        split_evenness: 0.0,
+        split_start_fraction: 0.78,
+        children: (
+            // A whorl every segment, of three, varying by two either way. The same
+            // number of limbs as a whorl of five every other segment, but spread twice
+            // as finely up the bole, and that is the difference between a crown and a
+            // stack of plates: at the coarser spacing a short whorl left a gap a metre
+            // deep that the tiers above and below could not cover, and the silhouette
+            // pinched in at the waist. A pine whorls in tidy cohorts; a fir does not.
+            pattern: Whorl(every: 1, count: 3),
+            start_fraction: 0.02,
+            end_fraction: 0.995,
+            // Just past horizontal at the foot and steeply up at the leader. That
+            // sweep down the trunk is what draws the outline in: the lowest limbs
+            // leave level while the top ones are still climbing, so the crown narrows
+            // to a spire rather than stopping flat. Any further past horizontal and a
+            // limb spends its length going down instead of out, and the crown loses
+            // half a metre of width through its whole middle.
+            crotch_angle_deg: 92.0,
+            crotch_angle_tip_deg: 38.0,
+            crotch_variance_deg: 13.0,
+            roll_variance_deg: 32.0,
+            phyllotaxis_deg: 137.5,
+            scale: 0.46,
+            scale_variance: 0.52,
+            dominance: 0.18,
+            // Strongly negative: the lowest whorls have had thirty seasons to extend
+            // and the top one has had a single season, and on a tree this tall that
+            // spread of ages is the whole silhouette.
+            acrotony: -0.22,
+            planarity: 1.0,
+            count_variance: 2,
+        ),
+    ),
+    branch_levels: [
+        (
+            // The limbs. Long enough that the ones in the middle of the crown reach
+            // the envelope rather than stopping short of it; the lowest overshoot it
+            // and are cut back, which is the way round the envelope is meant to be
+            // used. They are also the one level here that does not hang. A fir's droop
+            // is in its branchlets, and putting it in the limbs as well was what pinched
+            // the crown: a limb that sags spends its length dropping rather than
+            // reaching, and the whole lower half came out half a metre narrow.
+            length: 10.0,
+            length_variance: 0.3,
+            radius: 0.085,
+            radius_ratio: 0.5,
+            taper: 0.13,
+            da_vinci_exponent: 2.3,
+            segment_length: 0.38,
+            curvature: 0.045,
+            phototropism: 0.017,
+            gravity: 0.016,
+            droop: 0.7,
+            zigzag_deg: 1.5,
+            vigor_falloff: 0.42,
+            dieback: 0.06,
+            snap_radius: 0.05,
+            split_probability: 0.05,
+            split_angle_deg: 19.0,
+            split_evenness: 0.0,
+            // Longer than the pine's stub because the bole it has to clear is half as
+            // thick again. A stub is measured from the centreline, so anything under
+            // the trunk radius stays buried in the bark instead of standing off it.
+            dead_stub_length: 1.05,
+            split_start_fraction: 0.35,
+            children: (
+                pattern: Continuous(density: 3.0),
+                start_fraction: 0.1,
+                end_fraction: 0.9,
+                crotch_angle_deg: 66.0,
+                crotch_angle_tip_deg: 32.0,
+                crotch_variance_deg: 14.0,
+                roll_variance_deg: 10.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.5,
+                scale_variance: 0.42,
+                dominance: 0.3,
+                acrotony: 0.25,
+                planarity: 0.95,
+                count_variance: 0,
+            ),
+        ),
+        (
+            // Where the hang starts. From here down every level gets more gravity and
+            // more droop than the one above it, so a spray leaves its limb roughly level
+            // and is hanging by the time it ends. Held out straight instead, the same
+            // foliage reads as a spruce.
+            length: 2.9,
+            length_variance: 0.35,
+            radius: 0.05,
+            radius_ratio: 0.45,
+            taper: 0.15,
+            da_vinci_exponent: 2.3,
+            segment_length: 0.3,
+            zigzag_deg: 3.0,
+            dieback: 0.07,
+            snap_radius: 0.04,
+            curvature: 0.045,
+            phototropism: 0.006,
+            gravity: 0.042,
+            droop: 3.0,
+            vigor_falloff: 0.55,
+            split_probability: 0.05,
+            split_angle_deg: 20.0,
+            split_start_fraction: 0.35,
+            children: (
+                pattern: Continuous(density: 3.4),
+                start_fraction: 0.12,
+                end_fraction: 0.9,
+                crotch_angle_deg: 56.0,
+                crotch_angle_tip_deg: 30.0,
+                crotch_variance_deg: 14.0,
+                roll_variance_deg: 12.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.55,
+                scale_variance: 0.4,
+                dominance: 0.33,
+                acrotony: 0.3,
+                planarity: 0.92,
+                count_variance: 0,
+            ),
+        ),
+        (
+            length: 1.15,
+            length_variance: 0.4,
+            radius: 0.024,
+            radius_ratio: 0.42,
+            taper: 0.18,
+            da_vinci_exponent: 2.2,
+            segment_length: 0.2,
+            zigzag_deg: 6.0,
+            dieback: 0.09,
+            snap_radius: 0.03,
+            curvature: 0.05,
+            phototropism: 0.004,
+            gravity: 0.05,
+            droop: 3.8,
+            vigor_falloff: 0.6,
+            split_probability: 0.0,
+            split_angle_deg: 17.0,
+            split_start_fraction: 0.4,
+            children: (
+                pattern: Continuous(density: 4.2),
+                start_fraction: 0.15,
+                end_fraction: 0.9,
+                crotch_angle_deg: 46.0,
+                crotch_variance_deg: 14.0,
+                roll_variance_deg: 14.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.55,
+                scale_variance: 0.35,
+                dominance: 0.35,
+                acrotony: 0.3,
+                planarity: 0.88,
+                count_variance: 0,
+            ),
+        ),
+        (
+            length: 0.46,
+            length_variance: 0.4,
+            radius: 0.011,
+            radius_ratio: 0.45,
+            taper: 0.24,
+            da_vinci_exponent: 2.2,
+            segment_length: 0.11,
+            zigzag_deg: 10.0,
+            dieback: 0.1,
+            snap_radius: 0.02,
+            curvature: 0.06,
+            phototropism: 0.002,
+            gravity: 0.048,
+            droop: 4.2,
+            vigor_falloff: 0.65,
+            split_probability: 0.0,
+            split_angle_deg: 15.0,
+            split_start_fraction: 0.4,
+            children: (
+                pattern: None,
+                start_fraction: 1.0,
+                end_fraction: 0.0,
+                crotch_angle_deg: 30.0,
+                crotch_variance_deg: 10.0,
+                roll_variance_deg: 25.0,
+                phyllotaxis_deg: 137.5,
+                scale: 0.5,
+            ),
+        ),
+    ],
+    gravity_multiplier: 1.0,
+    phototropism_multiplier: 1.0,
+    envelope_scale: 1.0,
+    leaves: (
+        enabled: true,
+        min_level: 2,
+        max_twig_radius: 0.05,
+        // The needle art is a whole branchlet rather than a fascicle, and 29% of its own
+        // cell is opaque against the pine needle's 16%. That is nearly twice the foliage
+        // per card, which is what pays for a crown this dense: a fir is not a tree you
+        // see the sky through.
+        //
+        // Density against card size is the whole cost of this tree. A fir carries far
+        // more twig than anything else here, so at a pine's card size it wanted 48k
+        // cards — four times the oak — for a canopy no fuller. Cards cost by the count
+        // and cover by the area, so trading count for size buys the same canopy for
+        // half the triangles; past about a metre they start catching the light as flat
+        // slabs and the needle grain goes.
+        density: 4.4,
+        spacing_variance: 0.72,
+        leafy_length: 0.8,
+        cluster_size: 1,
+        cluster_spread_deg: 28.0,
+        card_length: 0.84,
+        card_width: 0.84,
+        size_variance: 0.35,
+        crotch_angle_deg: 44.0,
+        crotch_variance_deg: 18.0,
+        phyllotaxis_deg: 99.5,
+        // A fir's needles come off the shoot all the way round and the spray hangs, so
+        // the cards sit shallower to the twig and droop further than a pine's.
+        droop_deg: 18.0,
+        twist_deg: 60.0,
+        normal_blend: 0.65,
+        curvature: 0.3,
+        // Cooler and darker than the pine. Douglas fir reads blue-green where a pine
+        // reads yellow-green, and the difference is visible across a whole hillside.
+        tint: (0.63, 0.80, 0.66),
+        hue_variance: 0.08,
+        interior_shade: 0.55,
+        cluster: Some((
+            // Four sprays to a card, curved hard. `leaf_length` holds a spray to the
+            // size it would have had on its own, so this buys cards rather than bigger
+            // needles; `shoot_curve` is what makes the four of them sweep the same way
+            // instead of standing up like a hand of cards.
+            count: 4,
+            leaf_length: 0.48,
+            base_angle_deg: 56.0,
+            tip_angle_deg: 26.0,
+            tip_scale: 0.88,
+            angle_variance_deg: 24.0,
+            roll_deg: 137.5,
+            roll_variance_deg: 42.0,
+            depth: 0.6,
+            blade_twist_deg: 50.0,
+            depth_shade: 0.38,
+            size_variance: 0.26,
+            spacing_variance: 0.65,
+            shoot_curve: 0.45,
+            variants: 4,
+            shoot_base: 0.88,
+            shoot_tip: 0.22,
+            source_aspect: 1.0,
+            cell_size: 512,
+        )),
+        atlas_cols: 1,
+        atlas_rows: 1,
+        atlas_front: 0,
+        atlas_back: 0,
+        texture: "needle_fir",
+    ),
+    wind: (
+        strength: 0.3,
+        gustiness: 0.35,
+        flutter: 0.4,
+        flexibility: (0.04, 0.12, 0.3, 0.75),
+    ),
+    mesh: (
+        // Douglas fir bark is the thickest of any tree here — on an old one it is a hand
+        // deep, in corky ridges separated by furrows you can put a finger into. That is
+        // why the flutes run half again as deep as the pine's and over more of them, and
+        // why the knots are dense: a fir sheds its lower limbs for twenty metres and
+        // grows over every one of the scars.
+        uv_scale: 1.0,
+        silhouette_tolerance: 0.018,
+        min_radial: 4,
+        min_bark_radius: 0.016,
+        max_radial: 32,
+        root_flare: 1.0,
+        flare_height: 1.8,
+        root_taper: 2.2,
+        root_sharpness: 1.3,
+        root_count: 4,
+        tip_length: 0.06,
+        socket_flare: 0.35,
+        bark_texture: "bark_pine",
+        bark_darken_low: 0.3,
+        irregularity: (
+            flute_depth: 0.16,
+            flute_waves: 6.0,
+            flute_twist: 0.05,
+            swell_depth: 0.07,
+            swell_period: 3.6,
+            // A fir carries far fewer burls than a pine and far more branch scars.
+            burl_density: 0.15,
+            burl_depth: 0.34,
+            burl_size: 0.38,
+            knot_density: 0.45,
+            knot_depth: 0.13,
+            knot_size: 0.26,
+            knot_reach: 3.0,
+            knot_min_stem: 1.3,
+            collar_depth: 0.5,
+            min_radius: 0.045,
+            rings_per_meter: 15.0,
+            ring_tolerance: 0.018,
+        ),
+    ),
+    envelope: (
+        volumes: [
+            // Two cones, because one cannot do both jobs. The foliage fills whatever
+            // envelope it is given, so this is the silhouette, and the reference has a
+            // body that widens dead straight from the tip down — half a metre of radius
+            // for every two and a half of drop — with a separate narrow spire over the
+            // top of it. A single cone through the body overshoots the spire by half
+            // again; a single cone through the spire loses a third of the width at
+            // mid-height. Carried nearly to the ground, so the lowest whorls live and
+            // the crown ends in a skirt rather than on a bare pole.
+            Cone(base_y: 2.4, apex_y: 21.5, base_radius: 7.3, apex_radius: 2.75),
+            Cone(base_y: 20.0, apex_y: 26.8, base_radius: 3.2, apex_radius: 0.25),
+        ],
+        // Tighter than the default quarter. Drive fades from `1 - falloff` of the way
+        // out, so at 0.25 a limb is already being starved from three quarters of the
+        // radius and the crown settles most of a metre inside the shape it was given.
+        falloff: 0.16,
+        kill_threshold: 0.03,
+        pull_strength: 0.6,
+    ),
+)
