@@ -271,16 +271,22 @@
         // of the spruce's cards per cubic metre. Net effect is the same card budget as
         // before, spread up the crown instead of piled in its bottom half.
         //
-        // Held at 6.5, and the reason is a renderer one rather than a botanical one.
-        // Spacing at 6.5 is 0.15 m under a 0.8 m card, which is already about five
-        // times' overlap along a twig. A finer grain at the same coverage means
-        // multiplying this to keep `density * card_length^2` fixed — 10.8 at 0.62 m —
-        // and that was tried and is clearly worse in the viewer. The leaf shader hands
-        // filtered alpha straight to alpha-to-coverage while a card is bigger than a
-        // pixel, so overlapping cards blend rather than cut, and at seven times' overlap
-        // the sprays stop having edges and wash into an even felt. Overlap is the real
-        // limit on this number and it binds well before the openness invariant does.
-        density: 6.5,
+        // Cards per metre of twig, and the number to watch is `card_length * density`
+        // — how many card-lengths of foliage are stacked over each length of twig. At
+        // 6.5 under a 0.8 m card that was 5.2, against the spruce's 3.7, and everything
+        // above about four was geometry drawn inside geometry already drawn: it cost
+        // vertices and returned almost no silhouette. 4.46 under a 0.9 m card is 4.0,
+        // and with the cell baking 37.3% rather than 32.4% the canopy it covers is the
+        // same to within a per cent — `density * card_length^2 * cell` is 1.35 either
+        // way. That is 23.4k cards for 32.6k, so 94k leaf vertices for 130k, with
+        // nothing given up.
+        //
+        // It does not go much below this. Overlap is also what makes a spray read: the
+        // leaf shader hands filtered alpha straight to alpha-to-coverage while a card
+        // is bigger than a pixel, so cards that overlap blend rather than cut, and
+        // there is a window — under about three and a spray comes apart into separate
+        // cards, over about five and it washes into a felt with no outline in it.
+        density: 4.46,
         spacing_variance: 0.85,
         // The shell of foliage over bare branchwork, and at 1.8 it was not one. This
         // is measured back from a twig's tip along the length it actually grew, and
@@ -296,22 +302,25 @@
         leafy_length: 0.7,
         cluster_size: 1,
         cluster_spread_deg: 30.0,
-        // Big, and it has to be. A Douglas fir spray is a long flat plate of fine
-        // sprigs, so the instinct is a smaller card — at 0.8 m one card is very nearly
-        // a whole level-2 branchlet, which grows 1.24 m, and a spray comes out as one
-        // or two cards rather than as an outline. 0.62 m was tried, with `density`
-        // raised to 10.8 to hold the coverage, and in the viewer it is clearly worse:
-        // holding coverage on smaller cards means more of them over the same twig, and
-        // cards that overlap under alpha-to-coverage blend instead of cutting, so the
-        // extra grain arrives as an even felt with no spray outlines in it at all. A
-        // big card overlapped five times still reads as a plate; a small one overlapped
-        // seven times does not.
+        // Big, and every attempt to make it small has failed. A Douglas fir spray is a
+        // long flat plate of fine sprigs, so the instinct is a smaller card — but the
+        // cost of holding coverage goes as the square of it, and cards that overlap
+        // under alpha-to-coverage blend instead of cutting. 0.62 m was tried with
+        // `density` at 10.8, which is the same coverage, and in the viewer it is clearly
+        // worse: seven card-lengths stacked over each length of twig wash into an even
+        // felt with no spray outlines in it at all, and it takes 53k cards to do it. A
+        // big card overlapped four times still reads as a plate.
+        //
+        // 0.9 rather than 0.8 is that same reasoning read forwards: a larger card needs
+        // fewer of them for the same cover, at the square, and that is most of where the
+        // vertex saving came from. It stops here — past about a metre a card is big
+        // enough to catch the light as one flat slab and the needle grain goes with it.
         //
         // Judge this one in `arbor-viewer --screenshot` and nowhere else. The offline
         // preview alpha tests hard, so it draws crisp cards stacking where the build
-        // draws them dissolving, and it scores the swap as an improvement.
-        card_length: 0.8,
-        card_width: 0.8,
+        // draws them dissolving, and it scores a smaller card as an improvement.
+        card_length: 0.9,
+        card_width: 0.9,
         size_variance: 0.4,
         crotch_angle_deg: 46.0,
         crotch_variance_deg: 20.0,
@@ -326,7 +335,8 @@
         hue_variance: 0.09,
         interior_shade: 0.42,
         cluster: Some((
-            // Ten sprays to a card where it used to be five, and the sprays themselves
+            // Sixteen sprays to a card where it used to be five, and the sprays
+            // themselves
             // stay finer than the spruce's — `leaf_length` is 0.4 against its 0.48.
             // There have to be more of them because this tree was sparse twice over and
             // only the first half of it was ever accounted for. Cards per cubic metre
@@ -339,16 +349,17 @@
             // 0.61 m2 of needle per cubic metre of crown against the spruce's 1.05, or
             // 58% where the invariant only ever asked for 80%.
             //
-            // `count` is the one lever that shortfall answers to and the only one the
-            // invariant cannot see, because it fills the cell without adding a card.
-            // Ten fine sprays bake to 32.4% and bring the crown to 0.86 m2 per cubic
-            // metre — 81% of the spruce, which is where a crown of dense sprays held
-            // sparsely apart belongs — for exactly the cards and triangles five gave.
-            // Density is the wrong lever for the same job twice: at 6.5 the anchors are
-            // already 0.15 m apart under a 0.8 m card, so another one mostly lands on
-            // top of a card that is already there, and there is a tenth of headroom
-            // under the invariant to buy that with.
-            count: 10,
+            // `count` is the lever that shortfall answers to, and the only one that
+            // costs nothing at all: it fills the cell without adding a card, a vertex
+            // or a triangle. Ten sprays bake to 32.4% against the old five's 23.2%.
+            //
+            // Sixteen bake to 37.3%, and that is very near the end of it — the curve
+            // runs 34.9 at twelve, 38.0 at eighteen, 39.2 at twenty-four, so past about
+            // twenty the sprays only land on each other and the bake gets slower for
+            // nothing. Sixteen is bought here in order to spend it on `density`, which
+            // is where the vertices are: a cell that covers a sixth more lets a sixth
+            // fewer cards hold the same canopy.
+            count: 16,
             leaf_length: 0.4,
             base_angle_deg: 58.0,
             tip_angle_deg: 28.0,
@@ -453,12 +464,22 @@
             // and the cylinder went up with the square of the radius, so the headroom
             // only moved from 1.10x to 1.06x.
             Cone(base_y: 25.0, apex_y: 46.0, base_radius: 8.6, apex_radius: 5.0),
-            // The spire, as its own volume. Short and sharp, overlapping the body by
-            // two metres so the union has no step in it. This is what the body no
-            // longer has to do, and splitting the two is worth 19/14/4 per cent over
-            // the last three tenths against 14/6/1 — the upper crown carries foliage
-            // instead of ending in a pole.
-            Cone(base_y: 44.0, apex_y: 52.5, base_radius: 5.0, apex_radius: 0.5),
+            // The spire, as its own volume. Overlapping the body by four metres so the
+            // union has no step in it. This is what the body no longer has to do, and
+            // splitting the two is worth 19/14/4 per cent over the last three tenths
+            // against 14/6/1 — the upper crown carries foliage instead of ending in a
+            // pole.
+            //
+            // It used to run to 52.5 m and pinch to 0.5, and a cone that closes to
+            // nothing leaves the last whorls nowhere to grow: the leader came out of
+            // the foliage as a bare spike with a metre and a sixth of clear wood on the
+            // end of it, and the top twentieth of the tree carried 470 cards where the
+            // band below it carried 1252. A real fir spire is narrow but it is still
+            // clothed — the leader is the one part of this tree you should not be able
+            // to see. Stopping half a metre under the leader's own tip and holding
+            // 2.6 m of radius there puts the bare tip at 0.20 m and more than doubles
+            // the cards in the top twentieth, for about 5 per cent more cards overall.
+            Cone(base_y: 42.0, apex_y: 51.5, base_radius: 6.0, apex_radius: 2.6),
             // The underside. A cone has a flat bottom, and a flat bottom is wrong for
             // any conifer: the lowest limbs leave the trunk pointing down and sweep
             // down further, so they fell straight out through it and died, and the

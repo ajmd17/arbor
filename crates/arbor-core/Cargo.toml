@@ -9,3 +9,6 @@ glam.workspace = true
 serde.workspace = true
 ron.workspace = true
 rand.workspace = true
+
+[dev-dependencies]
+image.workspace = true

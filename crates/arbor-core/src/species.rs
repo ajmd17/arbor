@@ -7,6 +7,8 @@ pub const OAK_RON: &str = include_str!("../../../assets/species/oak.ron");
 pub const BIRCH_RON: &str = include_str!("../../../assets/species/birch.ron");
 pub const SPRUCE_RON: &str = include_str!("../../../assets/species/spruce.ron");
 pub const DOUGLAS_FIR_RON: &str = include_str!("../../../assets/species/douglas_fir.ron");
+pub const DOUGLAS_FIR_OPEN_RON: &str =
+    include_str!("../../../assets/species/douglas_fir_open.ron");
 
 pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -15,6 +17,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
         ("birch", BIRCH_RON),
         ("spruce", SPRUCE_RON),
         ("fir", DOUGLAS_FIR_RON),
+        ("fir_open", DOUGLAS_FIR_OPEN_RON),
     ]
 }
 

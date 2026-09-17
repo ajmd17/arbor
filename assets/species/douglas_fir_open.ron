@@ -1,0 +1,587 @@
+(
+    name: "Douglas Fir (Open-Grown)",
+    seed: 1,
+    max_levels: 5,
+    max_split_depth: 1,
+    // The same species as `douglas_fir.ron` and a different tree, which is the point
+    // of having both. That one is a forest fir: fifty metres of it, bare for the first
+    // twenty-five, because neighbours shaded its lower limbs off and it dropped them.
+    // This one grew in the open — a yard, a park, a field edge, the seed tree left in a
+    // clearing — with light on every side and nothing to prune it. So it keeps what it
+    // grows. Thirty metres rather than fifty, a broad cone widest near its own base and
+    // tapering the whole way to the leader, and a clear bole of only about a fifth of
+    // its height instead of half.
+    //
+    // It is deliberately close to the line `spruce.ron` sits on, and what keeps it off
+    // that line is not the outline — both are cones — but the limb. A spruce leaves the
+    // trunk level and stays level. A fir limb sets off below horizontal, is bent further
+    // by its own weight, and turns its last third back up to the light, so the crown
+    // hangs in pendulous sprays off a visible framework rather than sitting in flat
+    // tiers. That split — hang on the limb, lift on the fine levels — is a hierarchy
+    // rather than a curve, because `droop` only ever grows along a stem and so no single
+    // stem can fall and then rise. It is the whole read of the species and it is why an
+    // open-grown fir still does not look like a spruce.
+    //
+    // Everything about the foliage itself — the cluster bake, the card size, the
+    // overlap the density is chosen for — is shared with `douglas_fir.ron` and the
+    // reasoning is written out there. Only the habit differs here.
+    trunk: (
+        length: 31.0,
+        length_variance: 0.05,
+        radius: 0.8,
+        radius_ratio: 0.6,
+        // Still very little taper — it is the same species and the same wood — but an
+        // open-grown tree puts less of its growth into height and more into diameter,
+        // so it is stouter for its length than the forest one and the taper matters
+        // less over thirty metres than over fifty.
+        taper: 0.055,
+        da_vinci_exponent: 2.5,
+        // A whorl goes on every second one of these, so this is really the spacing of
+        // the tiers. Shorter than the forest tree's 1.5 because the trunk is shorter:
+        // tier spacing wants to stay near two metres whatever the tree's height, and
+        // holding 1.5 on a thirty-metre trunk would give it half the tiers and a
+        // gap-toothed crown.
+        segment_length: 1.05,
+        curvature: 0.005,
+        phototropism: 0.045,
+        gravity: 0.002,
+        zigzag_deg: 0.0,
+        vigor_falloff: 0.18,
+        split_probability: 0.01,
+        split_angle_deg: 8.0,
+        split_evenness: 0.0,
+        split_start_fraction: 0.85,
+        children: (
+            // A whorl every second segment, so a little over two metres apart. That is
+            // closer spacing than the forest tree's three, and it has to be: an
+            // open-grown crown is continuous rather than a few tiers standing apart, and
+            // what separates one limb layer from the next here is the droop carrying
+            // each one clear of the one below, not a gap in the trunk.
+            pattern: Whorl(every: 2, count: 6),
+            // Branches born from about three metres up, with the envelope starting at
+            // six and a half. That leaves a short dead-stub zone rather than the forest
+            // tree's twenty-five-metre one — an open-grown fir does lose its lowest
+            // limbs eventually, to its own shade rather than a neighbour's, but only a
+            // few of them and only slowly. Below the start fraction the bole is clean,
+            // because wood that never carried a limb cannot carry its scar either.
+            start_fraction: 0.09,
+            end_fraction: 0.995,
+            // Twenty degrees past horizontal at the foot of the crown. A spruce leaves
+            // level and a pine leaves level; a fir limb sets off downward and is then
+            // bent further by its own weight, and only the last stretch comes back up.
+            // That descending-then-rising line is the whole read of the tree.
+            crotch_angle_deg: 110.0,
+            // This pair is the most structurally visible thing in the file, and it is
+            // what makes a conifer read as designed rather than as scribble: the
+            // branches slope down at the foot of the crown and point further up the
+            // higher you go, smoothly, all the way to the leader.
+            //
+            // It was 103/62, which is a climb of 29 degrees from the bottom of the crown
+            // to the top, measured as the elevation of each limb from where it attaches
+            // to where it ends. The scatter between limbs of one whorl is about 17
+            // degrees and will not go much below that — it is mostly the envelope
+            // cutting limbs off at different lengths and `droop` then sagging them by
+            // different amounts, and it barely responds to `crotch_variance_deg`,
+            // `scale_variance` or `dominance`, all of which were swept. So a 29 degree
+            // climb against 19 of scatter is a signal the eye cannot separate from the
+            // noise, and the crown reads as random. 110/38 climbs 49 degrees against 17,
+            // and that it can separate.
+            crotch_angle_tip_deg: 38.0,
+            // Small, but not because the scatter comes from here — it does not, and
+            // cutting this from 16 to 5 changed the measured spread by barely a degree.
+            // It is small so that what scatter there is comes from the tree fighting its
+            // own envelope rather than from a random number.
+            crotch_variance_deg: 3.5,
+            roll_variance_deg: 14.0,
+            phyllotaxis_deg: 137.5,
+            scale: 0.56,
+            // Enough that a whorl is not a wheel of identical spokes, and no more. The
+            // old 0.55 was there to break up the crown, which it did by making it
+            // impossible to see that the whorls were whorls.
+            scale_variance: 0.14,
+            // Twice the spruce's. An open crown is a crown that lost most of its
+            // contest: a few limbs that won a great deal of drive and many that were
+            // suppressed to nothing, which is what leaves the gaps you see sky through.
+            dominance: 0.28,
+            acrotony: -0.15,
+            planarity: 1.0,
+            count_variance: 0,
+        ),
+    ),
+    branch_levels: [
+        (
+            // The limbs, and their whole job is to hang. Phototropism here is a tenth
+            // of what the levels below it carry: the lift that turns a spray back up
+            // belongs to the branchlets, not to the limb they hang from. Giving the
+            // limb the lift too is what made this tree a spruce.
+            length: 11.0,
+            length_variance: 0.08,
+            radius: 0.1,
+            radius_ratio: 0.48,
+            taper: 0.15,
+            da_vinci_exponent: 2.3,
+            segment_length: 0.4,
+            curvature: 0.05,
+            // A limb must lose to gravity from its first segment. At 0.038 against
+            // 0.032 phototropism won until `droop` caught up a third of the way out,
+            // and since the envelope cuts a limb off at about a third of its planned
+            // length, that was the whole limb: it rose in a straight line and the
+            // cantilever curve this level exists for never grew at all.
+            phototropism: 0.01,
+            gravity: 0.04,
+            droop: 3.5,
+            zigzag_deg: 1.5,
+            vigor_falloff: 0.45,
+            // Less than half the forest tree's, and that is the whole difference
+            // between the two habits in one number. A limb dies here because the crown
+            // above it closed over, which in the open happens slowly and to few of
+            // them; in the forest it happens to everything below the canopy and it
+            // happens fast.
+            dieback: 0.03,
+            snap_radius: 0.05,
+            split_probability: 0.05,
+            split_angle_deg: 18.0,
+            split_evenness: 0.0,
+            // Measured from the centreline, so a stub has to clear the bole to be seen
+            // at all. Shorter than the forest tree's because this trunk is thinner —
+            // half a metre through under the crown rather than most of a metre.
+            dead_stub_length: 0.8,
+            split_start_fraction: 0.35,
+            children: (
+                // Less than half the spruce's 3.0, and this is the number that decides
+                // whether you can see sky through the crown. Openness here cannot come
+                // from the outline, because the outline is a cone carried near the
+                // ground and that is the spruce's; it has to come from the branchwork
+                // being thinner, so the gaps fall between whole sprays rather than
+                // inside them. Thinning the cards instead only makes every spray
+                // threadbare and leaves the crown as solid as it was.
+                //
+                // Three settings of this have been through the viewer. At the forest
+                // preset's 3.2 the tree came out denser than a spruce — 82% of its card
+                // area per cubic metre — which is the wrong way round for a fir. 2.4 got
+                // it to 29%. 1.4 is where it is now, at 12% of the spruce and a quarter
+                // of its needle depth side on, which is the density a game conifer
+                // actually reads at: trunk and branch tips visible through the crown,
+                // sky between the sprays, and a silhouette that is all spikes rather
+                // than a mass.
+                pattern: Continuous(density: 1.4),
+                start_fraction: 0.12,
+                end_fraction: 0.92,
+                crotch_angle_deg: 70.0,
+                crotch_angle_tip_deg: 34.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 11.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.5,
+                scale_variance: 0.45,
+                dominance: 0.35,
+                acrotony: 0.3,
+                planarity: 0.95,
+                count_variance: 0,
+            ),
+        ),
+        (
+            // Every level from here down is a fight between gravity, which hangs the
+            // branchlet, and phototropism, which lifts its tip — and the fine levels
+            // carry more lift than the limbs above them do. That is the curl: a spray
+            // leaves its limb, sags under itself, and turns its last third back up to
+            // the light. Hang without lift is a weeping tree; lift without hang is a
+            // spruce. The curl cannot come from the needle art, which is one flat
+            // branchlet however hard its shoot is curved, so it has to be grown.
+            length: 2.2,
+            length_variance: 0.4,
+            radius: 0.05,
+            radius_ratio: 0.45,
+            taper: 0.17,
+            da_vinci_exponent: 2.3,
+            segment_length: 0.3,
+            zigzag_deg: 3.0,
+            dieback: 0.1,
+            snap_radius: 0.04,
+            curvature: 0.05,
+            phototropism: 0.105,
+            gravity: 0.048,
+            droop: 0.1,
+            vigor_falloff: 0.55,
+            split_probability: 0.04,
+            split_angle_deg: 19.0,
+            split_start_fraction: 0.35,
+            children: (
+                // Down with the level above, for the same reason and to keep the
+                // thinning from landing all on one level — cutting only the limbs'
+                // children leaves the few sprays that survive as dense as ever, and the
+                // crown reads as clumps rather than as an open canopy.
+                pattern: Continuous(density: 3.0),
+                start_fraction: 0.14,
+                end_fraction: 0.92,
+                crotch_angle_deg: 58.0,
+                crotch_angle_tip_deg: 30.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 13.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.55,
+                scale_variance: 0.42,
+                dominance: 0.35,
+                acrotony: 0.32,
+                planarity: 0.92,
+                count_variance: 0,
+            ),
+        ),
+        (
+            length: 1.0,
+            length_variance: 0.42,
+            radius: 0.022,
+            radius_ratio: 0.42,
+            taper: 0.2,
+            da_vinci_exponent: 2.2,
+            segment_length: 0.2,
+            zigzag_deg: 6.0,
+            dieback: 0.11,
+            snap_radius: 0.03,
+            curvature: 0.05,
+            phototropism: 0.115,
+            gravity: 0.052,
+            droop: 0.1,
+            vigor_falloff: 0.6,
+            split_probability: 0.0,
+            split_angle_deg: 16.0,
+            split_start_fraction: 0.4,
+            children: (
+                pattern: Continuous(density: 4.2),
+                start_fraction: 0.15,
+                end_fraction: 0.92,
+                crotch_angle_deg: 48.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 15.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.55,
+                scale_variance: 0.38,
+                dominance: 0.35,
+                acrotony: 0.3,
+                planarity: 0.88,
+                count_variance: 0,
+            ),
+        ),
+        (
+            length: 0.4,
+            length_variance: 0.42,
+            radius: 0.01,
+            radius_ratio: 0.45,
+            taper: 0.25,
+            da_vinci_exponent: 2.2,
+            segment_length: 0.11,
+            zigzag_deg: 10.0,
+            dieback: 0.12,
+            snap_radius: 0.02,
+            curvature: 0.06,
+            phototropism: 0.125,
+            gravity: 0.05,
+            droop: 0.1,
+            vigor_falloff: 0.65,
+            split_probability: 0.0,
+            split_angle_deg: 14.0,
+            split_start_fraction: 0.4,
+            children: (
+                pattern: None,
+                start_fraction: 1.0,
+                end_fraction: 0.0,
+                crotch_angle_deg: 30.0,
+                crotch_variance_deg: 10.0,
+                roll_variance_deg: 25.0,
+                phyllotaxis_deg: 137.5,
+                scale: 0.5,
+            ),
+        ),
+    ],
+    gravity_multiplier: 1.0,
+    phototropism_multiplier: 1.0,
+    envelope_scale: 1.0,
+    leaves: (
+        enabled: true,
+        min_level: 2,
+        max_twig_radius: 0.05,
+        // Sparser than the spruce, and kept to the last stretch of every twig. A fir
+        // holds its needles for years, so botanically the foliage does run back along
+        // the shoots — but the inner ones are shaded out by the tree's own crown, and
+        // drawing them is what fills the gaps the crown is supposed to have.
+        //
+        // Came down from 8.0 when the crown envelope was split into a body and a
+        // spire: the fuller upper crown is more cards in more volume, and it carried
+        // the tree past the one invariant that separates it from the spruce —
+        // `douglas_fir_has_a_clear_bole_and_an_open_crown` wants it under four fifths
+        // of the spruce's cards per cubic metre. Net effect is the same card budget as
+        // before, spread up the crown instead of piled in its bottom half.
+        //
+        // Cards per metre of twig. What matters is `card_length * density`, the number
+        // of card lengths stacked over each length of twig, and there is a window: under
+        // about three a spray comes apart into separate cards, over about five it washes
+        // into an even felt with no outline in it, because the leaf shader hands
+        // filtered alpha straight to alpha-to-coverage while a card is bigger than a
+        // pixel and cards that overlap blend rather than cut.
+        //
+        // The card went from 0.9 long to 1.2, so holding the old 4.46 would put the
+        // overlap at 5.4 and dissolve exactly the spray outlines the long card exists to
+        // draw. 3.45 puts it back at 4.1.
+        density: 3.45,
+        spacing_variance: 0.85,
+        // The shell of foliage over bare branchwork, and at 1.8 it was not one. This
+        // is measured back from a twig's tip along the length it actually grew, and
+        // once the envelope has had its way no level here reaches 1.8 m: level 2 grows
+        // 1.24 m, level 3 0.64, level 4 0.37. So every twig in the crown was leafy end
+        // to end, the bare inner stretch the comment above promises never existed, and
+        // the limbs were buried in their own sprays — which is the one thing both the
+        // photograph and the plate show plainly, foliage carried out at the ends of
+        // limbs you can see between. At 0.7 it bites on level 2, which is the level
+        // long enough to have an inside, and leaves the fine levels alone. Worth a
+        // sixth of the cards, and the headroom under
+        // `douglas_fir_has_a_clear_bole_and_an_open_crown` goes 1.06x to 1.23x.
+        leafy_length: 0.7,
+        cluster_size: 1,
+        cluster_spread_deg: 30.0,
+        // Long and narrow, and that is the whole shape of the species. A square card
+        // carries a round tuft however the needles inside it are arranged, and a crown
+        // built out of round tufts comes out chunky and smooth-edged whatever else is
+        // done to it. A Douglas fir spray is not a tuft — it is a flat elongated plate
+        // that leaves the twig, droops under itself and turns its tip back up, and when
+        // one projects past the edge of the crown it reads as a spike. That is where
+        // the jagged silhouette of a fir comes from, and it cannot be got from the
+        // arrangement of round cards at any density.
+        //
+        // 1.2 by 0.55 carries the same needle as the 0.9 square it replaces — 0.66 m2
+        // at 45% opaque against 0.81 m2 at 37%, which is 0.295 m2 of needle per card
+        // against 0.302 — so this is a change of shape and not of mass. The cell is
+        // baked square in pixels whatever the card is, so `cluster.source_aspect` has
+        // to be told the card is narrow or every needle comes out sheared.
+        //
+        // Judge this one in `arbor-viewer --screenshot` and nowhere else. The offline
+        // preview alpha tests hard, so it draws crisp cards stacking where the build
+        // draws them dissolving.
+        card_length: 1.2,
+        card_width: 0.55,
+        size_variance: 0.4,
+        // Shallower than the forest preset's 46. A round card can stand off its twig at
+        // any angle and still read the same; a long one cannot. At 46 an elongated spray
+        // sticks out sideways like a bottle brush, and what is wanted is a spray that
+        // trails away along the branch and hangs off it.
+        crotch_angle_deg: 33.0,
+        crotch_variance_deg: 11.0,
+        // 180, and this is the one that decides whether the foliage is a spray at all.
+        //
+        // `azimuth` steps by this much between one card and the next and says which way
+        // round the twig the card sets off. At 99.5 it walks the whole circle, so the
+        // cards come off a twig in every direction and build a cylindrical sleeve of
+        // foliage around it. Every twig level in this file already carries 180 — they
+        // are flat sprays, and `planarity` holds each spray in the plane of the limb
+        // that bears it — and then the cards were fanned radially around those flat
+        // twigs and threw the flatness away. What you got was a fuzzy tube per twig,
+        // which is why the crown read as an even mass with no spray shape in it however
+        // the cards themselves were drawn.
+        //
+        // At 180 a card alternates to one side of the twig and then the other and never
+        // leaves its plane, so a twig and everything on it is one flat plate. That is
+        // what a fir spray is, and it is what makes a crown of them read as layered
+        // pendant plates rather than as fur.
+        phyllotaxis_deg: 180.0,
+        // The droop in the foliage itself, on top of the droop the limb already has.
+        // Half again the forest preset's, because a long card has the length to show it:
+        // the spray leaves the twig, falls away under its own weight and turns its tip
+        // back up, which is the line every reference photograph of this species is
+        // really showing.
+        // Small, and that is the opposite of what it looks like it should be.
+        //
+        // `droop_deg` is not a droop along the shoot — it is a pull toward world down,
+        // applied to every card after the crotch angle has placed it. So it does not
+        // bend a spray; it overrides whichever way the twig was pointing. That wrecks
+        // both of the things this tree is shaped by. The flat plate that
+        // `phyllotaxis_deg: 180` builds gets dragged off its own plane, and the curl —
+        // which is real, grown into the fine levels, +0.18 m of tip rise against the
+        // spruce's -0.29 — gets flattened straight back out, because the cards sitting
+        // on an upturned tip are hauled down just as hard as the ones on the hanging
+        // part.
+        //
+        // At 12 the cards keep to the twig, and the twig already carries the shape. 52
+        // with a gradient to -30 at the tip was tried, along with a `droop_tip_deg`
+        // parameter to drive it, and it reads as chaos rather than as a curl: one card
+        // is 1.2 m and a level-2 twig grows 1.24, so there are barely two cards on a
+        // twig and a gradient across two cards is not a curve, it is two cards at
+        // different angles. The curl has to be grown and then not interfered with.
+        droop_deg: 12.0,
+        // Roll about the card's own stalk, and it has to be small for the same reason.
+        // At 60 a card could turn most of the way onto its edge, which breaks the plate
+        // the phyllotaxis just built and scatters the light. Enough left to keep the
+        // sprays from looking pressed.
+        twist_deg: 24.0,
+        normal_blend: 0.65,
+        curvature: 0.3,
+        // Greyer and a shade lighter than the spruce. Douglas fir foliage is a soft
+        // grey-green where a spruce is a hard blue-green.
+        tint: (0.7, 0.82, 0.66),
+        hue_variance: 0.09,
+        interior_shade: 0.42,
+        cluster: Some((
+            // Nine needle sprigs set along one shoot, and the sprigs
+            // themselves
+            // stay finer than the spruce's — `leaf_length` is 0.4 against its 0.48.
+            // There have to be more of them because this tree was sparse twice over and
+            // only the first half of it was ever accounted for. Cards per cubic metre
+            // are held under four fifths of the spruce's by
+            // `douglas_fir_has_a_clear_bole_and_an_open_crown`, and at 73% they keep to
+            // it — that is the contract and it is the right one. But the old cell baked
+            // 23.2% opaque against the spruce's 26.3%, on a 0.64 m2 card against its
+            // 0.71, so every card also carried a fifth less needle than a spruce card
+            // did. The two shortfalls multiply, and the product is what the eye sees:
+            // 0.61 m2 of needle per cubic metre of crown against the spruce's 1.05, or
+            // 58% where the invariant only ever asked for 80%.
+            //
+            // `count` is the lever that shortfall answers to, and the only one that
+            // costs nothing at all: it fills the cell without adding a card, a vertex
+            // or a triangle. Ten sprays bake to 32.4% against the old five's 23.2%.
+            //
+            // Sixteen bake to 37.3%, and that is very near the end of it — the curve
+            // runs 34.9 at twelve, 38.0 at eighteen, 39.2 at twenty-four, so past about
+            // twenty the sprays only land on each other and the bake gets slower for
+            // nothing. Sixteen is bought here in order to spend it on `density`, which
+            // is where the vertices are: a cell that covers a sixth more lets a sixth
+            // fewer cards hold the same canopy.
+            // Nine rather than sixteen, each half again as long, set along the length
+            // of a cell that is now tall and thin rather than square. Sixteen short
+            // sprigs fill a square cell evenly, which is what made the old card a round
+            // tuft; nine long ones down a narrow one leave the ragged outline a real
+            // spray has. `tip_scale` at 0.5 tapers the spray to a point rather than
+            // ending it square, and the wider `angle_variance` is what stops the sprigs
+            // lining up into a herringbone.
+            count: 9,
+            leaf_length: 0.52,
+            base_angle_deg: 58.0,
+            tip_angle_deg: 22.0,
+            tip_scale: 0.5,
+            // Tighter than a broadleaf would want. The sprays of a fir are the most
+            // uniform foliage of any tree here — every one leaves its twig at much the
+            // same angle and takes much the same shape, and that regularity is a large
+            // part of how the species reads. Too much variance here and the crown goes
+            // back to looking like scattered tufts.
+            angle_variance_deg: 24.0,
+            // Slightly narrowed. At 0.75 the sprigs came out as hard blades and the
+            // crown read spiky rather than feathery close up; 0.9 keeps the pointed tip
+            // without the knife edge.
+            leaf_narrow: 0.9,
+            roll_deg: 137.5,
+            roll_variance_deg: 45.0,
+            depth: 0.55,
+            blade_twist_deg: 52.0,
+            depth_shade: 0.4,
+            size_variance: 0.3,
+            spacing_variance: 0.7,
+            shoot_curve: 0.26,
+            variants: 4,
+            // The shoot runs the whole length of the cell, so the spray is as long as
+            // the card is.
+            shoot_base: 0.97,
+            shoot_tip: 0.03,
+            // The card is 0.55 wide against 1.2 long but the cell is baked square in
+            // pixels, so everything in it is squashed to 46% of its width when drawn.
+            // This pre-widens the source by the inverse so it comes out true. Getting
+            // the direction of this backwards — setting it to the card's 0.46 rather
+            // than the reciprocal — squashes twice and bakes a cell 8% opaque instead
+            // of 45%.
+            source_aspect: 2.17,
+            cell_size: 512,
+        )),
+        atlas_cols: 1,
+        atlas_rows: 1,
+        atlas_front: 0,
+        atlas_back: 0,
+        texture: "needle_conifer",
+    ),
+    wind: (
+        strength: 0.28,
+        gustiness: 0.35,
+        flutter: 0.38,
+        flexibility: (0.03, 0.1, 0.28, 0.72),
+    ),
+    mesh: (
+        // Douglas fir bark is the thickest of any tree — on an old one it is a hand
+        // deep, in corky ridges separated by furrows you can put a finger into. Deep
+        // flutes and many of them, and knots reaching far down the bole, because this
+        // is a tree that grew and shed limbs over the whole of its clear length and
+        // grew over every one of the scars.
+        uv_scale: 1.3,
+        silhouette_tolerance: 0.02,
+        min_radial: 4,
+        min_bark_radius: 0.018,
+        max_radial: 32,
+        root_flare: 1.3,
+        flare_height: 1.8,
+        root_taper: 2.0,
+        root_sharpness: 1.4,
+        root_count: 5,
+        root_depth: 0.3,
+        root_grooves: 0.07,
+        tip_length: 0.06,
+        socket_flare: 0.35,
+        bark_texture: "bark_pine",
+        bark_darken_low: 0.35,
+        irregularity: (
+            flute_depth: 0.17,
+            flute_waves: 7.0,
+            flute_twist: 0.04,
+            swell_depth: 0.06,
+            swell_period: 4.5,
+            burl_density: 0.1,
+            burl_depth: 0.3,
+            burl_size: 0.4,
+            // Dense, but reaching only a little way below the lowest living limb,
+            // because on this tree that zone is a few metres of bole rather than the
+            // forest tree's twenty-five.
+            knot_density: 0.5,
+            knot_depth: 0.12,
+            knot_size: 0.3,
+            knot_reach: 7.0,
+            knot_min_stem: 1.3,
+            collar_depth: 0.5,
+            min_radius: 0.045,
+            rings_per_meter: 12.0,
+            ring_tolerance: 0.02,
+        ),
+    ),
+    envelope: (
+        volumes: [
+            // The crown body. A cone, and unlike the forest tree's it is allowed to be
+            // one: that tree needed a barely-tapering body because its crown had to fill
+            // the top half of a fifty-metre trunk and a cone put everything in the
+            // bottom of it. Here the crown is most of the tree, so the taper that comes
+            // naturally to a cone is the shape wanted — widest at the base, narrowing
+            // the whole way to the leader. Measured at the 90th percentile of leaf
+            // radius per tenth of height it runs 6.6, 6.3, 5.8, 5.3, 5.1, 4.6, 4.0, 3.1,
+            // which is the outline an open-grown fir actually has.
+            // The envelope, not the branch level, is what sets how far a limb reaches:
+            // a limb declares 11 m of length and the envelope cuts it off well short of
+            // that, so the crown goes exactly as wide as this radius lets it and no
+            // tuning of the limbs will move it. 7.4 m at the base against a thirty-metre
+            // tree puts the crown at 0.44 as wide as the tree is tall, which is what an
+            // open-grown fir measures — against 0.38 for the forest one, which is
+            // hemmed in on every side and grows tall instead of wide.
+            Cone(base_y: 6.4, apex_y: 26.0, base_radius: 7.4, apex_radius: 3.6),
+            // The spire, overlapping the body by three and a half metres so the union
+            // has no step in it. It carries the same hard-won lesson as the forest
+            // tree's: a cone that closes to nothing leaves the last whorls nowhere to
+            // grow and the leader comes out of the foliage as a bare spike. So this one
+            // stops just under the leader's own tip and still holds 1.6 m of radius
+            // there. The leader is the one part of a fir you should not be able to see.
+            Cone(base_y: 22.5, apex_y: 30.2, base_radius: 4.4, apex_radius: 1.6),
+            // The underside. A cone has a flat bottom, and a flat bottom is wrong for
+            // any conifer: the lowest limbs leave the trunk pointing down and sweep
+            // down further, so they fell straight out through it and died, and the
+            // crown tapered back in at its own base instead of being widest there.
+            // This is a cone stood on its head, widening upward, and what it adds is
+            // the sloping underside a real crown has — room for a limb to droop, but
+            // less of it the nearer the trunk you are. Its top radius tracks the body's
+            // base, a little under it, or the widest limbs would find nothing to droop
+            // into and the crown would go back to a flat bottom.
+            Cone(base_y: 3.4, apex_y: 9.2, base_radius: 1.0, apex_radius: 6.9),
+        ],
+        falloff: 0.16,
+        kill_threshold: 0.03,
+        pull_strength: 0.6,
+    ),
+)

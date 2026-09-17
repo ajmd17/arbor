@@ -1,5 +1,6 @@
 use arbor_core::species::{
-    parse_species, BIRCH_RON, DOUGLAS_FIR_RON, OAK_RON, PINE_RON, SPRUCE_RON,
+    parse_species, BIRCH_RON, DOUGLAS_FIR_OPEN_RON, DOUGLAS_FIR_RON, OAK_RON, PINE_RON,
+    SPRUCE_RON,
 };
 use arbor_core::grow;
 
@@ -137,6 +138,254 @@ fn douglas_fir_has_a_clear_bole_and_an_open_crown() {
         open < solid * 0.8,
         "douglas fir carries {open:.2} square metres of card per cubic metre against          the spruce's {solid:.2}; it is meant to be the open one"
     );
+}
+
+/// The open-grown fir is the same species on the opposite upbringing, and the risk it
+/// runs is the opposite one.
+///
+/// `douglas_fir.ron` has to be kept from turning into a spruce by its outline, and
+/// `douglas_fir_has_a_clear_bole_and_an_open_crown` is what does it. This tree gives
+/// that defence up on purpose: grown in the open it keeps its lower limbs, so it *is* a
+/// broad cone carried most of the way to the ground, which is the spruce's outline. What
+/// still separates them is the limb, and so that is what this asserts. A fir limb sets
+/// off below horizontal and its branchlets turn their last third back up to the light; a
+/// spruce's leave level and hang. Measured as where a branchlet's tip finishes against
+/// where it set out, the fir's rise and the spruce's fall, and no amount of shared
+/// silhouette changes that.
+#[test]
+fn open_grown_douglas_fir_is_a_broad_cone_that_still_hangs() {
+    let params = parse_species(DOUGLAS_FIR_OPEN_RON).unwrap();
+    let sk = grow(&params);
+    let stats = sk.stats();
+
+    // A yard tree, not a forest giant. The forest preset is the one that goes to fifty.
+    let forest = parse_species(DOUGLAS_FIR_RON).unwrap();
+    let forest_sk = grow(&forest);
+    assert!(
+        (24.0..38.0).contains(&stats.height),
+        "open-grown fir is {:.0} m; it is meant to be a yard tree",
+        stats.height
+    );
+    assert!(
+        stats.height < forest_sk.stats().height * 0.75,
+        "open-grown fir is {:.0} m against the forest one's {:.0}; it should be much the \
+         shorter",
+        stats.height,
+        forest_sk.stats().height
+    );
+
+    // It keeps its lower limbs, which is the whole of what growing in the open means.
+    let open_base = lowest_leaf_fraction(&sk, &params);
+    let forest_base = lowest_leaf_fraction(&forest_sk, &forest);
+    assert!(
+        open_base < 0.25,
+        "open-grown fir carries foliage only from {:.0}% of its height; it never \
+         self-pruned and should be leafy far lower",
+        open_base * 100.0
+    );
+    assert!(
+        open_base < forest_base * 0.6,
+        "open-grown fir starts its crown at {:.0}% against the forest one's {:.0}%; the \
+         two habits are supposed to be unmistakable",
+        open_base * 100.0,
+        forest_base * 100.0
+    );
+
+    // Broad, and a cone: widest low down and narrowing the whole way to the leader.
+    let profile = crown_radius_profile(&sk, &params);
+    let widest = profile.iter().cloned().fold(0.0f32, f32::max);
+    assert!(
+        widest * 2.0 / stats.height > 0.38,
+        "open-grown fir is {:.2} as wide as it is tall; an open-grown crown is broad",
+        widest * 2.0 / stats.height
+    );
+    let lower = profile[2..5].iter().sum::<f32>() / 3.0;
+    let upper = profile[7..10].iter().sum::<f32>() / 3.0;
+    assert!(
+        lower > upper * 1.3,
+        "open-grown fir measures {lower:.1} m across its lower crown against {upper:.1} \
+         up top; it is meant to taper the whole way, not stand up like a column"
+    );
+
+    // Sparser than the spruce, which had no assertion and went wrong exactly because of
+    // that: derived from the forest preset it came out at 82% of the spruce's card area
+    // per cubic metre and 119% of the needle you look through side on, so the fir was
+    // the denser of the two. Openness cannot come from the outline here, because the
+    // outline is the spruce's, so it has to come from the branchwork being thinner and
+    // this is what holds it there.
+    let open_area = crown_card_area_per_m3(&sk, &params);
+    let spruce_params = parse_species(SPRUCE_RON).unwrap();
+    let spruce_grown = grow(&spruce_params);
+    let solid = crown_card_area_per_m3(&spruce_grown, &spruce_params);
+    assert!(
+        open_area < solid * 0.25,
+        "open-grown fir carries {open_area:.2} square metres of card per cubic metre \
+         against the spruce's {solid:.2}; you are meant to see the trunk and the branch \
+         tips through it"
+    );
+    assert!(
+        open_area > solid * 0.06,
+        "open-grown fir is down to {open_area:.2} against the spruce's {solid:.2}; that \
+         is a skeleton, not an open crown"
+    );
+
+    // The branches slope down at the foot of the crown and point further up the higher
+    // they are, and you can see that they do. This is the difference between a conifer
+    // that reads as designed and one that reads as scribble, and it is a signal-to-noise
+    // problem rather than a question of any one angle: the limbs of a single whorl land
+    // about 17 degrees apart however they are tuned, because the envelope cuts them off
+    // at different lengths and `droop` then sags them by different amounts. So the climb
+    // from the bottom of the crown to the top has to be large against that, or the eye
+    // cannot pick it out and the crown looks random. It was 29 degrees of climb against
+    // 19 of scatter and looked like bed-head; it is now about 50 against 17.
+    let (climb, scatter) = limb_climb(&sk);
+    assert!(
+        climb > 35.0,
+        "open-grown fir limbs climb only {climb:.0} degrees from the foot of the crown to \
+         the top; they are meant to slope down low and point up high"
+    );
+    assert!(
+        climb / scatter.max(0.01) > 2.0,
+        "open-grown fir limbs climb {climb:.0} degrees against {scatter:.0} of scatter \
+         within a whorl; at that ratio the structure is lost in the noise"
+    );
+
+    // And still a fir. This is the one that matters: the outline is now the spruce's,
+    // so the limb has to carry the difference on its own.
+    let fir_rise = mean_tip_rise(&sk, 2);
+    let spruce_rise = mean_tip_rise(&spruce_grown, 2);
+    assert!(
+        fir_rise > 0.05,
+        "open-grown fir branchlet tips finish {fir_rise:+.2} m against where they set \
+         out; a fir spray turns its last third back up to the light"
+    );
+    assert!(
+        spruce_rise < 0.0 && fir_rise > spruce_rise + 0.2,
+        "open-grown fir branchlet tips rise {fir_rise:+.2} m and the spruce's {spruce_rise:+.2}; \
+         with the outlines this close that gap is the only thing left telling them apart"
+    );
+}
+
+/// How far a tree's limbs swing from sloping down at the foot of the crown to pointing up
+/// at the top, in degrees, and how far apart the limbs of one whorl land, also in degrees.
+///
+/// Each limb is measured as the elevation of the line from where it attaches to where it
+/// ends, so it is the line the eye actually follows rather than the angle it set out at —
+/// a limb that leaves level and then sags is a sloping limb. The scatter is pooled
+/// *within* height bands on purpose: taken over every limb at once it would count the
+/// climb itself as noise, which is the one thing it must not do.
+fn limb_climb(sk: &arbor_core::Skeleton) -> (f32, f32) {
+    let height = sk.stats().height.max(0.1);
+    let mut limbs: Vec<(f32, f32)> = Vec::new();
+    for run in sk.stem_runs() {
+        let first = run[0] as usize;
+        if sk.nodes[first].level != 1 || sk.nodes[first].dead || sk.nodes[first].broken {
+            continue;
+        }
+        let Some(parent) = sk.nodes[first].parent else {
+            continue;
+        };
+        if sk.nodes[parent as usize].level != 0 {
+            continue;
+        }
+        let from = sk.nodes[parent as usize].position;
+        let to = sk.nodes[*run.last().expect("a run is never empty") as usize].position;
+        let d = to - from;
+        let flat = (d.x * d.x + d.z * d.z).sqrt();
+        // A limb that went nowhere horizontally has no meaningful elevation.
+        if flat < 0.3 {
+            continue;
+        }
+        limbs.push((from.y / height, d.y.atan2(flat).to_degrees()));
+    }
+    if limbs.len() < 8 {
+        return (0.0, 1.0);
+    }
+    let mean_of = |lo: f32, hi: f32| {
+        let v: Vec<f32> = limbs
+            .iter()
+            .filter(|(h, _)| *h >= lo && *h < hi)
+            .map(|(_, e)| *e)
+            .collect();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.iter().sum::<f32>() / v.len() as f32)
+        }
+    };
+    let low = mean_of(0.0, 0.45).unwrap_or(0.0);
+    let high = mean_of(0.75, 1.01).unwrap_or(0.0);
+    let (mut ss, mut n) = (0.0f32, 0usize);
+    for band in 0..10 {
+        let (lo, hi) = (band as f32 / 10.0, (band + 1) as f32 / 10.0);
+        let v: Vec<f32> = limbs
+            .iter()
+            .filter(|(h, _)| *h >= lo && *h < hi)
+            .map(|(_, e)| *e)
+            .collect();
+        if v.len() < 2 {
+            continue;
+        }
+        let m = v.iter().sum::<f32>() / v.len() as f32;
+        ss += v.iter().map(|e| (e - m).powi(2)).sum::<f32>();
+        n += v.len() - 1;
+    }
+    let scatter = if n == 0 { 1.0 } else { (ss / n as f32).sqrt() };
+    (high - low, scatter)
+}
+
+/// Where each branchlet at `level` finishes, against where it set out, in metres. A fir
+/// spray hangs and then lifts, so it ends above its own attachment; a spruce's hangs and
+/// stays there.
+fn mean_tip_rise(sk: &arbor_core::Skeleton, level: u8) -> f32 {
+    let (mut rise, mut n) = (0.0f32, 0usize);
+    for run in sk.stem_runs() {
+        let first = run[0] as usize;
+        if sk.nodes[first].level != level || sk.nodes[first].dead || sk.nodes[first].broken {
+            continue;
+        }
+        let Some(parent) = sk.nodes[first].parent else {
+            continue;
+        };
+        let from = sk.nodes[parent as usize].position;
+        let to = sk.nodes[*run.last().expect("a run is never empty") as usize].position;
+        // Short stems say more about the segment count than about the shape.
+        if (to - from).length() < 0.3 {
+            continue;
+        }
+        rise += to.y - from.y;
+        n += 1;
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    rise / n as f32
+}
+
+/// Crown radius per tenth of the tree's height, taken at the ninetieth percentile of the
+/// leaf cards in each band. A maximum would be set by one straggling branchlet hanging
+/// out of the crown and would say nothing about where the foliage actually is.
+fn crown_radius_profile(
+    sk: &arbor_core::Skeleton,
+    params: &arbor_core::SpeciesParams,
+) -> Vec<f32> {
+    let leaves = arbor_core::build_leaves(sk, params);
+    let height = sk.stats().height.max(0.1);
+    let mut bands: Vec<Vec<f32>> = vec![Vec::new(); 10];
+    for p in leaves.positions.iter() {
+        let band = ((p[1] / height * 10.0) as usize).min(9);
+        bands[band].push((p[0] * p[0] + p[2] * p[2]).sqrt());
+    }
+    bands
+        .iter_mut()
+        .map(|b| {
+            if b.is_empty() {
+                return 0.0;
+            }
+            b.sort_by(|x, y| x.partial_cmp(y).expect("leaf radii are finite"));
+            b[(b.len() as f32 * 0.9) as usize % b.len()]
+        })
+        .collect()
 }
 
 /// Height of the lowest leaf card, as a fraction of the tree's own height.
