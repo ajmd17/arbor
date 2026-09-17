@@ -25,6 +25,10 @@ const BOUNDS_CUTOFF: u8 = 8;
 const MAX_VARIANTS: u32 = 16;
 /// Decorrelates one variant's random stream from the next.
 const VARIANT_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+/// How far apart the shoots of a multi-shoot cluster stand, as a fraction of the cell.
+/// Wide enough that they are separate sprays rather than one thick one, narrow enough
+/// that the outermost still has room for its leaves before the edge.
+const SHOOT_SPREAD: f32 = 0.46;
 /// Narrowest a blade may be squeezed by turning away from the card, as a fraction of
 /// its own width. A real leaf has thickness and a curl, so even edge-on it is a
 /// sliver rather than nothing, and a cluster that let leaves vanish would lose the
@@ -332,21 +336,49 @@ fn lay_out(
     let twist_jitter = p.blade_twist_deg.abs().max(1e-4);
     let space_jitter = p.spacing_variance.abs().max(1e-4);
 
-    let mut roll = rng.random_range(0.0..std::f32::consts::TAU);
+    // Where each shoot stands across the cell, how far up it starts, which way it
+    // leans, and the phase of its own spiral. Drawn up front so the leaves can be
+    // dealt out between them.
+    let shoots = p.shoots.clamp(1, 16);
+    let per_shoot = (count / shoots).max(1);
+    let mut stand: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(shoots as usize);
+    if shoots == 1 {
+        // A single shoot stands where it always did and draws exactly what it always
+        // drew. Taking the extra draws here anyway would reshuffle the leaves of every
+        // species that has not asked for more than one shoot.
+        stand.push((0.5, 0.0, 1.0, rng.random_range(0.0..std::f32::consts::TAU)));
+    } else {
+        for s in 0..shoots {
+            let across = ((s as f32 + 0.5) / shoots as f32 - 0.5) * SHOOT_SPREAD;
+            stand.push((
+                0.5 + across + rng.random_range(-0.04f32..=0.04),
+                rng.random_range(-0.05f32..=0.05),
+                if rng.random::<bool>() { 1.0 } else { -1.0 },
+                rng.random_range(0.0..std::f32::consts::TAU),
+            ));
+        }
+    }
+
     let mut placed: Vec<(f32, Placement)> = Vec::with_capacity(count as usize);
 
     for i in 0..count {
+        // Leaves are dealt round the shoots rather than filling one and starting the
+        // next, so every shoot is finished even when the count does not divide evenly.
+        let shoot = (i % shoots) as usize;
+        let rung = i / shoots;
         // A shoot does not lay its leaves down against a ruler, so the step from one
         // to the next carries its own jitter rather than every cluster in the canopy
         // sharing one rhythm.
-        let step = i as f32 + rng.random_range(-space_jitter..=space_jitter);
-        let t = if count > 1 {
-            (step / (count - 1) as f32).clamp(0.0, 1.0)
+        let step = rung as f32 + rng.random_range(-space_jitter..=space_jitter);
+        let t = if per_shoot > 1 {
+            (step / (per_shoot - 1) as f32).clamp(0.0, 1.0)
         } else {
             0.0
         };
 
-        roll += (p.roll_deg + rng.random_range(-roll_jitter..=roll_jitter)).to_radians();
+        let roll = &mut stand[shoot].3;
+        *roll += (p.roll_deg + rng.random_range(-roll_jitter..=roll_jitter)).to_radians();
+        let roll = *roll;
         let crotch = (p.base_angle_deg
             + (p.tip_angle_deg - p.base_angle_deg) * t
             + rng.random_range(-angle_jitter..=angle_jitter))
@@ -388,12 +420,14 @@ fn lay_out(
         let scale_y = (scale_px * along_len).max(1e-4);
 
         // The shoot itself leans as it climbs, so a cluster is not built on a plumb
-        // line, and the leaves ride that lean.
-        let along = p.shoot_base + (p.shoot_tip - p.shoot_base) * t;
-        let lean = p.shoot_curve * t * t;
+        // line, and the leaves ride that lean. Neighbouring shoots lean opposite ways
+        // as often as not, which is what stops a cell of them reading as a comb.
+        let (base_x, base_y, lean_dir, _) = stand[shoot];
+        let along = p.shoot_base + base_y + (p.shoot_tip - p.shoot_base) * t;
+        let lean = p.shoot_curve * lean_dir * t * t;
         let mut place = Placement {
             attach: (
-                (0.5 + lean + rng.random_range(-0.02f32..=0.02)) * cell,
+                (base_x + lean + rng.random_range(-0.02f32..=0.02)) * cell,
                 (along + rng.random_range(-0.02f32..=0.02)) * cell,
             ),
             cos,
@@ -965,6 +999,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn standing_shoots_side_by_side_is_what_fills_a_cell_of_small_leaves() {
+        // One shoot can only reach a leaf's length either side of itself, so a species
+        // whose leaves are small against its card gets a narrow column of foliage with
+        // the corners left empty — and the leaves pile up in that column rather than
+        // spreading, which turns the card into a solid scalloped slab. Standing two or
+        // three shoots across the cell is what widens it and opens it at once.
+        // A broad blade rather than the thin one the other tests use: piling up is
+        // only a problem for a leaf wide enough to cover its neighbour.
+        let mut src = Bitmap::new(192, 192);
+        for y in 0..192 {
+            for x in 0..192 {
+                let u = (x as f32 + 0.5) / 192.0 - 0.5;
+                let v = (y as f32 + 0.5) / 192.0 - 0.55;
+                let inside = (u / 0.30).powi(2) + (v / 0.42).powi(2) < 1.0;
+                src.put(x, y, if inside { [40, 120, 30, 255] } else { [0, 0, 0, 0] });
+            }
+        }
+        let measure = |shoots: u32| {
+            let p = LeafClusterParams {
+                count: 45,
+                shoots,
+                cell_size: 192,
+                // Small against the cell: the case the single shoot cannot fill.
+                leaf_length: 0.17,
+                ..LeafClusterParams::default()
+            };
+            let baked = bake_cluster(
+                &p,
+                1,
+                1,
+                LeafMaps {
+                    albedo: &src,
+                    normal: None,
+                    roughness: None,
+                },
+            );
+            let (x0, _, x1, _) = baked
+                .albedo
+                .alpha_bounds(BOUNDS_CUTOFF)
+                .expect("a cluster of leaves");
+            (
+                (x1 - x0 + 1) as f32 / p.cell_size as f32,
+                baked.albedo.mean_alpha(),
+            )
+        };
+        let (one_wide, one_cover) = measure(1);
+        let (three_wide, three_cover) = measure(3);
+        assert!(
+            three_wide > one_wide * 1.25,
+            "three shoots spanned {three_wide:.2} of the cell against {one_wide:.2} for one"
+        );
+        // The same leaves spread out instead of stacking, so more of them show.
+        assert!(
+            three_cover > one_cover * 1.1,
+            "spreading the leaves did not uncover any of them: {one_cover:.3} to {three_cover:.3}"
+        );
+    }
+
+    #[test]
+    fn a_single_shoot_lays_out_exactly_as_it_did_before_shoots_existed() {
+        // The per-shoot values are drawn up front, so taking those draws when nothing
+        // asked for more than one shoot would reshuffle every leaf of every species
+        // already tuned. Pinned here because it is invisible until a preset shifts.
+        let src = leaf(128, 128, 120);
+        let bake = |p: &LeafClusterParams| {
+            bake_cluster(
+                p,
+                1,
+                1,
+                LeafMaps {
+                    albedo: &src,
+                    normal: None,
+                    roughness: None,
+                },
+            )
+            .albedo
+        };
+        let single = LeafClusterParams {
+            shoots: 1,
+            ..params()
+        };
+        assert_eq!(bake(&single), bake(&params()), "the default is not one shoot");
+        // And the cluster a single shoot lays is centred on the cell, not offset the
+        // way a member of a row of shoots would be.
+        let img = bake(&single);
+        let (x0, _, x1, _) = img.alpha_bounds(BOUNDS_CUTOFF).expect("a cluster");
+        let middle = (x0 + x1) as f32 * 0.5 / img.width as f32;
+        assert!(
+            (middle - 0.5).abs() < 0.08,
+            "a lone shoot sits at {middle:.2} across the cell rather than in the middle"
+        );
     }
 
     #[test]

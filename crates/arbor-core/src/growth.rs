@@ -48,6 +48,16 @@ const SPLIT_EVEN: f32 = 0.86;
 /// of one season's shoot: fine enough to tell the inside of a crown from its surface,
 /// coarse enough that a stem is not judged by its own thickness.
 const CROWDING_CELL: f32 = 1.2;
+/// Longest a lateral may grow against the stem it leaves, as a share of it.
+///
+/// A branch is not longer than the branch it grows out of. Nothing else in the model
+/// says so: length comes from the level's own figure scaled by drive, and the skewed
+/// draw that makes a few siblings dominant is quite capable of handing a twig more
+/// length than the branchlet carrying it. Those come out as spears laid across the
+/// branchwork, and no amount of angle tuning hides them, because the problem is the
+/// length rather than the direction. A co-dominant fork is exempt: it is the same axis
+/// carrying on, not a lateral off it.
+const LATERAL_MAX_SHARE: f32 = 0.8;
 /// Most children one node of a parent may carry, so a runaway rate cannot spend the
 /// whole node budget at one point on one stem.
 const MAX_CHILDREN_PER_NODE: u32 = 8;
@@ -64,6 +74,22 @@ const DOMINANCE_SHAPE: f32 = 3.0;
 /// dominant and the suppressed end up within a factor of two of each other and the
 /// crown reads as a bottle brush however unequally the drive was shared out.
 const LENGTH_FLOOR: f32 = 0.15;
+
+/// A child settled on while its parent was still growing, held back until it has
+/// finished.
+///
+/// Everything about the child is decided at the moment the parent reaches it, so the
+/// random stream is the same as if it were grown there and then; only the growing
+/// waits. What it waits for is the one thing the parent cannot know while it is still
+/// climbing — how long it actually turned out to be.
+struct Pending {
+    attach: u32,
+    dir: Vec3,
+    vigor: f32,
+    level: u8,
+    path: u64,
+    spray: Vec3,
+}
 
 struct GrowCtx<'a> {
     params: &'a SpeciesParams,
@@ -155,6 +181,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
         TRUNK_STEM,
         Vec3::ZERO,
         f32::MAX,
+        0.0,
     );
     resolve_radii(params, &mut skeleton);
     mark_dieback(params, &mut skeleton);
@@ -354,6 +381,8 @@ fn grow_stem(
     // fresh budget at every fork would let a limb come round through them one fork at
     // a time. A child at the next level down is a new limb and starts full.
     budget: f32,
+    // Length of the stem this one leaves, or 0 for the trunk, which leaves nothing.
+    parent_len: f32,
 ) {
     if skeleton.nodes.len() >= MAX_NODES {
         return;
@@ -371,9 +400,12 @@ fn grow_stem(
     let nominal = ctx.nominal(level);
     let drive = (vigor / nominal).clamp(0.0, 1.6);
     let length_factor = (LENGTH_FLOOR + (1.0 - LENGTH_FLOOR) * drive).min(1.6);
-    let stem_len = sp.length
+    let mut stem_len = sp.length
         * length_factor
         * range_f32(&mut rng, 1.0 - sp.length_variance, 1.0 + sp.length_variance).max(0.2);
+    if parent_len > 0.0 {
+        stem_len = stem_len.min(parent_len * LATERAL_MAX_SHARE);
+    }
     let seg_count =
         ((stem_len / sp.segment_length.max(1e-3)).ceil() as usize).clamp(2, MAX_SEGMENTS);
     let seg_len = stem_len / seg_count as f32;
@@ -387,6 +419,9 @@ fn grow_stem(
     let mut cur = base_node;
     let mut azimuth = range_f32(&mut rng, 0.0, std::f32::consts::TAU);
     let mut slot: u32 = 0;
+    let mut pending: Vec<Pending> = Vec::new();
+    // What the stem really grew, as against `stem_len`, which is what it set out to.
+    let mut grown_len = 0.0f32;
     let can_spawn = level + 1 < ctx.levels_total;
     // The leader keeps its own course, but a co-dominant fork is part of the crown
     // and has to be shaped by the envelope like any branch, or the tree grows as a
@@ -399,9 +434,12 @@ fn grow_stem(
     // needs, and the stem rides it round. The bank is earned by the length the stem is
     // about to grow, so a long limb may wander and a twig may not; `budget` caps it
     // with whatever a fork's parent had left.
-    let mut turn_budget = budget
-        .min(TURN_BANK_PER_M * stem_len)
-        .clamp(0.0, MAX_STEM_TURN);
+    let bank = if sp.turn_bank > 0.0 {
+        sp.turn_bank
+    } else {
+        TURN_BANK_PER_M
+    };
+    let mut turn_budget = budget.min(bank * stem_len).clamp(0.0, MAX_STEM_TURN);
 
     for seg in 0..seg_count {
         let mut jitter = rand_perpendicular(&mut rng, cur_dir);
@@ -455,6 +493,7 @@ fn grow_stem(
 
         let frac = (seg + 1) as f32 / seg_count as f32;
         let seg_path = child_path(path, seg as u32);
+        grown_len += seg_len;
         cur = skeleton.push_node(Some(cur), pos, level, seg_path, v, frac, stem);
         if is_leader {
             // Recorded before anything spawns here, so branches born at this height
@@ -464,9 +503,6 @@ fn grow_stem(
 
         if can_spawn {
             spawn_children(
-                ctx,
-                skeleton,
-                tree_rng,
                 &mut rng,
                 cur,
                 cur_dir,
@@ -481,6 +517,7 @@ fn grow_stem(
                 &mut slot,
                 path,
                 spray,
+                &mut pending,
             );
         }
 
@@ -518,6 +555,7 @@ fn grow_stem(
                 fork_stem,
                 spray,
                 turn_budget,
+                parent_len,
             );
             // The parent gives up part of its drive to the fork instead of both
             // halves carrying on at full strength.
@@ -529,13 +567,36 @@ fn grow_stem(
             break;
         }
     }
+
+    // Now the stem has stopped, so its children can be measured against what it
+    // reached rather than what it intended. A limb the crown cut off at a third of its
+    // length would otherwise hand its twigs a cap drawn from the other two thirds, and
+    // they come out longer than the branch carrying them.
+    for child in pending {
+        if skeleton.nodes.len() >= MAX_NODES {
+            return;
+        }
+        let child_stem = skeleton.nodes.len() as u32;
+        grow_stem(
+            ctx,
+            skeleton,
+            tree_rng,
+            child.attach,
+            child.dir,
+            child.vigor,
+            child.level,
+            child.path,
+            0,
+            child_stem,
+            child.spray,
+            MAX_STEM_TURN,
+            grown_len,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_children(
-    ctx: &GrowCtx,
-    skeleton: &mut Skeleton,
-    tree_rng: &TreeRng,
     rng: &mut SmallRng,
     attach: u32,
     dir: Vec3,
@@ -550,17 +611,17 @@ fn spawn_children(
     slot: &mut u32,
     stem_path: u64,
     spray: Vec3,
+    pending: &mut Vec<Pending>,
 ) {
     let child = &sp.children;
     let frac = (seg + 1) as f32 / seg_count as f32;
     if frac < child.start_fraction || frac > child.end_fraction {
         return;
     }
-    if skeleton.nodes.len() >= MAX_NODES {
-        return;
-    }
-
-    let spawn_one = |az: f32, skeleton: &mut Skeleton, slot: &mut u32, rng: &mut SmallRng| {
+    let spawn_one = |az: f32,
+                     pending: &mut Vec<Pending>,
+                     slot: &mut u32,
+                     rng: &mut SmallRng| {
         *slot += 1;
         // Children leave at a shallower or steeper angle depending how far along the
         // parent they are, so a stem does not carry every child at one fixed angle.
@@ -601,22 +662,14 @@ fn spawn_children(
         // limb.
         let acro = 1.0 + child.acrotony.clamp(-1.0, 1.0) * (2.0 * t - 1.0);
         let drive = child.scale * spread * lottery.max(0.0) * acro.max(0.05);
-        let p = child_path(stem_path, *slot);
-        let child_stem = skeleton.nodes.len() as u32;
-        grow_stem(
-            ctx,
-            skeleton,
-            tree_rng,
+        pending.push(Pending {
             attach,
-            d,
-            vigor * drive.max(0.02),
-            child_level,
-            p,
-            0,
-            child_stem,
-            child_spray,
-            MAX_STEM_TURN,
-        );
+            dir: d,
+            vigor: vigor * drive.max(0.02),
+            level: child_level,
+            path: child_path(stem_path, *slot),
+            spray: child_spray,
+        });
     };
 
     match child.pattern {
@@ -643,7 +696,7 @@ fn spawn_children(
                 let az = *azimuth
                     + (k as f32) * std::f32::consts::TAU / count as f32
                     + range_f32(rng, -child.roll_variance_deg, child.roll_variance_deg).to_radians();
-                spawn_one(az, skeleton, slot, rng);
+                spawn_one(az, pending, slot, rng);
             }
         }
         ChildPattern::Continuous { density } => {
@@ -671,7 +724,7 @@ fn spawn_children(
                 *azimuth += child.phyllotaxis_deg.to_radians();
                 let az = *azimuth
                     + range_f32(rng, -child.roll_variance_deg, child.roll_variance_deg).to_radians();
-                spawn_one(az, skeleton, slot, rng);
+                spawn_one(az, pending, slot, rng);
             }
         }
     }
@@ -887,7 +940,7 @@ fn da_vinci_exp(params: &SpeciesParams, level: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{parse_species, OAK_RON, PINE_RON};
+    use crate::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON};
 
     /// Every stem in the skeleton, as (level, length, children it carries, the
     /// fraction along its parent where it attaches).
@@ -1053,11 +1106,113 @@ mod tests {
             let total: f32 = lengths.iter().map(|(_, len)| *len).sum();
             lengths.iter().map(|(a, len)| a * len).sum::<f32>() / total.max(1e-4)
         };
+        // Both ends of the range rather than one: children only spawn between
+        // `start_fraction` and `end_fraction`, so the measure sits near 0.6 before
+        // acrotony touches it and comparing against that offset leaves very little to
+        // see. The negative half is what a conifer uses, so it is worth pinning too.
+        let basal = attach_at(-0.8);
         let even = attach_at(0.0);
         let distal = attach_at(0.8);
         assert!(
-            distal > even + 0.04,
-            "acrotony moved the weighted attachment point from {even:.2} to {distal:.2}"
+            distal > even && even > basal,
+            "acrotony did not order the attachment point: {basal:.2} / {even:.2} / {distal:.2}"
+        );
+        assert!(
+            distal > basal + 0.08,
+            "acrotony moved the weighted attachment point only from {basal:.2} to {distal:.2}"
+        );
+    }
+
+    #[test]
+    fn no_lateral_outgrows_the_stem_it_leaves() {
+        // A branch is not longer than the branch it grows out of. Measured on what the
+        // parent actually reached, not what it set out to grow: a stem the crown cuts
+        // off at a third of its length still hands its children a cap, and taking that
+        // cap from the length it never achieved is how twigs end up lying across the
+        // branchwork longer than the wood carrying them.
+        for src in [OAK_RON, PINE_RON, BIRCH_RON] {
+            let params = parse_species(src).unwrap();
+            let sk = grow(&params);
+
+            // Length of every stem, from the raw nodes: `stem_runs` hides the wood that
+            // died, and a stem measured without it reads as shorter than it grew.
+            let mut length: std::collections::HashMap<u32, f32> =
+                std::collections::HashMap::new();
+            let mut head: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            for (i, node) in sk.nodes.iter().enumerate() {
+                let Some(p) = node.parent else { continue };
+                let run = (node.position - sk.nodes[p as usize].position).length();
+                *length.entry(node.stem).or_insert(0.0) += run;
+                if sk.nodes[p as usize].stem != node.stem {
+                    head.insert(node.stem, i as u32);
+                }
+            }
+
+            let mut checked = 0;
+            for (&stem, &first) in &head {
+                let node = &sk.nodes[first as usize];
+                let parent = &sk.nodes[node.parent.expect("a head has a parent") as usize];
+                // A co-dominant fork is the same axis carrying on, not a lateral off
+                // it, and may match the stem it left.
+                if node.level == parent.level {
+                    continue;
+                }
+                let (Some(&mine), Some(&theirs)) =
+                    (length.get(&stem), length.get(&parent.stem))
+                else {
+                    continue;
+                };
+                assert!(
+                    mine <= theirs * LATERAL_MAX_SHARE + 1e-3,
+                    "{}: a level {} stem ran {mine:.2} m off a level {} stem of {theirs:.2} m",
+                    params.name,
+                    node.level,
+                    parent.level
+                );
+                checked += 1;
+            }
+            assert!(checked > 200, "{}: only {checked} laterals to check", params.name);
+        }
+    }
+
+    #[test]
+    fn a_tighter_turn_bank_stops_a_limb_coming_round_on_itself() {
+        // A limb long against the crown it grows in has to be bent back to stay inside,
+        // and with turning to spare the crown pull spends all of it: the limb closes a
+        // quarter circle and comes out as a shepherd's crook. The bank is what says how
+        // much it may spend.
+        let worst_turn = |bank: f32| {
+            let mut params = parse_species(BIRCH_RON).unwrap();
+            for level in &mut params.branch_levels {
+                level.turn_bank = bank;
+            }
+            let sk = grow(&params);
+            let mut worst = 0.0f32;
+            for run in sk.stem_runs() {
+                if run.len() < 4 {
+                    continue;
+                }
+                let step = |i: usize| {
+                    sk.nodes[run[i] as usize].position - sk.nodes[run[i - 1] as usize].position
+                };
+                let (Some(a), Some(b)) =
+                    (step(1).try_normalize(), step(run.len() - 1).try_normalize())
+                else {
+                    continue;
+                };
+                worst = worst.max(a.dot(b).clamp(-1.0, 1.0).acos().to_degrees());
+            }
+            worst
+        };
+        let loose = worst_turn(0.40);
+        let tight = worst_turn(0.08);
+        assert!(
+            loose > 75.0,
+            "a loose bank should let some limb come well round, got {loose:.0} degrees"
+        );
+        assert!(
+            tight < loose * 0.7,
+            "tightening the bank barely straightened anything: {loose:.0} to {tight:.0} degrees"
         );
     }
 
@@ -1189,12 +1344,16 @@ mod tests {
             inside.1 > 200 && outside.1 > 200,
             "not enough wood either side of the crown to compare: {inside:?} {outside:?}"
         );
-        let share = |(dead, all): (usize, usize)| dead as f32 / all as f32;
+        // Compared as survival rather than as death. Death rates saturate: once both
+        // are near certain the ratio between them collapses however much harder the
+        // inside is being hit, and the test starts reporting on the ceiling instead of
+        // on the crowding.
+        let lived = |(dead, all): (usize, usize)| (all - dead) as f32 / all as f32;
         assert!(
-            share(inside) > share(outside) * 1.3,
-            "the crowded wood died at {:.2} against {:.2} out in the open",
-            share(inside),
-            share(outside)
+            lived(outside) > lived(inside) * 1.5,
+            "wood in the open survived at {:.2} against {:.2} for the crowded wood",
+            lived(outside),
+            lived(inside)
         );
     }
 
@@ -1243,7 +1402,7 @@ mod tests {
     fn trunk_keeps_its_thickness_up_the_stem() {
         // The taper ratio applies once over a whole stem. Compounding it per segment
         // instead shrinks the trunk to the radius floor within a couple of metres.
-        for src in [OAK_RON, PINE_RON] {
+        for src in [OAK_RON, PINE_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
             let sk = grow(&params);
             let trunk_stem = sk.nodes[0].stem;
@@ -1448,7 +1607,7 @@ mod tests {
         // judged against the crown anchored somewhere on the trunk at or below it.
         // That set of anchors is exactly what was available while it grew: the trunk
         // is only known up to the height reached so far.
-        for src in [PINE_RON, OAK_RON] {
+        for src in [PINE_RON, OAK_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
             let env = params.envelope.scaled(params.envelope_scale);
             let sk = grow(&params);

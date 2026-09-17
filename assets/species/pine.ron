@@ -30,7 +30,7 @@
             crotch_angle_deg: 88.0,
             crotch_angle_tip_deg: 38.0,
             crotch_variance_deg: 14.0,
-            roll_variance_deg: 46.0,
+            roll_variance_deg: 28.0,
             phyllotaxis_deg: 137.5,
             scale: 0.46,
             scale_variance: 0.5,

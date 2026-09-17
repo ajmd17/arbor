@@ -1234,7 +1234,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{parse_species, OAK_RON, PINE_RON};
+    use crate::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON};
 
 
     #[test]
@@ -1242,7 +1242,7 @@ mod tests {
         // Consistent winding is what lets the renderer cull back faces and trust the
         // normal it was given, instead of flipping normals toward the viewer to hide
         // not knowing which way a triangle faces.
-        for src in [OAK_RON, PINE_RON] {
+        for src in [OAK_RON, PINE_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
             let mesh = build_mesh(&crate::grow(&params), &params);
             let mut checked = 0;
@@ -1277,7 +1277,7 @@ mod tests {
         // The whole tree is one welded surface only because each stem begins with a
         // ring on the parent centreline. Starting at the first grown node instead
         // leaves a segment-length hole at every junction.
-        for src in [OAK_RON, PINE_RON] {
+        for src in [OAK_RON, PINE_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
             let sk = crate::grow(&params);
             let mut checked = 0;
@@ -1450,14 +1450,22 @@ mod tests {
             .into_iter()
             .find(|r| sk.nodes[r[0] as usize].parent.is_none())
             .expect("a trunk");
-        let path = StemPath::build(&sk, &run, &params.mesh, params.seed, &children).expect("builds");
+        let mut path =
+            StemPath::build(&sk, &run, &params.mesh, params.seed, &children).expect("builds");
         assert!(
             !path.irregular.collars.is_empty(),
             "the trunk carries branches but recorded no collars"
         );
 
+        // Measured as the difference the collar itself makes, by sampling the same
+        // point with and without it. Comparing the facing side against the far side
+        // instead reads the flutes and the swells, which wander round the stem on their
+        // own account and are deeper than a collar is: that turns a question about one
+        // feature into a coin toss about all of them.
+        let collars = std::mem::take(&mut path.irregular.collars);
         let mut checked = 0;
-        for collar in &path.irregular.collars {
+        let mut resolved = 0;
+        for collar in &collars {
             // The ring nearest where the branch leaves, and the angle facing it.
             let i = path
                 .arc
@@ -1470,19 +1478,39 @@ mod tests {
                 })
                 .map(|(i, _)| i)
                 .unwrap();
+            // A collar reaches `radius * 2.6` along the stem, and a branch thin
+            // enough that this is narrower than the gap between rings falls between
+            // them: no ring ever samples it, so it swells nothing. That is the honest
+            // behaviour of a twig's collar, not a failure, so those are not counted.
+            let reach = (collar.radius * 2.6).max(0.04);
+            if (path.arc[i] - collar.arc).abs() > reach {
+                continue;
+            }
             let (n, b) = path.frames[i];
             // Recover the angle of the collar in this ring's frame.
             let a_face = collar.dir.dot(b).atan2(collar.dir.dot(n));
-            let facing = path.radius_at(i, a_face, &params.mesh, (0.0, 0.0));
-            let away = path.radius_at(i, a_face + PI, &params.mesh, (0.0, 0.0));
-            if facing > away {
+            let bare = path.radius_at(i, a_face, &params.mesh, (0.0, 0.0));
+            path.irregular.collars.push(Collar {
+                arc: collar.arc,
+                dir: collar.dir,
+                angle: collar.angle,
+                radius: collar.radius,
+            });
+            let swelled = path.radius_at(i, a_face, &params.mesh, (0.0, 0.0));
+            path.irregular.collars.clear();
+            resolved += 1;
+            if swelled > bare {
                 checked += 1;
             }
         }
         assert!(
-            checked * 2 > path.irregular.collars.len(),
-            "only {checked} of {} collars thickened the side the branch leaves from",
-            path.irregular.collars.len()
+            resolved * 3 > collars.len(),
+            "only {resolved} of {} collars landed on a ring at all",
+            collars.len()
+        );
+        assert_eq!(
+            checked, resolved,
+            "only {checked} of {resolved} collars that land on a ring thickened the              side the branch leaves from"
         );
     }
 

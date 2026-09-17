@@ -1,4 +1,4 @@
-use arbor_core::species::{parse_species, OAK_RON, PINE_RON};
+use arbor_core::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON};
 use arbor_core::grow;
 
 fn stems_at_level(
@@ -101,7 +101,7 @@ fn worst_stem_turn(sk: &arbor_core::Skeleton) -> (f32, f32) {
 
 #[test]
 fn stems_arc_without_curling_round_on_themselves() {
-    for (name, ron) in [("pine", PINE_RON), ("oak", OAK_RON)] {
+    for (name, ron) in [("pine", PINE_RON), ("oak", OAK_RON), ("birch", BIRCH_RON)] {
         let params = parse_species(ron).unwrap();
         for seed in 1..=8u64 {
             let mut params = params.clone();

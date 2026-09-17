@@ -356,7 +356,7 @@ fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, ra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{parse_species, OAK_RON, PINE_RON};
+    use crate::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON};
 
     fn oak() -> SpeciesParams {
         parse_species(OAK_RON).unwrap()
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn presets_grow_a_canopy() {
-        for src in [OAK_RON, PINE_RON] {
+        for src in [OAK_RON, PINE_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
             let sk = crate::grow(&params);
             let leaves = build_leaves(&sk, &params);

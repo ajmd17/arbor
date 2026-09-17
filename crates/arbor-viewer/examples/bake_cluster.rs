@@ -62,6 +62,7 @@ fn main() {
         size_variance: num("--size-variance", d.size_variance),
         spacing_variance: num("--spacing-variance", d.spacing_variance),
         shoot_curve: num("--curve", d.shoot_curve),
+        shoots: num("--shoots", d.shoots as f32) as u32,
         variants: num("--variants", d.variants as f32) as u32,
         shoot_base: num("--rachis-base", d.shoot_base),
         shoot_tip: num("--rachis-tip", d.shoot_tip),

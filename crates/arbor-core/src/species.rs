@@ -4,9 +4,10 @@ use crate::envelope::EnvelopeParams;
 
 pub const PINE_RON: &str = include_str!("../../../assets/species/pine.ron");
 pub const OAK_RON: &str = include_str!("../../../assets/species/oak.ron");
+pub const BIRCH_RON: &str = include_str!("../../../assets/species/birch.ron");
 
 pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
-    vec![("pine", PINE_RON), ("oak", OAK_RON)]
+    vec![("pine", PINE_RON), ("oak", OAK_RON), ("birch", BIRCH_RON)]
 }
 
 pub fn parse_species(ron_src: &str) -> Result<SpeciesParams, String> {
@@ -288,6 +289,16 @@ pub struct StemParams {
     pub split_probability: f32,
     /// How far a co-dominant fork leans away from the stem it splits from.
     pub split_angle_deg: f32,
+    /// Turning a stem of this level may bank, in radians per metre of its own length.
+    /// Zero takes the model's own figure.
+    ///
+    /// The bank is what stops the crown pull settling into an orbit — there is always a
+    /// radius at which a fixed pull supplies exactly the turn a circle needs, and a stem
+    /// with turning to spare will ride it round. A limb long enough against its crown
+    /// has to come back on itself to stay inside, and the result is a shepherd's crook.
+    /// A species whose limbs are stiff, or long against the crown they grow in, wants
+    /// less than the default.
+    pub turn_bank: f32,
     /// How evenly a fork divides the drive of the stem it leaves.
     ///
     /// At 0 the fork is a side branch: it takes the smaller share and the original
@@ -341,6 +352,7 @@ impl StemParams {
             vigor_falloff: 0.5,
             split_probability: 0.04,
             split_angle_deg: 22.0,
+            turn_bank: 0.0,
             split_evenness: 0.0,
             dead_stub_length: 0.0,
             dieback: 0.0,
@@ -369,6 +381,7 @@ impl Default for StemParams {
             vigor_falloff: 0.35,
             split_probability: 0.02,
             split_angle_deg: 25.0,
+            turn_bank: 0.0,
             split_evenness: 0.0,
             dead_stub_length: 0.0,
             dieback: 0.0,
@@ -523,6 +536,14 @@ pub struct LeafClusterParams {
     /// between per card. One cluster repeated over a whole canopy is visible as a
     /// motif however the cards are turned; a handful of them is not.
     pub variants: u32,
+    /// Shoots the cell is built from, side by side.
+    ///
+    /// One shoot can only ever fill a strip as wide as twice a leaf is long, so a
+    /// species whose leaves are small against its card gets a narrow column of
+    /// overlapping foliage down the middle and empty corners — a solid, scalloped
+    /// slab rather than a spray. Standing two or three shoots across the cell is what
+    /// a card of small leaves needs, and it is what an artist drawing one would do.
+    pub shoots: u32,
     /// Where along the cell the first and last leaves attach, 1.0 being the base.
     pub shoot_base: f32,
     pub shoot_tip: f32,
@@ -554,6 +575,7 @@ impl Default for LeafClusterParams {
             size_variance: 0.28,
             spacing_variance: 0.45,
             shoot_curve: 0.06,
+            shoots: 1,
             variants: 1,
             shoot_base: 0.99,
             shoot_tip: 0.26,
