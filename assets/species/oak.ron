@@ -274,11 +274,20 @@
         flexibility: (0.05, 0.15, 0.35, 0.8),
     ),
     mesh: (
+        // Budgeted for a forest rather than for a hero shot. Bark is the part nobody
+        // sees once the canopy is on, so it is bought cheaply: a two-centimetre
+        // silhouette tolerance rather than one, rings thinned to the same budget, and
+        // nothing thinner than a wrist left meshed at all. The wood under the leaves
+        // went from 67k triangles to 16k, for a tree indistinguishable in leaf.
+        //
+        // `min_radial` is 4 rather than 3 on purpose: at this tolerance every thin limb
+        // otherwise collapses to a triangular prism, which reads as a flat ribbon as it
+        // turns. The extra side costs about 700 triangles over the whole tree.
         uv_scale: 0.8,
-        silhouette_tolerance: 0.010,
-        min_radial: 3,
-        min_bark_radius: 0.028,
-        max_radial: 72,
+        silhouette_tolerance: 0.020,
+        min_radial: 4,
+        min_bark_radius: 0.038,
+        max_radial: 32,
         root_flare: 1.9,
         flare_height: 2.2,
         root_taper: 2.2,
@@ -318,7 +327,7 @@
             bark_ridge: 0.35,
             min_radius: 0.06,
             rings_per_meter: 14.0,
-            ring_tolerance: 0.010,
+            ring_tolerance: 0.020,
         ),
     ),
     envelope: (
