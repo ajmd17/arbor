@@ -51,6 +51,62 @@ impl Default for SpeciesParams {
     }
 }
 
+/// What stops a trunk from being a cylinder.
+///
+/// Real boles are fluted rather than round, swell and waist along their length, and
+/// carry the odd burl. All of it is shaped here as smooth functions of the angle
+/// around the stem and the distance along it, because the mesher takes its normals
+/// from finite differences of the radius: anything smooth gets correct shading for
+/// free, and anything that is not shows up as faceting.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BarkIrregularity {
+    /// Depth of the flutes running up the stem, as a fraction of its radius.
+    pub flute_depth: f32,
+    /// Roughly how many flutes go round. Several frequencies are mixed around this,
+    /// so the cross-section does not come out as a tidy cog.
+    pub flute_waves: f32,
+    /// How far the flutes wind around the stem, in turns per metre.
+    pub flute_twist: f32,
+    /// Slow swelling and waisting along the length, as a fraction of the radius.
+    pub swell_depth: f32,
+    /// Length of the longest swelling, in metres.
+    pub swell_period: f32,
+    /// Burls per metre of stem thick enough to carry them.
+    pub burl_density: f32,
+    /// How far a burl stands out, as a fraction of the radius.
+    pub burl_depth: f32,
+    /// Width of a burl in metres, before it is scaled to the stem.
+    pub burl_size: f32,
+    /// Swelling where a branch leaves, as a fraction of the child's radius. A real
+    /// trunk thickens into every limb it carries rather than meeting it at a seam.
+    pub collar_depth: f32,
+    /// Stems thinner than this stay clean: a twig has no room for any of it, and
+    /// paying for the rings to describe it would be waste.
+    pub min_radius: f32,
+    /// Rings per metre on stems that do carry the detail. The skeleton is segmented
+    /// for growth, far too coarsely to show a burl.
+    pub rings_per_meter: f32,
+}
+
+impl Default for BarkIrregularity {
+    fn default() -> Self {
+        Self {
+            flute_depth: 0.115,
+            flute_waves: 4.0,
+            flute_twist: 0.07,
+            swell_depth: 0.085,
+            swell_period: 3.2,
+            burl_density: 0.4,
+            burl_depth: 0.46,
+            burl_size: 0.42,
+            collar_depth: 0.55,
+            min_radius: 0.045,
+            rings_per_meter: 14.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MeshParams {
@@ -64,6 +120,7 @@ pub struct MeshParams {
     pub socket_flare: f32,
     /// Base name of the bark texture set under `assets/textures`.
     pub bark_texture: String,
+    pub irregularity: BarkIrregularity,
 }
 
 impl Default for MeshParams {
@@ -78,6 +135,7 @@ impl Default for MeshParams {
             tip_length: 0.06,
             socket_flare: 0.35,
             bark_texture: "bark".to_string(),
+            irregularity: BarkIrregularity::default(),
         }
     }
 }

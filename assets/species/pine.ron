@@ -199,6 +199,19 @@
         tip_length: 0.06,
         socket_flare: 0.35,
         bark_texture: "bark_pine",
+        irregularity: (
+            flute_depth: 0.115,
+            flute_waves: 4.0,
+            flute_twist: 0.07,
+            swell_depth: 0.085,
+            swell_period: 3.2,
+            burl_density: 0.4,
+            burl_depth: 0.46,
+            burl_size: 0.42,
+            collar_depth: 0.55,
+            min_radius: 0.045,
+            rings_per_meter: 14.0,
+        ),
     ),
     envelope: (
         volumes: [
