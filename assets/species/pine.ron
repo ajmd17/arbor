@@ -219,6 +219,6 @@
         ],
         falloff: 0.25,
         kill_threshold: 0.03,
-        pull_strength: 0.3,
+        pull_strength: 0.6,
     ),
 )

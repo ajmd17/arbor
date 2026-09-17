@@ -58,3 +58,54 @@ fn node_budget_is_respected() {
         assert!(sk.nodes.len() < 150_000, "node explosion: {}", sk.nodes.len());
     }
 }
+
+/// The furthest any one stem turns over its length, in degrees, and the tightest
+/// bend reached, in degrees per metre. A stem that turns far enough has come round on
+/// itself, which is what an unbounded pull toward the crown axis produces: whatever
+/// its strength there is a radius at which it supplies exactly the turn a circle
+/// needs, and the stem rides it round instead of settling.
+fn worst_stem_turn(sk: &arbor_core::Skeleton) -> (f32, f32) {
+    let (mut worst, mut worst_per_m) = (0.0f32, 0.0f32);
+    for run in sk.stem_runs() {
+        let mut dirs = Vec::new();
+        let mut length = 0.0f32;
+        for pair in run.windows(2) {
+            let step = sk.nodes[pair[1] as usize].position - sk.nodes[pair[0] as usize].position;
+            if step.length() > 1e-6 {
+                length += step.length();
+                dirs.push(step.normalize());
+            }
+        }
+        let turn: f32 = dirs
+            .windows(2)
+            .map(|pair| pair[0].dot(pair[1]).clamp(-1.0, 1.0).acos())
+            .sum::<f32>()
+            .to_degrees();
+        worst = worst.max(turn);
+        if length > 1e-3 {
+            worst_per_m = worst_per_m.max(turn / length);
+        }
+    }
+    (worst, worst_per_m)
+}
+
+#[test]
+fn stems_arc_without_curling_round_on_themselves() {
+    for (name, ron) in [("pine", PINE_RON), ("oak", OAK_RON)] {
+        let params = parse_species(ron).unwrap();
+        for seed in 1..=8u64 {
+            let mut params = params.clone();
+            params.seed = seed;
+            let sk = grow(&params);
+            let (turn, per_m) = worst_stem_turn(&sk);
+            assert!(
+                turn < 75.0,
+                "{name} seed {seed} has a stem turning {turn:.0} degrees over its length"
+            );
+            assert!(
+                per_m < 60.0,
+                "{name} seed {seed} has a stem bending {per_m:.0} degrees per metre"
+            );
+        }
+    }
+}

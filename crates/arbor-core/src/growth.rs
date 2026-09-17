@@ -21,6 +21,14 @@ const TRUNK_STEM: u32 = 0;
 /// Share of the bend direction re-rolled each segment. Keeping most of the previous
 /// bend makes the deflection correlated, which reads as a smooth arc, not noise.
 const BEND_WANDER: f32 = 0.22;
+/// Hardest a stem may bend, in radians per metre grown. A bend radius of about 0.7 m:
+/// slack enough that nothing in the presets reaches it, tight enough that no run of
+/// influences can fold a stem back on itself over a single segment.
+const MAX_TURN_PER_M: f32 = 1.5;
+/// Total turning any one stem may bank over its whole length, in radians. Enough for
+/// a limb to be bent into line by the crown and to sag under its own weight on the
+/// way out, far short of the turn it would take to come round on itself.
+const MAX_STEM_TURN: f32 = 1.0;
 /// A fork takes this share of the parent vigor; the original stem keeps the rest.
 const SPLIT_VIGOR: f32 = 0.72;
 const SPLIT_KEEP: f32 = 0.86;
@@ -94,6 +102,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
         0,
         TRUNK_STEM,
         Vec3::ZERO,
+        MAX_STEM_TURN,
     );
     resolve_radii(params, &mut skeleton);
     skeleton
@@ -122,6 +131,11 @@ fn grow_stem(
     // Normal of the flat plane this stem and its children lie in, or zero for a
     // stem that spreads in every direction.
     spray: Vec3,
+    // Turning this stem starts with. A fork carries on with what its parent had left,
+    // because it leaves at a shallow angle and reads as the same limb continuing; a
+    // fresh budget at every fork would let a limb come round through them one fork at
+    // a time. A child at the next level down is a new limb and starts full.
+    budget: f32,
 ) {
     if skeleton.nodes.len() >= MAX_NODES {
         return;
@@ -155,6 +169,11 @@ fn grow_stem(
     // bundle of parallel poles.
     let shaped_by_envelope = level > 0 || split_depth > 0;
     let is_leader = level == 0 && split_depth == 0;
+    // How much turning this stem has left to spend, across every influence that bends
+    // it. Without a ceiling the crown pull alone settles into an orbit: whatever its
+    // strength, there is a radius at which it supplies exactly the turn a circle
+    // needs, and the stem rides it round.
+    let mut turn_budget = budget.max(0.0);
 
     for seg in 0..seg_count {
         let mut jitter = rand_perpendicular(&mut rng, cur_dir);
@@ -164,7 +183,16 @@ fn grow_stem(
             jitter = flatten_into(jitter, spray, 1.0);
         }
         bend = ortho_unit(bend * (1.0 - BEND_WANDER) + jitter * BEND_WANDER, cur_dir);
-        let next_dir = steer(ctx, sp, cur_dir, pos, bend, seg_len, shaped_by_envelope);
+        let next_dir = steer(
+            ctx,
+            sp,
+            cur_dir,
+            pos,
+            bend,
+            seg_len,
+            shaped_by_envelope,
+            &mut turn_budget,
+        );
         frame = transport(cur_dir, next_dir, frame);
         bend = transport(cur_dir, next_dir, bend);
         cur_dir = next_dir;
@@ -241,6 +269,7 @@ fn grow_stem(
                 split_depth + 1,
                 fork_stem,
                 spray,
+                turn_budget,
             );
             // The parent gives up part of its drive to the fork instead of both
             // halves carrying on at full strength.
@@ -320,6 +349,7 @@ fn spawn_children(
             0,
             child_stem,
             child_spray,
+            MAX_STEM_TURN,
         );
     };
 
@@ -369,6 +399,7 @@ fn child_dir(forward: Vec3, frame: Vec3, azimuth: f32, crotch: f32) -> Vec3 {
     norm_or_up(f * crotch.cos() + lateral * crotch.sin())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn steer(
     ctx: &GrowCtx,
     sp: &StemParams,
@@ -377,11 +408,14 @@ fn steer(
     bend: Vec3,
     seg_len: f32,
     shaped_by_envelope: bool,
+    // Turning this stem has left to spend, drawn down by whatever it uses.
+    turn_budget: &mut f32,
 ) -> Vec3 {
     let mut d = dir
         + Vec3::Y * sp.phototropism * ctx.params.phototropism_multiplier
         - Vec3::Y * sp.gravity * ctx.params.gravity_multiplier;
     d += bend * sp.curvature;
+    let mut d = norm_or_up(d);
 
     if shaped_by_envelope {
         // The envelope is described around the origin, so growth is measured in that
@@ -391,18 +425,61 @@ fn steer(
         let dens = ctx.env.density(local);
         if dens < 1.0 {
             let target = ctx.env.steer_target(local) + crown_offset;
-            let pull = Vec3::new(target.x - pos.x, 0.0, target.z - pos.z);
-            let error = pull.length();
+            let inward = horizontal(target - pos);
+            let error = inward.length();
             if error > 1e-4 {
-                // Ease off once the stem is within a step of where it is being
-                // steered, otherwise a fixed-strength pull overshoots the axis every
-                // segment and the stem snakes instead of settling.
-                let damp = (error / seg_len.max(1e-3)).min(1.0);
-                d += pull / error * ctx.env.pull_strength * (1.0 - dens) * damp;
+                let inward = inward / error;
+                // Only a stem on its way out of the crown is worth turning back. A
+                // pull that keeps acting once the stem has come round is a fixed
+                // force toward a fixed point on something travelling at fixed speed,
+                // which is an orbit: the stem circles the axis instead of settling.
+                // Fading the correction out as it turns inward leaves it tracking the
+                // crown surface, which is the shaping that was wanted.
+                let heading = horizontal(d).normalize_or_zero();
+                let leaving = (0.5 - 0.5 * inward.dot(heading)).clamp(0.0, 1.0);
+                // Measured per metre grown rather than per segment, so a level with
+                // short segments is not steered several times harder than one with
+                // long segments for the same setting.
+                let turn = ctx.env.pull_strength * (1.0 - dens) * leaving * seg_len;
+                d = turn_toward(d, inward, turn);
             }
         }
     }
-    norm_or_up(d)
+    // Every influence above is a nudge per segment, so the turn a stem banks grows
+    // with the number of segments it is cut into: a long limb bends further than a
+    // short one on the same settings, without limit, until it comes round on itself.
+    // Spending from a budget is what stops that. A stem bends while it has turning
+    // left and runs on straight once it has not, which is also how a real limb reads:
+    // shaped near the trunk, committed to a direction further out.
+    let limit = (MAX_TURN_PER_M * seg_len).min(*turn_budget);
+    let out = turn_toward(dir, d, limit);
+    *turn_budget -= dir.dot(out).clamp(-1.0, 1.0).acos();
+    out
+}
+
+/// Rotates `dir` toward `goal` by `angle` radians, stopping at `goal` rather than
+/// turning past it. Rotating, rather than adding a vector and renormalising, is what
+/// makes `angle` mean the same thing however far apart the two directions are, and
+/// that is what lets the callers bound it.
+fn turn_toward(dir: Vec3, goal: Vec3, angle: f32) -> Vec3 {
+    if angle <= 0.0 {
+        return dir;
+    }
+    let cos = dir.dot(goal).clamp(-1.0, 1.0);
+    let remaining = cos.acos();
+    if remaining < 1e-5 {
+        return dir;
+    }
+    if angle >= remaining {
+        return goal;
+    }
+    // The part of `goal` lying across `dir`: the two span the plane the rotation
+    // happens in, so the turn is a plain rotation within it.
+    let across = goal - dir * cos;
+    let Some(across) = across.try_normalize() else {
+        return dir;
+    };
+    norm_or_up(dir * angle.cos() + across * angle.sin())
 }
 
 /// Normal of the flat plane that contains `d` and lies as level as possible. A limb

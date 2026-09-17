@@ -119,6 +119,12 @@ pub struct EnvelopeParams {
     pub volumes: Vec<EnvelopeVolume>,
     pub falloff: f32,
     pub kill_threshold: f32,
+    /// How hard the crown turns a stem that is on its way out of it, in radians per
+    /// metre grown. Per metre rather than per segment, so a level with short segments
+    /// is not steered several times harder than one with long segments for the same
+    /// setting. Only a stem heading outward is turned at all: a pull that keeps
+    /// acting once the stem has come back round is a fixed force toward a fixed
+    /// point, which curls the stem into a loop rather than settling it.
     pub pull_strength: f32,
 }
 
@@ -131,7 +137,7 @@ impl Default for EnvelopeParams {
             }],
             falloff: 0.25,
             kill_threshold: 0.03,
-            pull_strength: 0.3,
+            pull_strength: 0.6,
         }
     }
 }
@@ -189,7 +195,7 @@ mod tests {
             }],
             falloff: 0.2,
             kill_threshold: 0.05,
-            pull_strength: 0.3,
+            pull_strength: 0.6,
         }
     }
 
