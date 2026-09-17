@@ -184,11 +184,16 @@
         enabled: true,
         min_level: 2,
         max_twig_radius: 0.045,
-        density: 11.3,
+        // One card carries four fascicle sprays rather than one, on a card 1.6 times
+        // the side. The needles keep the size they had; what changes is that a canopy
+        // needs a third of the cards to hold the same foliage. The needle art is sparse
+        // — 16% of its own cell is opaque, against 38% for the oak's leaf cluster — so
+        // a pine card was mostly empty quad, and enlarging it is nearly free.
+        density: 4.1,
         cluster_size: 1,
         cluster_spread_deg: 26.0,
-        card_length: 0.45,
-        card_width: 0.45,
+        card_length: 0.72,
+        card_width: 0.72,
         size_variance: 0.35,
         crotch_angle_deg: 38.0,
         crotch_variance_deg: 16.0,
@@ -200,9 +205,32 @@
         tint: (1.0, 1.02, 0.92),
         hue_variance: 0.07,
         interior_shade: 0.45,
-        // The needle art is already a spray of fascicles, so there is nothing
-        // for the cluster generator to assemble.
-        cluster: None,
+        // The art is a spray of fascicles rather than a single needle, so the
+        // generator is assembling shoots out of shoots here. `leaf_length` is set so a
+        // spray comes out the size it was on the old smaller card: this buys cards, not
+        // bigger needles. The angles are shallow and the curve pronounced, because what
+        // is being built is one branchlet leaning off a twig, not a rosette.
+        cluster: Some((
+            count: 4,
+            leaf_length: 0.45,
+            base_angle_deg: 52.0,
+            tip_angle_deg: 24.0,
+            tip_scale: 0.9,
+            angle_variance_deg: 26.0,
+            roll_deg: 137.5,
+            roll_variance_deg: 45.0,
+            depth: 0.65,
+            blade_twist_deg: 55.0,
+            depth_shade: 0.35,
+            size_variance: 0.28,
+            spacing_variance: 0.7,
+            shoot_curve: 0.40,
+            variants: 4,
+            shoot_base: 0.86,
+            shoot_tip: 0.24,
+            source_aspect: 1.0,
+            cell_size: 512,
+        )),
         atlas_cols: 1,
         atlas_rows: 1,
         atlas_front: 0,
