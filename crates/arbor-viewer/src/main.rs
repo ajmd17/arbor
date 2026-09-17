@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gpu;
+mod knobs;
 mod lighting;
 mod mipmap;
 mod shaders;
@@ -65,36 +66,6 @@ struct Startup {
 
 /// The hour the viewer opens at: the low, warm light of just after sunrise.
 const DEFAULT_HOUR: f32 = 6.32;
-
-/// Ranges for the sliders that write straight into the loaded species.
-///
-/// These are load-bearing, not cosmetic. An egui slider clamps into its range as it
-/// draws, whether or not anyone touched it, so a preset carrying a value outside one of
-/// these does not merely display wrong — the clamped number is written back over the
-/// species, and the next thing that marks the tree dirty regrows it from that. It is
-/// silent both ways: nothing warns, and the tree on screen stays right until the
-/// regrow, so the panel and the tree disagree until a preset switch makes them agree on
-/// the wrong one.
-///
-/// That is not hypothetical. `Trunk length` was 2..=30 against a douglas fir that
-/// declares 52, and switching to the fir in the panel grew a 32 m tree under a crown
-/// envelope based at 25 m — almost the whole crown pruned at birth, 4.5k leaf cards
-/// where the preset makes 33k. `species_values_fit_their_sliders` is what stops it
-/// coming back.
-const TRUNK_LENGTH: (f32, f32) = (2.0, 60.0);
-const ENVELOPE_SCALE: (f32, f32) = (0.4, 2.5);
-const GRAVITY_MULTIPLIER: (f32, f32) = (0.0, 4.0);
-const PHOTOTROPISM_MULTIPLIER: (f32, f32) = (0.0, 4.0);
-const BRANCH_LEVELS: (i32, i32) = (1, 6);
-const LEAF_DENSITY: (f32, f32) = (0.5, 60.0);
-const CARD_LENGTH: (f32, f32) = (0.03, 2.0);
-const CARD_WIDTH: (f32, f32) = (0.02, 2.0);
-const NORMAL_BLEND: (f32, f32) = (0.0, 1.0);
-const LEAF_DROOP: (f32, f32) = (-40.0, 70.0);
-
-fn span((lo, hi): (f32, f32)) -> std::ops::RangeInclusive<f32> {
-    lo..=hi
-}
 
 /// Elevation and azimuth of the sun at a given hour, on a day roughly like a temperate
 /// equinox: up a little after six, down a little before eight, and swinging through
@@ -522,20 +493,63 @@ impl App {
             }
         });
 
+        ui.horizontal(|ui| {
+            if ui
+                .button("Reset")
+                .on_hover_text("Reload the preset, dropping every change made in the panel.")
+                .clicked()
+            {
+                if let Ok(mut p) = parse_species(self.presets[self.preset_index].1) {
+                    p.seed = self.params.seed;
+                    self.params = p;
+                    self.dirty = true;
+                }
+            }
+            if ui
+                .button("Copy as RON")
+                .on_hover_text("Copy the species as it stands, every value included, to paste into a preset file.")
+                .clicked()
+            {
+                match ron::ser::to_string_pretty(&self.params, ron::ser::PrettyConfig::default()) {
+                    Ok(text) => ctx.copy_text(text),
+                    Err(e) => eprintln!("could not write species as RON: {e}"),
+                }
+            }
+        });
+
         ui.separator();
         ui.label("Shape");
-        shape_slider(ui, &mut self.params.trunk.length, span(TRUNK_LENGTH), "Trunk length", &mut self.dirty);
-        shape_slider(ui, &mut self.params.envelope_scale, span(ENVELOPE_SCALE), "Envelope scale", &mut self.dirty);
-        shape_slider(ui, &mut self.params.gravity_multiplier, span(GRAVITY_MULTIPLIER), "Gravity", &mut self.dirty);
-        shape_slider(ui, &mut self.params.phototropism_multiplier, span(PHOTOTROPISM_MULTIPLIER), "Phototropism", &mut self.dirty);
+        self.dirty |= knobs::knobs_ui(ui, &mut self.params, knobs::SHAPE);
 
-        let mut levels = i32::from(self.params.max_levels);
+        let mut levels = u32::from(self.params.max_levels);
         if ui
-            .add(egui::Slider::new(&mut levels, BRANCH_LEVELS.0..=BRANCH_LEVELS.1).text("Branch levels"))
+            .add(
+                egui::Slider::new(&mut levels, knobs::BRANCH_LEVELS.0..=knobs::BRANCH_LEVELS.1)
+                    .clamping(egui::SliderClamping::Edits)
+                    .text("Branch levels"),
+            )
+            .on_hover_text("Levels grown, counting the trunk. Capped by how many levels the species declares.")
             .changed()
         {
             self.params.max_levels = levels as u8;
             self.dirty = true;
+        }
+        self.dirty |= knobs::count_ui(ui, &mut self.params, &knobs::SPLIT_DEPTH);
+        self.dirty |= knobs::group_ui(ui, "envelope", &mut self.params.envelope, &knobs::ENVELOPE);
+
+        ui.separator();
+        ui.label("Branching");
+        let grown = usize::from(self.params.max_levels).min(knobs::level_count(&self.params));
+        for level in 0..knobs::level_count(&self.params) {
+            let name = if level == 0 { "Trunk".to_string() } else { format!("Level {level}") };
+            // A level past `Branch levels` is still editable, so it can be set up
+            // before it is switched on, but it says that it is not being grown.
+            let title = if level < grown { name } else { format!("{name} (not grown)") };
+            egui::CollapsingHeader::new(title)
+                .id_salt(("level", level))
+                .show(ui, |ui| {
+                    self.dirty |= knobs::level_ui(ui, &mut self.params, level);
+                });
         }
 
         ui.separator();
@@ -600,11 +614,32 @@ impl App {
             leaves.enabled = leafy;
             self.dirty = true;
         }
-        shape_slider(ui, &mut self.params.leaves.density, span(LEAF_DENSITY), "Leaves per metre", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.card_length, span(CARD_LENGTH), "Leaf length", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.card_width, span(CARD_WIDTH), "Leaf width", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.normal_blend, span(NORMAL_BLEND), "Normal blend", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.droop_deg, span(LEAF_DROOP), "Leaf droop", &mut self.dirty);
+        self.dirty |= knobs::knobs_ui(ui, &mut self.params.leaves, knobs::FOLIAGE);
+        let mut min_level = u32::from(self.params.leaves.min_level);
+        if ui
+            .add(
+                egui::Slider::new(&mut min_level, knobs::LEAF_MIN_LEVEL.0..=knobs::LEAF_MIN_LEVEL.1)
+                    .clamping(egui::SliderClamping::Edits)
+                    .text("Leaf from level"),
+            )
+            .on_hover_text("Leaves grow on stems at this level and deeper, so the canopy sits on twigs rather than limbs.")
+            .changed()
+        {
+            self.params.leaves.min_level = min_level as u8;
+            self.dirty = true;
+        }
+        for group in knobs::FOLIAGE_MORE {
+            self.dirty |= knobs::group_ui(ui, "foliage", &mut self.params.leaves, group);
+        }
+
+        ui.separator();
+        ui.label("Bark & roots");
+        for group in knobs::BARK {
+            self.dirty |= knobs::group_ui(ui, "bark", &mut self.params.mesh, group);
+        }
+        for group in knobs::IRREGULARITY {
+            self.dirty |= knobs::group_ui(ui, "bark", &mut self.params.mesh.irregularity, group);
+        }
 
         ui.separator();
         ui.label("Stats");
@@ -625,7 +660,6 @@ impl App {
 
         ui.separator();
         ui.label("Camera: LMB orbit, RMB/MMB pan, wheel zoom");
-        let _ = ctx;
     }
 
     fn camera_input(&mut self, resp: &egui::Response, ctx: &egui::Context) {
@@ -649,18 +683,6 @@ impl App {
                     (self.camera.distance * (1.0 - scroll * 0.0012)).clamp(0.8, 300.0);
             }
         }
-    }
-}
-
-fn shape_slider(
-    ui: &mut egui::Ui,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    text: &str,
-    dirty: &mut bool,
-) {
-    if ui.add(egui::Slider::new(value, range).text(text)).changed() {
-        *dirty = true;
     }
 }
 
@@ -736,8 +758,10 @@ impl eframe::App for App {
         }
 
         egui::SidePanel::left("controls")
-            .default_width(300.0)
-            .show(ctx, |ui| self.controls(ui, ctx));
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, ctx));
+            });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -949,40 +973,84 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbor_core::species::parse_species;
+    use arbor_core::species::{parse_species, ChildPattern};
 
     /// Every preset has to fit the panel that edits it.
     ///
-    /// See the note on `TRUNK_LENGTH`: a value outside its slider's range is written
-    /// back clamped, so this is not about a number displaying oddly — it is about the
-    /// panel quietly rewriting a species and the next regrow building a different tree.
+    /// Walks the same tables the panel is drawn from, so every control is covered,
+    /// and checks every level each preset declares. See the note at the top of
+    /// `knobs`: the sliders no longer write a clamped value back over the species, but a
+    /// range that does not reach a preset's value leaves a slider that cannot return to
+    /// it once touched.
     #[test]
     fn species_values_fit_their_sliders() {
-        for (name, src) in builtin_presets() {
-            let p = parse_species(src).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let fits = |v: f32, (lo, hi): (f32, f32), what: &str| {
-                assert!(
-                    v >= lo && v <= hi,
-                    "{name}: {what} is {v}, outside the {lo}..={hi} its slider offers.                      egui clamps into the range as it draws, so the panel would write                      {} back over the species and the next regrow would use it.",
-                    v.clamp(lo, hi)
-                );
-            };
-            fits(p.trunk.length, TRUNK_LENGTH, "trunk.length");
-            fits(p.envelope_scale, ENVELOPE_SCALE, "envelope_scale");
-            fits(p.gravity_multiplier, GRAVITY_MULTIPLIER, "gravity_multiplier");
-            fits(p.phototropism_multiplier, PHOTOTROPISM_MULTIPLIER, "phototropism_multiplier");
-            fits(p.leaves.density, LEAF_DENSITY, "leaves.density");
-            fits(p.leaves.card_length, CARD_LENGTH, "leaves.card_length");
-            fits(p.leaves.card_width, CARD_WIDTH, "leaves.card_width");
-            fits(p.leaves.normal_blend, NORMAL_BLEND, "leaves.normal_blend");
-            fits(p.leaves.droop_deg, LEAF_DROOP, "leaves.droop_deg");
-            let levels = i32::from(p.max_levels);
-            assert!(
-                levels >= BRANCH_LEVELS.0 && levels <= BRANCH_LEVELS.1,
-                "{name}: max_levels is {levels}, outside the {}..={} its slider offers",
-                BRANCH_LEVELS.0,
-                BRANCH_LEVELS.1
-            );
+        use knobs::{Count, Group, Knob};
+
+        fn check_knobs<T>(bad: &mut Vec<String>, at: &str, target: &mut T, knobs: &[Knob<T>]) {
+            for k in knobs {
+                let v = *(k.get)(target);
+                if !(v >= k.range.0 && v <= k.range.1) {
+                    bad.push(format!("{at} {}: {v} outside {}..={}", k.label, k.range.0, k.range.1));
+                }
+            }
         }
+        fn check_counts<T>(bad: &mut Vec<String>, at: &str, target: &mut T, counts: &[Count<T>]) {
+            for c in counts {
+                let v = *(c.get)(target);
+                if !(v >= c.range.0 && v <= c.range.1) {
+                    bad.push(format!("{at} {}: {v} outside {}..={}", c.label, c.range.0, c.range.1));
+                }
+            }
+        }
+        fn check_groups<T>(bad: &mut Vec<String>, at: &str, target: &mut T, groups: &[Group<T>]) {
+            for g in groups {
+                let at = format!("{at} / {}", g.title);
+                check_knobs(bad, &at, target, g.knobs);
+                check_counts(bad, &at, target, g.counts);
+            }
+        }
+        fn within(bad: &mut Vec<String>, at: &str, v: u32, (lo, hi): (u32, u32)) {
+            if !(v >= lo && v <= hi) {
+                bad.push(format!("{at}: {v} outside {lo}..={hi}"));
+            }
+        }
+
+        let mut bad = Vec::new();
+        for (name, src) in builtin_presets() {
+            let mut p = parse_species(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            check_knobs(&mut bad, name, &mut p, knobs::SHAPE);
+            check_counts(&mut bad, name, &mut p, std::slice::from_ref(&knobs::SPLIT_DEPTH));
+            within(&mut bad, &format!("{name} max_levels"), u32::from(p.max_levels), knobs::BRANCH_LEVELS);
+            check_groups(&mut bad, name, &mut p.envelope, std::slice::from_ref(&knobs::ENVELOPE));
+            for level in 0..knobs::level_count(&p) {
+                let at = format!("{name} level {level}");
+                if let Some(spawn) = knobs::spawn_mut(&mut p, level) {
+                    match &mut spawn.pattern {
+                        ChildPattern::None => {}
+                        ChildPattern::Whorl { every, count } => {
+                            within(&mut bad, &format!("{at} whorl every"), *every, knobs::WHORL_EVERY);
+                            within(&mut bad, &format!("{at} per whorl"), *count, knobs::WHORL_COUNT);
+                        }
+                        ChildPattern::Continuous { density } => {
+                            let (lo, hi) = knobs::DENSITY;
+                            if !(*density >= lo && *density <= hi) {
+                                bad.push(format!("{at} density: {density} outside {lo}..={hi}"));
+                            }
+                        }
+                    }
+                    check_groups(&mut bad, &format!("{at} spawn"), spawn, knobs::CHILDREN);
+                }
+                let stem = knobs::stem_mut(&mut p, level).expect("every offered level has params");
+                check_groups(&mut bad, &at, stem, knobs::STEM);
+            }
+            check_knobs(&mut bad, &format!("{name} foliage"), &mut p.leaves, knobs::FOLIAGE);
+            check_groups(&mut bad, &format!("{name} foliage"), &mut p.leaves, knobs::FOLIAGE_MORE);
+            within(&mut bad, &format!("{name} leaf min_level"), u32::from(p.leaves.min_level), knobs::LEAF_MIN_LEVEL);
+            check_groups(&mut bad, &format!("{name} bark"), &mut p.mesh, knobs::BARK);
+            check_groups(&mut bad, &format!("{name} bark"), &mut p.mesh.irregularity, knobs::IRREGULARITY);
+        }
+        assert!(bad.is_empty(), "preset values the panel cannot reach:
+  {}", bad.join("
+  "));
     }
 }
