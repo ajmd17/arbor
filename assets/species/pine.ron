@@ -193,7 +193,7 @@
         uv_scale: 1.2,
         silhouette_tolerance: 0.010,
         min_radial: 3,
-        min_bark_radius: 0.0045,
+        min_bark_radius: 0.006,
         max_radial: 32,
         root_flare: 0.9,
         flare_height: 1.4,
@@ -212,7 +212,7 @@
             collar_depth: 0.55,
             min_radius: 0.045,
             rings_per_meter: 14.0,
-            ring_tolerance: 0.02,
+            ring_tolerance: 0.010,
         ),
     ),
     envelope: (

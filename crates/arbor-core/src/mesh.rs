@@ -347,7 +347,11 @@ fn ring_error(path: &StemPath, mp: &MeshParams, phase: (f32, f32), prev: usize, 
 /// surface less than the tolerance, never two in a row, so the result still follows
 /// every feature the bark has while spending nothing on the stretches between them.
 fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize> {
-    let tol = mp.irregularity.ring_tolerance;
+    // One error budget for the whole surface. Measuring along the stem in metres and
+    // around it in metres means a ring and a side are bought at the same price; while
+    // this was a fraction of the radius, a twig was held to a fifth of a millimetre
+    // along its length and a centimetre around it.
+    let tol = mp.irregularity.ring_tolerance.min(mp.silhouette_tolerance);
     if tol <= 0.0 || path.len() < 3 {
         return (0..path.len()).collect();
     }
@@ -356,7 +360,7 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
     let mut i = 1;
     while i < path.len() - 1 {
         let prev = *keep.last().unwrap();
-        let limit = (path.radii[i] * tol).max(3e-4);
+        let limit = tol;
         if ring_error(path, mp, phase, prev, i, i + 1) < limit {
             // Dropped. The next ring is measured against the same neighbour, so a long
             // smooth run collapses rather than losing every other ring.
@@ -672,6 +676,13 @@ pub struct StemCost {
     pub triangles: usize,
     pub vertices: usize,
     pub spike: bool,
+    /// What the stem would cost if every ring were swept at the side count its own
+    /// radius needs, instead of every ring taking the thickest ring's count.
+    ///
+    /// A strip between a ring of n vertices and one of m costs n + m triangles
+    /// whatever n and m are, so a tapering stem can shed sides as it thins without
+    /// any of them going to waste on the seam.
+    pub adaptive_triangles: usize,
 }
 
 /// What every stem costs, measured by emitting it rather than by modelling what the
@@ -693,7 +704,38 @@ pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
             mesh: Mesh::default(),
         };
         emit_stem(&mut sink, &path, mp, phase);
+        let sides = |r: f32| -> usize {
+            let tol = mp.silhouette_tolerance.max(1e-5);
+            let n = if r <= tol {
+                3.0
+            } else {
+                PI / (1.0 - tol / r).clamp(-1.0, 1.0).acos()
+            };
+            (n.ceil() as i32).clamp(mp.min_radial.max(3) as i32, mp.max_radial.max(3) as i32)
+                as usize
+        };
+        let per_ring: Vec<usize> = path
+            .radii
+            .iter()
+            .zip(path.socket.iter())
+            .map(|(r, k)| sides(r * k))
+            .collect();
+        let swept = if path.is_trunk {
+            path.len()
+        } else {
+            path.len() - 1
+        };
+        let mut adaptive: usize = per_ring[..swept]
+            .windows(2)
+            .map(|w| w[0] + w[1])
+            .sum();
+        adaptive += per_ring[swept - 1];
+        if path.is_trunk {
+            adaptive += per_ring[0];
+        }
+
         out.push(StemCost {
+            adaptive_triangles: adaptive,
             level: sk.nodes[stem[0] as usize].level,
             nodes: stem.len(),
             rings: path.len(),

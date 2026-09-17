@@ -88,10 +88,12 @@ pub struct BarkIrregularity {
     /// not earning their place are dropped again. The skeleton is segmented for
     /// growth, far too coarsely to show a burl.
     pub rings_per_meter: f32,
-    /// How far the surface may move when a ring is dropped, as a fraction of the
-    /// stem's radius there. Rings are laid down densely and then thinned against this,
-    /// so a smooth stretch of bole costs what a smooth stretch should and the rings
-    /// end up where the shape actually needs them.
+    /// How far the surface may move when a ring is dropped, in metres.
+    ///
+    /// Rings are laid down densely and then thinned against this, so a smooth stretch
+    /// of bole costs what a smooth stretch should and the rings end up where the shape
+    /// actually needs them. Capped at `silhouette_tolerance`, so the surface is held to
+    /// one budget along the stem and around it rather than two that disagree.
     pub ring_tolerance: f32,
 }
 
@@ -109,7 +111,7 @@ impl Default for BarkIrregularity {
             collar_depth: 0.55,
             min_radius: 0.045,
             rings_per_meter: 14.0,
-            ring_tolerance: 0.02,
+            ring_tolerance: 0.010,
         }
     }
 }
@@ -149,7 +151,7 @@ impl Default for MeshParams {
             uv_scale: 1.2,
             silhouette_tolerance: 0.010,
             min_radial: 3,
-            min_bark_radius: 0.0045,
+            min_bark_radius: 0.006,
             max_radial: 24,
             root_flare: 0.9,
             flare_height: 1.4,

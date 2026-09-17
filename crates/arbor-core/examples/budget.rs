@@ -81,6 +81,13 @@ fn main() {
     );
     println!("  rings swept:         {rings_total:>7}");
 
+    let adaptive: usize = costs.iter().map(|c| c.adaptive_triangles).sum();
+    println!(
+        "
+if every ring took its own side count: {adaptive} tris ({:+.1}%)",
+        (adaptive as f32 / total as f32 - 1.0) * 100.0
+    );
+
     // How many sides stems are actually swept at.
     let mut by_radial: HashMap<u32, (usize, usize)> = HashMap::new();
     for c in &costs {
