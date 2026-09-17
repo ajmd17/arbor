@@ -10,6 +10,15 @@
 //! shaders do — alpha-tested leaf cards sampled from their atlas, wrapped diffuse and
 //! backlit transmission — not a second renderer to keep in sync feature by feature.
 //!
+//! It is not a judge of how full a canopy looks, and the difference is not subtle. This
+//! cuts every card at a hard [ALPHA_CUTOFF]; the viewer hands filtered alpha straight to
+//! alpha-to-coverage while a card is bigger than a pixel, so cards that overlap blend
+//! there and stack here. Foliage therefore reads crisper and denser in this picture than
+//! in the build, and the two disagree about the direction of a change: shrinking cards
+//! while raising density to hold coverage looks like finer grain here and like an even
+//! featureless felt in the viewer. Use `arbor-viewer --screenshot` for anything about
+//! card size, leaf density or canopy mass, and this for geometry, silhouette and mips.
+//!
 //! It samples a real mip chain, chosen per triangle, because the way a leaf texture
 //! is minified is exactly what decides whether a canopy survives being zoomed away
 //! from. `--plain-mips` swaps the coverage-preserving chain for a plain box-filtered
@@ -20,7 +29,8 @@ mod lighting;
 #[path = "../src/mipmap.rs"]
 mod mipmap;
 
-use arbor_core::species::{builtin_presets, parse_species};
+use arbor_core::cluster::{bake_cluster, Bitmap, LeafMaps};
+use arbor_core::species::{builtin_presets, parse_species, LeafParams};
 use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
 use glam::{Mat4, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::{Rgb, RgbImage};
@@ -86,7 +96,12 @@ impl ShadowMap {
                             let uv = Vec2::from(uvs[tri[0] as usize]) * w[0]
                                 + Vec2::from(uvs[tri[1] as usize]) * w[1]
                                 + Vec2::from(uvs[tri[2] as usize]) * w[2];
-                            if t.sample(origin + uv * scale, 0.0).w < ALPHA_CUTOFF { continue; }
+                            // A card casts the shadow of the arrangement it draws, not
+                            // of whichever one happens to sit first in the sheet.
+                            let at = origin
+                                + Vec2::new(0.0, leaves.atlas_v[tri[0] as usize])
+                                + uv * scale;
+                            if t.sample(at, 0.0).w < ALPHA_CUTOFF { continue; }
                         }
                         let z = w[0] * ndc[0].z + w[1] * ndc[1].z + w[2] * ndc[2].z;
                         let i = y * size + x;
@@ -100,12 +115,8 @@ impl ShadowMap {
             && let Some(t) = tex
         {
             {
-                let lp = &params.leaves;
-                let (cols, rows) = (lp.atlas_cols.max(1) as f32, lp.atlas_rows.max(1) as f32);
-                let scale = Vec2::new(1.0 / cols, 1.0 / rows);
-                let i = (lp.atlas_front as f32).min(cols * rows - 1.0);
-                let origin = Vec2::new((i % cols) / cols, (i / cols).floor() / rows);
-                raster_into(&leaves.positions, &leaves.indices, Some((t, origin, scale)),
+                let (scale, front, _) = Tex::atlas_frame(&params.leaves);
+                raster_into(&leaves.positions, &leaves.indices, Some((t, front, scale)),
                             Some(&leaves.uvs));
             }
         }
@@ -181,8 +192,9 @@ fn main() {
         &format!("{TEXTURE_DIR}/{}_albedo.png", params.mesh.bark_texture),
         false,
     );
-    let leaf_tex = Tex::load(
+    let leaf_tex = Tex::load_leaf(
         &format!("{TEXTURE_DIR}/{}_albedo.png", params.leaves.texture),
+        &params.leaves,
         preserve_coverage,
     );
 
@@ -290,8 +302,44 @@ struct Tex {
 impl Tex {
     fn load(path: &str, preserve_coverage: bool) -> Option<Tex> {
         let img = image::open(path).ok()?.to_rgba8();
+        Tex::build(path, img.width(), img.height(), img.into_raw(), preserve_coverage)
+    }
+
+    /// The leaf sheet, grown into clusters first if the species asks for them.
+    ///
+    /// A species with a `cluster` block does not ship the sheet the renderer samples;
+    /// it ships one leaf and a recipe, and the atlas is baked on load. Skipping that
+    /// step here drew the source art on every card, so a whole cluster block — its
+    /// leaf count, its arrangement, its variants — made no difference to anything this
+    /// example put on screen, and a species could be tuned against a picture that the
+    /// viewer would never draw.
+    fn load_leaf(path: &str, lp: &LeafParams, preserve_coverage: bool) -> Option<Tex> {
+        let img = image::open(path).ok()?.to_rgba8();
         let (w, h) = (img.width(), img.height());
-        let px = img.into_raw();
+        let src = Bitmap::from_rgba(w, h, img.into_raw())?;
+        let Some(cluster) = &lp.cluster else {
+            return Tex::build(path, w, h, src.pixels, preserve_coverage);
+        };
+        let baked = bake_cluster(
+            cluster,
+            lp.atlas_cols,
+            lp.atlas_rows,
+            LeafMaps { albedo: &src, normal: None, roughness: None },
+        );
+        println!(
+            "  clustered {path} into {}x{} from {} leaves",
+            baked.albedo.width, baked.albedo.height, cluster.count
+        );
+        Tex::build(
+            path,
+            baked.albedo.width,
+            baked.albedo.height,
+            baked.albedo.pixels,
+            preserve_coverage,
+        )
+    }
+
+    fn build(path: &str, w: u32, h: u32, px: Vec<u8>, preserve_coverage: bool) -> Option<Tex> {
         let levels = if preserve_coverage {
             mipmap::coverage_preserving_chain(&px, w, h, ALPHA_CUTOFF)
         } else {
@@ -304,6 +352,29 @@ impl Tex {
         };
         println!("  texture {path} {w}x{h}, {} mips", levels.len());
         Some(Tex { levels })
+    }
+
+    /// Where a card's own arrangement sits in the sheet, and how much of the sheet one
+    /// card covers. Clustering stacks its variants down the atlas, so the sheet is
+    /// `variants` times taller than the grid the species describes and a card reaches
+    /// its own arrangement by the v offset `build_leaves` gave it.
+    fn atlas_frame(lp: &LeafParams) -> (Vec2, Vec2, Vec2) {
+        let cols = lp.atlas_cols.max(1);
+        let rows = lp.atlas_rows.max(1);
+        let variants = lp.cluster.as_ref().map_or(1, |c| c.variants.max(1));
+        let tall = rows * variants;
+        let cell = |index: u32| {
+            let i = index.min(cols * rows - 1);
+            Vec2::new(
+                i.rem_euclid(cols) as f32 / cols as f32,
+                (i / cols) as f32 / tall as f32,
+            )
+        };
+        (
+            Vec2::new(1.0 / cols as f32, 1.0 / tall as f32),
+            cell(lp.atlas_front),
+            cell(lp.atlas_back),
+        )
     }
 
     fn texel(&self, level: usize, x: i64, y: i64) -> Vec4 {
@@ -510,15 +581,7 @@ fn draw_leaves(
 ) {
     let dims = tex_dims(tex);
     let lp = &params.leaves;
-    let cols = lp.atlas_cols.max(1) as f32;
-    let rows = lp.atlas_rows.max(1) as f32;
-    let scale = Vec2::new(1.0 / cols, 1.0 / rows);
-    let cell = |index: u32| {
-        let i = (index as f32).min(cols * rows - 1.0);
-        Vec2::new((i % cols) / cols, (i / cols).floor() / rows)
-    };
-    let front = cell(lp.atlas_front);
-    let back = cell(lp.atlas_back);
+    let (scale, front, back) = Tex::atlas_frame(lp);
 
     for tri in leaves.indices.chunks_exact(3) {
         let v: Vec<Vert> = tri
@@ -531,7 +594,8 @@ fn draw_leaves(
                     Vec3::from(leaves.normals[i]),
                     // The card samples one atlas cell, so a card-local step covers
                     // only that fraction of the texture when picking a mip level.
-                    Vec2::from(leaves.uvs[i]) * scale,
+                    Vec2::from(leaves.uvs[i]) * scale
+                        + Vec2::new(0.0, leaves.atlas_v[i]),
                     Vec4::from(leaves.tints[i]),
                     dims,
                 )

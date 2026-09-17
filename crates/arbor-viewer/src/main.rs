@@ -66,6 +66,36 @@ struct Startup {
 /// The hour the viewer opens at: the low, warm light of just after sunrise.
 const DEFAULT_HOUR: f32 = 6.32;
 
+/// Ranges for the sliders that write straight into the loaded species.
+///
+/// These are load-bearing, not cosmetic. An egui slider clamps into its range as it
+/// draws, whether or not anyone touched it, so a preset carrying a value outside one of
+/// these does not merely display wrong — the clamped number is written back over the
+/// species, and the next thing that marks the tree dirty regrows it from that. It is
+/// silent both ways: nothing warns, and the tree on screen stays right until the
+/// regrow, so the panel and the tree disagree until a preset switch makes them agree on
+/// the wrong one.
+///
+/// That is not hypothetical. `Trunk length` was 2..=30 against a douglas fir that
+/// declares 52, and switching to the fir in the panel grew a 32 m tree under a crown
+/// envelope based at 25 m — almost the whole crown pruned at birth, 4.5k leaf cards
+/// where the preset makes 33k. `species_values_fit_their_sliders` is what stops it
+/// coming back.
+const TRUNK_LENGTH: (f32, f32) = (2.0, 60.0);
+const ENVELOPE_SCALE: (f32, f32) = (0.4, 2.5);
+const GRAVITY_MULTIPLIER: (f32, f32) = (0.0, 4.0);
+const PHOTOTROPISM_MULTIPLIER: (f32, f32) = (0.0, 4.0);
+const BRANCH_LEVELS: (i32, i32) = (1, 6);
+const LEAF_DENSITY: (f32, f32) = (0.5, 60.0);
+const CARD_LENGTH: (f32, f32) = (0.03, 1.2);
+const CARD_WIDTH: (f32, f32) = (0.02, 1.2);
+const NORMAL_BLEND: (f32, f32) = (0.0, 1.0);
+const LEAF_DROOP: (f32, f32) = (-40.0, 70.0);
+
+fn span((lo, hi): (f32, f32)) -> std::ops::RangeInclusive<f32> {
+    lo..=hi
+}
+
 /// Elevation and azimuth of the sun at a given hour, on a day roughly like a temperate
 /// equinox: up a little after six, down a little before eight, and swinging through
 /// south at noon. Enough of an arc to light a tree by; not an ephemeris.
@@ -494,14 +524,14 @@ impl App {
 
         ui.separator();
         ui.label("Shape");
-        shape_slider(ui, &mut self.params.trunk.length, 2.0..=30.0, "Trunk length", &mut self.dirty);
-        shape_slider(ui, &mut self.params.envelope_scale, 0.4..=2.5, "Envelope scale", &mut self.dirty);
-        shape_slider(ui, &mut self.params.gravity_multiplier, 0.0..=4.0, "Gravity", &mut self.dirty);
-        shape_slider(ui, &mut self.params.phototropism_multiplier, 0.0..=4.0, "Phototropism", &mut self.dirty);
+        shape_slider(ui, &mut self.params.trunk.length, span(TRUNK_LENGTH), "Trunk length", &mut self.dirty);
+        shape_slider(ui, &mut self.params.envelope_scale, span(ENVELOPE_SCALE), "Envelope scale", &mut self.dirty);
+        shape_slider(ui, &mut self.params.gravity_multiplier, span(GRAVITY_MULTIPLIER), "Gravity", &mut self.dirty);
+        shape_slider(ui, &mut self.params.phototropism_multiplier, span(PHOTOTROPISM_MULTIPLIER), "Phototropism", &mut self.dirty);
 
         let mut levels = i32::from(self.params.max_levels);
         if ui
-            .add(egui::Slider::new(&mut levels, 1..=4).text("Branch levels"))
+            .add(egui::Slider::new(&mut levels, BRANCH_LEVELS.0..=BRANCH_LEVELS.1).text("Branch levels"))
             .changed()
         {
             self.params.max_levels = levels as u8;
@@ -570,11 +600,11 @@ impl App {
             leaves.enabled = leafy;
             self.dirty = true;
         }
-        shape_slider(ui, &mut self.params.leaves.density, 0.5..=60.0, "Leaves per metre", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.card_length, 0.03..=1.0, "Leaf length", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.card_width, 0.02..=1.0, "Leaf width", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.normal_blend, 0.0..=1.0, "Normal blend", &mut self.dirty);
-        shape_slider(ui, &mut self.params.leaves.droop_deg, -40.0..=70.0, "Leaf droop", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.density, span(LEAF_DENSITY), "Leaves per metre", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.card_length, span(CARD_LENGTH), "Leaf length", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.card_width, span(CARD_WIDTH), "Leaf width", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.normal_blend, span(NORMAL_BLEND), "Normal blend", &mut self.dirty);
+        shape_slider(ui, &mut self.params.leaves.droop_deg, span(LEAF_DROOP), "Leaf droop", &mut self.dirty);
 
         ui.separator();
         ui.label("Stats");
@@ -913,5 +943,46 @@ impl eframe::App for App {
             });
 
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbor_core::species::parse_species;
+
+    /// Every preset has to fit the panel that edits it.
+    ///
+    /// See the note on `TRUNK_LENGTH`: a value outside its slider's range is written
+    /// back clamped, so this is not about a number displaying oddly — it is about the
+    /// panel quietly rewriting a species and the next regrow building a different tree.
+    #[test]
+    fn species_values_fit_their_sliders() {
+        for (name, src) in builtin_presets() {
+            let p = parse_species(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let fits = |v: f32, (lo, hi): (f32, f32), what: &str| {
+                assert!(
+                    v >= lo && v <= hi,
+                    "{name}: {what} is {v}, outside the {lo}..={hi} its slider offers.                      egui clamps into the range as it draws, so the panel would write                      {} back over the species and the next regrow would use it.",
+                    v.clamp(lo, hi)
+                );
+            };
+            fits(p.trunk.length, TRUNK_LENGTH, "trunk.length");
+            fits(p.envelope_scale, ENVELOPE_SCALE, "envelope_scale");
+            fits(p.gravity_multiplier, GRAVITY_MULTIPLIER, "gravity_multiplier");
+            fits(p.phototropism_multiplier, PHOTOTROPISM_MULTIPLIER, "phototropism_multiplier");
+            fits(p.leaves.density, LEAF_DENSITY, "leaves.density");
+            fits(p.leaves.card_length, CARD_LENGTH, "leaves.card_length");
+            fits(p.leaves.card_width, CARD_WIDTH, "leaves.card_width");
+            fits(p.leaves.normal_blend, NORMAL_BLEND, "leaves.normal_blend");
+            fits(p.leaves.droop_deg, LEAF_DROOP, "leaves.droop_deg");
+            let levels = i32::from(p.max_levels);
+            assert!(
+                levels >= BRANCH_LEVELS.0 && levels <= BRANCH_LEVELS.1,
+                "{name}: max_levels is {levels}, outside the {}..={} its slider offers",
+                BRANCH_LEVELS.0,
+                BRANCH_LEVELS.1
+            );
+        }
     }
 }

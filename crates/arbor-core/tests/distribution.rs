@@ -129,13 +129,13 @@ fn douglas_fir_has_a_clear_bole_and_an_open_crown() {
     );
 
     // Sparser, too — and the honest way to say that is against the spruce, which is
-    // the same needles on the opposite habit. An absolute cards-per-cubic-metre figure
-    // would just be whatever this preset happened to measure on the day.
-    let open = crown_cards_per_m3(&sk, &params);
-    let solid = crown_cards_per_m3(&spruce_sk, &spruce);
+    // the same needles on the opposite habit. An absolute figure would just be whatever
+    // this preset happened to measure on the day.
+    let open = crown_card_area_per_m3(&sk, &params);
+    let solid = crown_card_area_per_m3(&spruce_sk, &spruce);
     assert!(
         open < solid * 0.8,
-        "douglas fir packs {open:.2} cards per cubic metre against the spruce's          {solid:.2}; it is meant to be the open one"
+        "douglas fir carries {open:.2} square metres of card per cubic metre against          the spruce's {solid:.2}; it is meant to be the open one"
     );
 }
 
@@ -150,9 +150,24 @@ fn lowest_leaf_fraction(sk: &arbor_core::Skeleton, params: &arbor_core::SpeciesP
     base / sk.stats().height
 }
 
-/// Cards per cubic metre of the crown's own bounding cylinder, the crown being whatever
-/// part of the tree carries foliage.
-fn crown_cards_per_m3(sk: &arbor_core::Skeleton, params: &arbor_core::SpeciesParams) -> f32 {
+/// Square metres of leaf card per cubic metre of the crown's own bounding cylinder, the
+/// crown being whatever part of the tree carries foliage.
+///
+/// Area, not a count. A card is a unit of geometry and not a unit of foliage, so
+/// counting them prices the wrong thing: two crowns carrying exactly the same foliage
+/// score differently the moment their `card_length` differs, and the species that draws
+/// its canopy on smaller cards is punished for it. That is not a theoretical worry — it
+/// is what the count did to the fir. Holding coverage while halving a card costs four
+/// times the cards, so under a count the openness a fir is meant to have and the fine
+/// spray grain it is meant to have were bidding against each other, and the preset
+/// could not have both. Measuring the area they cover leaves that choice free: draw the
+/// same canopy on many small cards or a few large ones and this number does not move.
+///
+/// What it deliberately does not fold in is how much of a card the alpha actually keeps.
+/// That would need the baked atlas, and so the source art, in a test that otherwise
+/// touches no files — and both conifers grow from `needle_conifer`, so for the one
+/// comparison this makes it would very nearly cancel anyway.
+fn crown_card_area_per_m3(sk: &arbor_core::Skeleton, params: &arbor_core::SpeciesParams) -> f32 {
     let leaves = arbor_core::build_leaves(sk, params);
     if leaves.positions.is_empty() {
         return 0.0;
@@ -164,7 +179,8 @@ fn crown_cards_per_m3(sk: &arbor_core::Skeleton, params: &arbor_core::SpeciesPar
         r2 = r2.max(p[0] * p[0] + p[2] * p[2]);
     }
     let volume = std::f32::consts::PI * r2 * (top - base).max(0.1);
-    (leaves.positions.len() / 4) as f32 / volume
+    let card = params.leaves.card_length * params.leaves.card_width;
+    (leaves.positions.len() / 4) as f32 * card / volume
 }
 
 #[test]
@@ -173,6 +189,29 @@ fn node_budget_is_respected() {
         let params = parse_species(src).unwrap();
         let sk = grow(&params);
         assert!(sk.nodes.len() < 150_000, "node explosion: {}", sk.nodes.len());
+    }
+}
+
+/// Leaves are the cheap half of a tree to author and the expensive half to draw, and
+/// nothing was watching them.
+///
+/// `douglas_fir_has_a_clear_bole_and_an_open_crown` used to count cards per cubic metre,
+/// which meant that while it was busy asking the wrong question about openness it was
+/// quietly answering the right one about cost — a preset could not run away with the
+/// card count without tripping it. Measuring area instead frees the count on purpose,
+/// so the budget it was standing in for has to be said out loud, and said for every
+/// species rather than for the one that happened to be compared against another.
+#[test]
+fn leaf_budget_is_respected() {
+    for (name, src) in arbor_core::species::builtin_presets() {
+        let params = parse_species(src).unwrap();
+        let sk = grow(&params);
+        let leaves = arbor_core::build_leaves(&sk, &params);
+        assert!(
+            leaves.triangle_count() < 150_000,
+            "{name} draws {} leaf triangles",
+            leaves.triangle_count()
+        );
     }
 }
 

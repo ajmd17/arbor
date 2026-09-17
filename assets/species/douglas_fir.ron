@@ -118,9 +118,15 @@
             dead_stub_length: 1.5,
             split_start_fraction: 0.35,
             children: (
-                // A third of the spruce's. This one number is most of what makes the
-                // crown see-through: at the spruce's density the same skeleton fills
-                // in solid and every gap between the tiers closes.
+                // Fractionally over the spruce's 3.0, and worth stating plainly because
+                // the comment here used to claim a third of it: the see-through crown
+                // does not come from this number and never did. It comes from the
+                // whorls standing three metres apart on a trunk whose segments are two
+                // and a half times the spruce's, which leaves this tree 76 living limbs
+                // against the spruce's 154 and 0.61 m of leafy twig per cubic metre of
+                // crown against its 1.27. The branchlet rate has to run a shade ahead
+                // of the spruce's just to keep the sprays from being strung out thinly
+                // along limbs that are already half as many.
                 pattern: Continuous(density: 3.2),
                 start_fraction: 0.12,
                 end_fraction: 0.92,
@@ -257,11 +263,53 @@
         // holds its needles for years, so botanically the foliage does run back along
         // the shoots — but the inner ones are shaded out by the tree's own crown, and
         // drawing them is what fills the gaps the crown is supposed to have.
-        density: 8.0,
+        //
+        // Came down from 8.0 when the crown envelope was split into a body and a
+        // spire: the fuller upper crown is more cards in more volume, and it carried
+        // the tree past the one invariant that separates it from the spruce —
+        // `douglas_fir_has_a_clear_bole_and_an_open_crown` wants it under four fifths
+        // of the spruce's cards per cubic metre. Net effect is the same card budget as
+        // before, spread up the crown instead of piled in its bottom half.
+        //
+        // Held at 6.5, and the reason is a renderer one rather than a botanical one.
+        // Spacing at 6.5 is 0.15 m under a 0.8 m card, which is already about five
+        // times' overlap along a twig. A finer grain at the same coverage means
+        // multiplying this to keep `density * card_length^2` fixed — 10.8 at 0.62 m —
+        // and that was tried and is clearly worse in the viewer. The leaf shader hands
+        // filtered alpha straight to alpha-to-coverage while a card is bigger than a
+        // pixel, so overlapping cards blend rather than cut, and at seven times' overlap
+        // the sprays stop having edges and wash into an even felt. Overlap is the real
+        // limit on this number and it binds well before the openness invariant does.
+        density: 6.5,
         spacing_variance: 0.85,
-        leafy_length: 1.8,
+        // The shell of foliage over bare branchwork, and at 1.8 it was not one. This
+        // is measured back from a twig's tip along the length it actually grew, and
+        // once the envelope has had its way no level here reaches 1.8 m: level 2 grows
+        // 1.24 m, level 3 0.64, level 4 0.37. So every twig in the crown was leafy end
+        // to end, the bare inner stretch the comment above promises never existed, and
+        // the limbs were buried in their own sprays — which is the one thing both the
+        // photograph and the plate show plainly, foliage carried out at the ends of
+        // limbs you can see between. At 0.7 it bites on level 2, which is the level
+        // long enough to have an inside, and leaves the fine levels alone. Worth a
+        // sixth of the cards, and the headroom under
+        // `douglas_fir_has_a_clear_bole_and_an_open_crown` goes 1.06x to 1.23x.
+        leafy_length: 0.7,
         cluster_size: 1,
         cluster_spread_deg: 30.0,
+        // Big, and it has to be. A Douglas fir spray is a long flat plate of fine
+        // sprigs, so the instinct is a smaller card — at 0.8 m one card is very nearly
+        // a whole level-2 branchlet, which grows 1.24 m, and a spray comes out as one
+        // or two cards rather than as an outline. 0.62 m was tried, with `density`
+        // raised to 10.8 to hold the coverage, and in the viewer it is clearly worse:
+        // holding coverage on smaller cards means more of them over the same twig, and
+        // cards that overlap under alpha-to-coverage blend instead of cutting, so the
+        // extra grain arrives as an even felt with no spray outlines in it at all. A
+        // big card overlapped five times still reads as a plate; a small one overlapped
+        // seven times does not.
+        //
+        // Judge this one in `arbor-viewer --screenshot` and nowhere else. The offline
+        // preview alpha tests hard, so it draws crisp cards stacking where the build
+        // draws them dissolving, and it scores the swap as an improvement.
         card_length: 0.8,
         card_width: 0.8,
         size_variance: 0.4,
@@ -278,9 +326,29 @@
         hue_variance: 0.09,
         interior_shade: 0.42,
         cluster: Some((
-            // Baked smaller than the spruce's on a card of much the same size, so the
-            // sprays come out finer and do not close up into a mass.
-            count: 5,
+            // Ten sprays to a card where it used to be five, and the sprays themselves
+            // stay finer than the spruce's — `leaf_length` is 0.4 against its 0.48.
+            // There have to be more of them because this tree was sparse twice over and
+            // only the first half of it was ever accounted for. Cards per cubic metre
+            // are held under four fifths of the spruce's by
+            // `douglas_fir_has_a_clear_bole_and_an_open_crown`, and at 73% they keep to
+            // it — that is the contract and it is the right one. But the old cell baked
+            // 23.2% opaque against the spruce's 26.3%, on a 0.64 m2 card against its
+            // 0.71, so every card also carried a fifth less needle than a spruce card
+            // did. The two shortfalls multiply, and the product is what the eye sees:
+            // 0.61 m2 of needle per cubic metre of crown against the spruce's 1.05, or
+            // 58% where the invariant only ever asked for 80%.
+            //
+            // `count` is the one lever that shortfall answers to and the only one the
+            // invariant cannot see, because it fills the cell without adding a card.
+            // Ten fine sprays bake to 32.4% and bring the crown to 0.86 m2 per cubic
+            // metre — 81% of the spruce, which is where a crown of dense sprays held
+            // sparsely apart belongs — for exactly the cards and triangles five gave.
+            // Density is the wrong lever for the same job twice: at 6.5 the anchors are
+            // already 0.15 m apart under a 0.8 m card, so another one mostly lands on
+            // top of a card that is already there, and there is a tenth of headroom
+            // under the invariant to buy that with.
+            count: 10,
             leaf_length: 0.4,
             base_angle_deg: 58.0,
             tip_angle_deg: 28.0,
@@ -358,22 +426,49 @@
     ),
     envelope: (
         volumes: [
-            // The crown starts halfway up and is narrow: twelve metres across against
-            // twenty-five of crown, which is the proportion the reference plate shows
-            // for a mature tree. Unlike the spruce, one cone fits it — a fir crown
-            // really is a straight taper from the spire to its widest at the base, with
-            // no separate spire volume needed. Everything below is killed at birth, and
-            // that is what makes the clear bole: not that branches are never grown
-            // there, but that they are grown and lost.
-            Cone(base_y: 25.0, apex_y: 52.5, base_radius: 6.4, apex_radius: 0.7),
+            // The crown body, and it is deliberately not a single cone to the apex.
+            // A cone tapering straight from its base radius to nothing puts its volume
+            // as the square of what is left, so seven tenths of the foliage lands in
+            // the bottom half of the crown and the top third of the tree comes out a
+            // bare mast with a tuft on it — measured at 14/6/1 per cent over the last
+            // three tenths. Stems fill whatever envelope they are given, and no amount
+            // of vigor or acrotony moves that: a sweep of `vigor_falloff` from 0.18 to
+            // 0.05 did not shift the distribution by a single point. So the body barely
+            // tapers, which is what a real fir crown does between its base and its
+            // spire.
+            //
+            // The radii went 5.8/3.8 to 8.6/5.0 because the envelope, not the branch
+            // level, is what sets how far a limb reaches: a limb is 11 m of planned
+            // length and the envelope was cutting it off at about a third of that, so
+            // the crown could not get out past six metres however the limbs were
+            // tuned. That is why this tree read as a narrow column with the foliage
+            // hugging the bole. Widening it is not a licence to spread — nothing about
+            // the growth changed — it is room the limbs already wanted, and taking it
+            // carries every branchlet and needle they hold outward with them. It is
+            // worth 3184 m of leafy twig to 5755, a crown 0.29 as wide as the tree is
+            // tall to 0.38, and it is the single largest thing in this file for how
+            // full the tree looks. It also pays for itself against
+            // `douglas_fir_has_a_clear_bole_and_an_open_crown`, which measures cards
+            // against the crown's own bounding cylinder: the cards went up four fifths
+            // and the cylinder went up with the square of the radius, so the headroom
+            // only moved from 1.10x to 1.06x.
+            Cone(base_y: 25.0, apex_y: 46.0, base_radius: 8.6, apex_radius: 5.0),
+            // The spire, as its own volume. Short and sharp, overlapping the body by
+            // two metres so the union has no step in it. This is what the body no
+            // longer has to do, and splitting the two is worth 19/14/4 per cent over
+            // the last three tenths against 14/6/1 — the upper crown carries foliage
+            // instead of ending in a pole.
+            Cone(base_y: 44.0, apex_y: 52.5, base_radius: 5.0, apex_radius: 0.5),
             // The underside. A cone has a flat bottom, and a flat bottom is wrong for
             // any conifer: the lowest limbs leave the trunk pointing down and sweep
             // down further, so they fell straight out through it and died, and the
             // crown tapered back in at its own base instead of being widest there.
-            // This is the same cone stood on its head, widening upward, and what it
-            // adds is the sloping underside a real crown has — room for a limb to
-            // droop, but less of it the nearer the trunk you are.
-            Cone(base_y: 20.0, apex_y: 28.0, base_radius: 1.0, apex_radius: 5.8),
+            // This is a cone stood on its head, widening upward, and what it adds is
+            // the sloping underside a real crown has — room for a limb to droop, but
+            // less of it the nearer the trunk you are. Its top radius tracks the body's
+            // base, a little under it, or the widest limbs would find nothing to droop
+            // into and the crown would go back to a flat bottom.
+            Cone(base_y: 20.0, apex_y: 28.0, base_radius: 1.0, apex_radius: 7.9),
         ],
         falloff: 0.16,
         kill_threshold: 0.03,
