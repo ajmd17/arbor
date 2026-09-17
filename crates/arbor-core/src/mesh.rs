@@ -364,6 +364,19 @@ impl Irregular {
             let facing = e_r.dot(c.dir).max(0.0);
             let share = (c.radius / radius.max(1e-4)).min(1.0);
             lumps += p.collar_depth * share * (-(ds * ds)).exp() * facing * facing * facing;
+
+            // The branch bark ridge, above the crotch only: a much narrower seam than
+            // the collar, peaking a little way up the parent and dying out above it.
+            if p.bark_ridge > 0.0 {
+                let up = ds - 0.55;
+                let along = (-(up * up) / 0.45).exp() * smoothstep(-0.2, 0.2, ds);
+                // Broad rather than knife-edged, because that is the shape a real
+                // ridge is. Narrowing it saves nothing: what the sweep charges for is
+                // the height of the bump, not how sharp it is, since the sides are
+                // sized by how far a chord falls from the surface.
+                let seam = facing.powi(4);
+                lumps += p.bark_ridge * share * along * seam;
+            }
         }
 
         1.0 + fade * (p.flute_depth * flute + p.swell_depth * swell + lumps)
@@ -502,8 +515,14 @@ struct StemPath {
     dirs: Vec<Vec3>,
     /// Skeleton radius at each ring, before socket and root flare.
     radii: Vec<f32>,
-    /// Extra widening at the foot of a branch so the junction reads as a socket.
-    socket: Vec<f32>,
+    /// How far along the socket each ring sits, 0 at the parent and 1 where the flare
+    /// has died away. The flare itself is evaluated per angle, not per ring, because a
+    /// real collar is not the same all the way round.
+    socket_t: Vec<f32>,
+    /// Ceiling on the flare: what the parent can still hide.
+    socket_max: f32,
+    /// The underside of this stem, across its own axis.
+    under: Vec3,
     /// Distance travelled along the stem, used for the V coordinate.
     arc: Vec<f32>,
     /// True for the stem that starts at the root node, which gets the buttress flare
@@ -592,18 +611,20 @@ impl StemPath {
         // Cap the flare at whatever the parent can hide. Where both stems are already
         // at the radius floor there is nothing to hide it in, and an unclamped flare
         // would leave a bud sticking out of the junction.
-        let max_scale = (socket_ceiling / radii[0].max(1e-5)).max(1.0);
-        let socket = arc
-            .iter()
-            .map(|&s| {
-                if is_trunk {
-                    1.0
-                } else {
-                    let t = (s / socket_len).clamp(0.0, 1.0);
-                    (1.0 + mp.socket_flare * (1.0 - t) * (1.0 - t)).min(max_scale)
-                }
-            })
-            .collect();
+        let socket_max = (socket_ceiling / radii[0].max(1e-5)).max(1.0);
+        let socket_t: Vec<f32> = if is_trunk {
+            vec![1.0; arc.len()]
+        } else {
+            arc.iter().map(|&s| (s / socket_len).clamp(0.0, 1.0)).collect()
+        };
+        // Which way is down, across this stem. A limb thickens underneath where it
+        // carries its own weight, and that asymmetry is most of what tells a grown
+        // junction from a glued one.
+        let under = {
+            let axis = dirs[0];
+            let d = Vec3::NEG_Y - axis * Vec3::NEG_Y.dot(axis);
+            d.try_normalize().unwrap_or_else(|| ortho_of(axis))
+        };
 
         // Transport runs here rather than in the sweep, so the rings, the ground cap
         // and the bark all read one frame instead of three.
@@ -655,7 +676,9 @@ impl StemPath {
             points,
             dirs,
             radii,
-            socket,
+            socket_t,
+            socket_max,
+            under,
             arc,
             is_trunk,
             frames,
@@ -676,7 +699,7 @@ impl StemPath {
         }
         let points: Vec<Vec3> = keep.iter().map(|&i| self.points[i]).collect();
         let radii: Vec<f32> = keep.iter().map(|&i| self.radii[i]).collect();
-        let socket: Vec<f32> = keep.iter().map(|&i| self.socket[i]).collect();
+        let socket_t: Vec<f32> = keep.iter().map(|&i| self.socket_t[i]).collect();
         // Arc comes from the dense polyline, so thinning cannot slide the bark along
         // the stem and move the burls.
         let arc: Vec<f32> = keep.iter().map(|&i| self.arc[i]).collect();
@@ -686,7 +709,9 @@ impl StemPath {
             points,
             dirs,
             radii,
-            socket,
+            socket_t,
+            socket_max: self.socket_max,
+            under: self.under,
             arc,
             is_trunk: self.is_trunk,
             frames,
@@ -698,12 +723,30 @@ impl StemPath {
         self.points.len()
     }
 
+    /// Widening at the foot of a branch, where it meets its parent.
+    ///
+    /// Two swept tubes meeting can only ever intersect, so there is no fillet to be
+    /// had; what stands in for one is flaring the limb hard over the last stretch
+    /// before the surfaces cross, so both are already heading toward each other by the
+    /// time they meet. The flare is heavier underneath, where a limb lays down wood to
+    /// carry its own weight.
+    fn socket_at(&self, i: usize, e_r: Vec3, mp: &MeshParams) -> f32 {
+        let t = self.socket_t[i];
+        if t >= 1.0 {
+            return 1.0;
+        }
+        let k = (1.0 - t).powf(mp.socket_power.max(0.5));
+        let under = e_r.dot(self.under).max(0.0);
+        let lean = 1.0 + mp.socket_bias * under * under;
+        (1.0 + mp.socket_flare * k * lean).min(self.socket_max)
+    }
+
     /// Surface radius of ring `i` at angle `a`, including socket, root flare and the
     /// flutes, swellings, burls and branch collars that make it bark rather than pipe.
     fn radius_at(&self, i: usize, a: f32, mp: &MeshParams, phase: (f32, f32)) -> f32 {
-        let base = self.radii[i] * self.socket[i];
         let (n, b) = self.frames[i];
         let e_r = n * a.cos() + b * a.sin();
+        let base = self.radii[i] * self.socket_at(i, e_r, mp);
         let shaped = base * self.irregular.shape(self.arc[i], a, e_r, base);
 
         shaped * self.buttress(a, self.points[i].y, mp, phase)
@@ -936,8 +979,7 @@ pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
         let per_ring: Vec<usize> = path
             .radii
             .iter()
-            .zip(path.socket.iter())
-            .map(|(r, k)| sides(r * k))
+            .map(|r| sides(r * (1.0 + mp.socket_flare)))
             .collect();
         let swept = if path.is_trunk {
             path.len()
@@ -1136,7 +1178,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     // Every stem closes with a cone: from its last ring for the trunk, and from the
     // ring before it for everything else, which is what makes the tip a taper.
     let end_dir = path.dirs[last];
-    let r_end = path.radii[last] * path.socket[last];
+    let r_end = path.radii[last];
     let tip = path.points[last] + end_dir * mp.tip_length.max(r_end * 1.2);
     let apex = sink.vertex_offset();
     sink.push_vertex(tip, end_dir, ortho_of(end_dir), [0.0, path.arc[last]]);

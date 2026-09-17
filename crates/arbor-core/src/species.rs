@@ -88,6 +88,10 @@ pub struct BarkIrregularity {
     pub knot_depth: f32,
     /// Width of a knot in metres, before it is scaled to the stem.
     pub knot_size: f32,
+    /// Height of the branch bark ridge: the raised seam that runs up the parent from
+    /// a crotch, where the bark of the two stems meets and is pushed out. It is the
+    /// most recognisable mark a living junction leaves, and nothing else here makes it.
+    pub bark_ridge: f32,
     /// Swelling where a branch leaves, as a fraction of the child's radius. A real
     /// trunk thickens into every limb it carries rather than meeting it at a seam.
     pub collar_depth: f32,
@@ -121,6 +125,7 @@ impl Default for BarkIrregularity {
             knot_density: 0.0,
             knot_depth: 0.35,
             knot_size: 0.3,
+            bark_ridge: 0.0,
             collar_depth: 0.55,
             min_radius: 0.045,
             rings_per_meter: 14.0,
@@ -174,6 +179,16 @@ pub struct MeshParams {
     pub root_grooves: f32,
     pub tip_length: f32,
     pub socket_flare: f32,
+    /// How tightly the socket flare gathers at the very foot of a branch.
+    ///
+    /// A limb does not widen evenly into its parent, it trumpets: nearly all of the
+    /// extra girth is in the last few centimetres before the bark of the two meet.
+    /// Higher values pull the flare into that last stretch, which is what stands in
+    /// for a fillet where two swept tubes just intersect.
+    pub socket_power: f32,
+    /// How much more the socket flares on the underside of a limb than on top, where
+    /// a branch lays down extra wood to carry its own weight.
+    pub socket_bias: f32,
     /// Base name of the bark texture set under `assets/textures`.
     pub bark_texture: String,
     pub irregularity: BarkIrregularity,
@@ -197,6 +212,8 @@ impl Default for MeshParams {
             root_grooves: 0.0,
             tip_length: 0.06,
             socket_flare: 0.35,
+            socket_power: 2.0,
+            socket_bias: 0.0,
             bark_texture: "bark".to_string(),
             irregularity: BarkIrregularity::default(),
         }
