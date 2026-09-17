@@ -118,6 +118,16 @@ if every ring took its own side count: {adaptive} tris ({:+.1}%)",
         (adaptive as f32 / total as f32 - 1.0) * 100.0
     );
 
+    // The trunk, whose sweep should narrow as it rises rather than holding the count
+    // its foot needed all the way up.
+    if let Some(t) = costs.iter().max_by_key(|c| c.radial) {
+        println!(
+            "
+widest stem is swept at {} sides at its thickest ring and {} at its thinnest",
+            t.radial, t.radial_min
+        );
+    }
+
     // How many sides stems are actually swept at.
     let mut by_radial: HashMap<u32, (usize, usize)> = HashMap::new();
     for c in &costs {

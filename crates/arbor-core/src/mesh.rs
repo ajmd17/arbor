@@ -113,7 +113,15 @@ fn subdivide(points: &[Vec3], radii: &[f32], per_meter: f32) -> (Vec<Vec3>, Vec<
         for k in 0..steps {
             let t = k as f32 / steps as f32;
             out_p.push(catmull(points[a], points[i], points[i + 1], points[b], t));
-            out_r.push(catmull_f32(radii[a], radii[i], radii[i + 1], radii[b], t).max(1e-4));
+            // Clamped to the pair it sits between: a Catmull-Rom curve overshoots at
+            // an inflection, and on a radius that shows up as the bole thickening
+            // slightly where it should only ever taper.
+            let (lo, hi) = (radii[i].min(radii[i + 1]), radii[i].max(radii[i + 1]));
+            out_r.push(
+                catmull_f32(radii[a], radii[i], radii[i + 1], radii[b], t)
+                    .clamp(lo, hi)
+                    .max(1e-4),
+            );
         }
     }
     out_p.push(points[n - 1]);
@@ -127,7 +135,19 @@ struct Collar {
     arc: f32,
     /// Which way the child heads, across the parent's axis.
     dir: Vec3,
+    /// That direction as an angle in the ring's own frame, which is the space knots
+    /// are placed in.
+    angle: f32,
     radius: f32,
+}
+
+/// A scar where a limb was lost: a dimple inside a raised collar.
+struct Knot {
+    arc: f32,
+    angle: f32,
+    sigma_s: f32,
+    sigma_a: f32,
+    amp: f32,
 }
 
 /// A local lump on the bole.
@@ -155,10 +175,16 @@ struct Irregular {
     /// from being a ring.
     swells: [(f32, f32, f32, f32); 3],
     burls: Vec<Burl>,
+    knots: Vec<Knot>,
     collars: Vec<Collar>,
     active: bool,
     /// A trunk has no parent to start inside, so it keeps its bark all the way down.
     is_trunk: bool,
+    /// Kept so knots can be drawn after the collars are known.
+    seed: u64,
+    stem: u64,
+    length: f32,
+    radius: f32,
 }
 
 impl Irregular {
@@ -168,9 +194,14 @@ impl Irregular {
             flutes: [(0.0, 0.0, 0.0); 3],
             swells: [(0.0, 0.0, 0.0, 0.0); 3],
             burls: Vec::new(),
+            knots: Vec::new(),
             collars: Vec::new(),
             active: false,
             is_trunk: false,
+            seed: 0,
+            stem: 0,
+            length: 0.0,
+            radius: 0.0,
         }
     }
 
@@ -225,10 +256,63 @@ impl Irregular {
             flutes,
             swells,
             burls,
+            knots: Vec::new(),
             collars: Vec::new(),
             active: true,
             is_trunk,
+            seed,
+            stem,
+            length,
+            radius,
         }
+    }
+
+    /// Places the knots, once the collars are known.
+    ///
+    /// A knot is a branch that died and was grown over, so one cannot sit on a limb the
+    /// tree still has, and two of them on the same spot read as damage rather than as
+    /// history. Candidates are drawn and rejected until they clear both, which is why
+    /// this runs after the collars rather than in the constructor with everything else.
+    fn place_knots(&mut self) {
+        let p = &self.params;
+        let want = (self.length * p.knot_density).round().max(0.0) as usize;
+        if want == 0 || !self.active {
+            return;
+        }
+        let r = |i: u64| hash01(self.seed, self.stem.wrapping_mul(1409).wrapping_add(i));
+        let mut attempt = 0u64;
+        while self.knots.len() < want && attempt < want as u64 * 24 {
+            let i = 400 + attempt * 7;
+            attempt += 1;
+            let size = p.knot_size * (0.6 + 0.8 * r(i + 3));
+            let candidate = Knot {
+                arc: r(i) * self.length,
+                angle: r(i + 1) * TAU,
+                sigma_s: size.max(0.02),
+                sigma_a: (size / self.radius.max(1e-3)).clamp(0.2, 1.4),
+                amp: p.knot_depth * (0.6 + 0.8 * r(i + 2)),
+            };
+            if self.clashes(&candidate) {
+                continue;
+            }
+            self.knots.push(candidate);
+        }
+    }
+
+    /// Whether a knot would land on a living branch or on another knot.
+    ///
+    /// Both are measured in the same stretched space the knot is drawn in, so a knot
+    /// that is wide round a thin stem needs a correspondingly wide berth.
+    fn clashes(&self, k: &Knot) -> bool {
+        let overlaps = |arc: f32, angle: f32, sigma_s: f32, sigma_a: f32| {
+            let ds = (k.arc - arc) / (k.sigma_s + sigma_s).max(1e-4);
+            let da = wrap_pi(k.angle - angle) / (k.sigma_a + sigma_a).max(1e-4);
+            ds * ds + da * da < 1.0
+        };
+        self.collars.iter().any(|c| {
+            // The collar's own reach along the stem, and how far round it swells.
+            overlaps(c.arc, c.angle, (c.radius * 2.6).max(0.04), 0.9)
+        }) || self.knots.iter().any(|o| overlaps(o.arc, o.angle, o.sigma_s, o.sigma_a))
     }
 
     /// Multiplier on the radius at distance `s` along the stem, at angle `a` whose
@@ -261,6 +345,17 @@ impl Irregular {
             let ds = (s - b.arc) / b.sigma_s;
             let da = wrap_pi(a - b.angle) / b.sigma_a;
             lumps += b.amp * (-(ds * ds + da * da)).exp();
+        }
+        for k in &self.knots {
+            let ds = (s - k.arc) / k.sigma_s;
+            let da = wrap_pi(a - k.angle) / k.sigma_a;
+            let d2 = ds * ds + da * da;
+            // A raised collar at the rim with a hollow inside it. Both are gaussians,
+            // so the whole thing stays smooth and the analytic normals follow it.
+            let d = d2.sqrt();
+            let rim = (-((d - 1.0) * (d - 1.0)) / 0.35).exp();
+            let core = (-d2 / 0.5).exp();
+            lumps += k.amp * (0.9 * rim - core);
         }
         for c in &self.collars {
             let reach = (c.radius * 2.6).max(0.04);
@@ -468,6 +563,15 @@ impl StemPath {
             return None;
         }
 
+        // The trunk starts below the ground, so the ground plane hides its cap and the
+        // roots are seen entering the soil rather than cut off flush with it.
+        if is_trunk && mp.root_depth > 1e-4 {
+            let down = norm_or_zero(points[0] - points[1]);
+            let below = if down == Vec3::ZERO { Vec3::NEG_Y } else { down };
+            points.insert(0, points[0] + below * mp.root_depth);
+            radii.insert(0, radii[0]);
+        }
+
         // A skeleton is segmented for growing, which is far coarser than the bark needs:
         // a half-metre between rings cannot describe a burl. Stems thick enough to show
         // the detail get extra rings along a smooth curve through the ones they have.
@@ -533,14 +637,19 @@ impl StemPath {
                     let Some(dir) = across.try_normalize() else {
                         continue;
                     };
+                    let (fu, fv) = frames[j];
                     irregular.collars.push(Collar {
                         arc: arc[j],
+                        angle: dir.dot(fv).atan2(dir.dot(fu)),
                         dir,
                         radius: c.radius,
                     });
                 }
             }
         }
+
+        // Now the collars are known, the knots can be drawn clear of them.
+        irregular.place_knots();
 
         let dense = StemPath {
             points,
@@ -610,13 +719,22 @@ impl StemPath {
         if !self.is_trunk || y >= mp.flare_height || mp.flare_height <= 1e-4 {
             return 1.0;
         }
-        let t = (y / mp.flare_height).clamp(0.0, 1.0);
+        // Not clamped below zero: under the ground the flare keeps growing, which is
+        // what carries the roots outward as they go down.
+        let t = (y / mp.flare_height).min(1.0);
         let k = (1.0 - t).powf(mp.root_taper.max(0.2));
         let n = mp.root_count.max(1) as f32;
+        // The lower the ridges go the narrower they get, so the ring of lobes parts
+        // into separate arms on the way down instead of staying a skirt. This has to
+        // build from the top of the flare downward, not from the ground: everything
+        // below the ground is hidden by it, so sharpening only down there would shape
+        // the one part of the tree nobody can see.
+        let sharpen = 1.0 + mp.root_split * (1.0 - t).max(0.0).powi(2);
         // Warping the angle before the ridges are laid out spaces them unevenly,
         // which is what a real root collar does and a cog does not.
         let warped = a + 0.35 * (a + phase.1).sin();
-        let ridge = (0.5 + 0.5 * (n * warped + phase.0).cos()).powf(mp.root_sharpness.max(0.1));
+        let ridge =
+            (0.5 + 0.5 * (n * warped + phase.0).cos()).powf(mp.root_sharpness.max(0.1) * sharpen);
         // Roots are not evenly sized, so a slow wave rides over the ring of them, and
         // each one carries finer ridges of its own: a real buttress is grooved, not a
         // set of smooth cones.
@@ -770,7 +888,9 @@ pub struct StemCost {
     pub level: u8,
     pub nodes: usize,
     pub rings: usize,
+    /// Sides at the widest ring, and at the narrowest.
     pub radial: u32,
+    pub radial_min: u32,
     pub triangles: usize,
     pub vertices: usize,
     pub spike: bool,
@@ -798,6 +918,7 @@ pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
         if path.radii.iter().copied().fold(0.0f32, f32::max) < mp.min_bark_radius {
             continue;
         }
+        let counts = ring_sides(&path, mp, phase);
         let mut sink = MeshSink {
             mesh: Mesh::default(),
         };
@@ -837,7 +958,8 @@ pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
             level: sk.nodes[stem[0] as usize].level,
             nodes: stem.len(),
             rings: path.len(),
-            radial: radial_for(&path, mp, phase),
+            radial: *counts.iter().max().unwrap_or(&3),
+            radial_min: *counts.iter().min().unwrap_or(&3),
             triangles: sink.mesh.triangle_count(),
             vertices: sink.mesh.vertex_count(),
             spike: path.is_single_segment(),
@@ -859,16 +981,78 @@ fn child_index(sk: &Skeleton) -> Vec<Vec<u32>> {
     children
 }
 
+
+/// Sides for every ring of a stem, each sized from that ring's own profile.
+///
+/// A sweep held at one count the whole way is drawing the thin end of a stem at the
+/// resolution its thick end needed. A buttressed bole is the extreme case: seventy-odd
+/// sides are right at the foot and absurd fifteen metres up, where the same stem is a
+/// few centimetres across.
+fn ring_sides(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<u32> {
+    const SAMPLES: usize = 256;
+    let tol = mp.silhouette_tolerance.max(1e-5);
+    let lo = mp.min_radial.max(3);
+    let hi = mp.max_radial.max(lo);
+
+    let mut sides: Vec<u32> = (0..path.len())
+        .map(|i| {
+            let profile: Vec<f32> = (0..SAMPLES)
+                .map(|k| path.radius_at(i, k as f32 / SAMPLES as f32 * TAU, mp, phase))
+                .collect();
+            sides_for_profile(&profile, tol, lo, hi)
+        })
+        .collect();
+
+    // One ring dipping below its neighbours would pinch the resolution of a stretch
+    // that needs it, so a dip is lifted to whichever neighbour is lower.
+    let raw = sides.clone();
+    for i in 1..raw.len().saturating_sub(1) {
+        sides[i] = raw[i].max(raw[i - 1].min(raw[i + 1]));
+    }
+    sides
+}
+
+/// Joins two rings that need not have the same number of vertices.
+///
+/// A strip between a ring of n and one of m costs exactly n + m triangles whatever n
+/// and m are, so a stem can shed sides as it thins without paying anything at the
+/// seam. Walks both rims together, always advancing whichever is further behind.
+fn stitch(sink: &mut MeshSink, a_base: u32, a_n: u32, b_base: u32, b_n: u32) {
+    let (mut ia, mut ib) = (0u32, 0u32);
+    while ia < a_n || ib < b_n {
+        let a_next = if ia < a_n {
+            (ia + 1) as f32 / a_n as f32
+        } else {
+            f32::INFINITY
+        };
+        let b_next = if ib < b_n {
+            (ib + 1) as f32 / b_n as f32
+        } else {
+            f32::INFINITY
+        };
+        if a_next <= b_next {
+            sink.mesh
+                .indices
+                .extend_from_slice(&[a_base + ia, a_base + ia + 1, b_base + ib]);
+            ia += 1;
+        } else {
+            sink.mesh
+                .indices
+                .extend_from_slice(&[a_base + ia, b_base + ib + 1, b_base + ib]);
+            ib += 1;
+        }
+    }
+}
+
 fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32, f32)) {
     let last = path.len() - 1;
-    let radial = radial_for(path, mp, phase);
 
     // A single-segment branch is drawn as one cone from its anchor ring to a point,
     // rather than a ring pair swept into a tube and then capped with a cone as well.
     // The shape is the same at the scale these appear, for a third of the triangles,
     // and the tree is overwhelmingly made of them.
     if path.is_single_segment() {
-        emit_spike(sink, path, mp, phase, radial);
+        emit_spike(sink, path, mp, phase, radial_for(path, mp, phase));
         return;
     }
 
@@ -882,9 +1066,11 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     } else {
         path.len() - 1
     };
+    let sides = ring_sides(path, mp, phase);
     let mut ring_bases: Vec<u32> = Vec::with_capacity(swept);
 
     for i in 0..swept {
+        let radial = sides[i];
         let d = path.dirs[i];
         let (n, b) = path.frames[i];
 
@@ -922,17 +1108,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     }
 
     for w in 0..ring_bases.len() - 1 {
-        let bi = ring_bases[w];
-        let bn = ring_bases[w + 1];
-        for j in 0..radial {
-            let a0 = bi + j;
-            let a1 = bi + j + 1;
-            let b0 = bn + j;
-            let b1 = bn + j + 1;
-            sink.mesh
-                .indices
-                .extend_from_slice(&[a0, a1, b1, a0, b1, b0]);
-        }
+        stitch(sink, ring_bases[w], sides[w], ring_bases[w + 1], sides[w + 1]);
     }
 
     if path.is_trunk {
@@ -940,16 +1116,17 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         // The rim is duplicated with the cap normal to keep the edge crisp.
         let cap_n = -path.dirs[0];
         let (n0, b0) = path.frames[0];
+        let rim_sides = sides[0];
         let rim = sink.vertex_offset();
-        for j in 0..=radial {
-            let a = j as f32 / radial as f32 * TAU;
+        for j in 0..=rim_sides {
+            let a = j as f32 / rim_sides as f32 * TAU;
             let e_r = n0 * a.cos() + b0 * a.sin();
             let pos = path.points[0] + e_r * path.radius_at(0, a, mp, phase);
             sink.push_vertex(pos, cap_n, ortho_of(cap_n), [0.0, 0.0]);
         }
         let center = sink.vertex_offset();
         sink.push_vertex(path.points[0], cap_n, ortho_of(cap_n), [0.0, 0.0]);
-        for j in 0..radial {
+        for j in 0..rim_sides {
             sink.mesh
                 .indices
                 .extend_from_slice(&[center, rim + j + 1, rim + j]);
@@ -964,7 +1141,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     let apex = sink.vertex_offset();
     sink.push_vertex(tip, end_dir, ortho_of(end_dir), [0.0, path.arc[last]]);
     let base = ring_bases[swept - 1];
-    for j in 0..radial {
+    for j in 0..sides[swept - 1] {
         sink.mesh
             .indices
             .extend_from_slice(&[base + j, base + j + 1, apex]);
@@ -1305,6 +1482,9 @@ mod tests {
         // turned off here and checked separately below, and so is the bark relief,
         // which now reaches the foot too and puts ridges of its own round it.
         params.mesh.root_grooves = 0.0;
+        // Splitting narrows the ridges into arms, which is a separate control and
+        // would leave the grooves nowhere to sit.
+        params.mesh.root_split = 0.0;
         params.mesh.irregularity.flute_depth = 0.0;
         params.mesh.irregularity.swell_depth = 0.0;
         params.mesh.irregularity.burl_density = 0.0;
@@ -1316,11 +1496,17 @@ mod tests {
         let r: Vec<f32> = (0..N)
             .map(|k| path.radius_at(0, k as f32 / N as f32 * TAU, &params.mesh, phase))
             .collect();
+        // A root has to stand proud to count. Between sharp ridges the profile is flat
+        // to within a rounding error, and a bare `greater than its neighbours` test
+        // reads that noise as an extra root.
+        let lo = r.iter().copied().fold(f32::MAX, f32::min);
+        let hi = r.iter().copied().fold(0.0f32, f32::max);
+        let floor = lo + (hi - lo) * 0.25;
         let peaks = (0..N)
             .filter(|&k| {
                 let prev = r[(k + N - 1) % N];
                 let next = r[(k + 1) % N];
-                r[k] > prev && r[k] >= next
+                r[k] > floor && r[k] > prev && r[k] >= next
             })
             .count();
         assert_eq!(
@@ -1347,11 +1533,14 @@ mod tests {
         let grooved: Vec<f32> = (0..N)
             .map(|k| path.radius_at(0, k as f32 / N as f32 * TAU, &params.mesh, phase))
             .collect();
+        let g_lo = grooved.iter().copied().fold(f32::MAX, f32::min);
+        let g_hi = grooved.iter().copied().fold(0.0f32, f32::max);
+        let g_floor = g_lo + (g_hi - g_lo) * 0.05;
         let ripples = (0..N)
             .filter(|&k| {
                 let prev = grooved[(k + N - 1) % N];
                 let next = grooved[(k + 1) % N];
-                grooved[k] > prev && grooved[k] >= next
+                grooved[k] > g_floor && grooved[k] > prev && grooved[k] >= next
             })
             .count();
         assert!(
@@ -1376,9 +1565,11 @@ mod tests {
         params.mesh.flare_height = 0.5;
         params.mesh.irregularity.swell_depth = 0.14;
         params.mesh.irregularity.swell_period = 2.0;
-        // Burls are meant to be local bumps, so they do move the ring mean. This is
-        // about the swelling, so they are out of the way.
+        // Burls, knots and collars are all meant to be local, so they legitimately do
+        // move the ring mean where they sit. This is about the swelling, which is the
+        // one feature that runs the length of the stem, so they are out of the way.
         params.mesh.irregularity.burl_density = 0.0;
+        params.mesh.irregularity.knot_density = 0.0;
         params.mesh.irregularity.collar_depth = 0.0;
         let sk = crate::grow(&params);
         let path = trunk_path(&params, &sk);
@@ -1420,6 +1611,56 @@ mod tests {
             spread > 1.15,
             "the bole came out round at every height: widest section only {spread}"
         );
+    }
+
+    #[test]
+    fn knots_keep_clear_of_branches_and_of_each_other() {
+        // A knot is a branch the tree lost and grew over, so one cannot sit on a limb
+        // it still has; and two on the same spot read as damage rather than as history.
+        let mut params = parse_species(OAK_RON).unwrap();
+        // Enough of them that placement has to work rather than get lucky.
+        params.mesh.irregularity.knot_density = 2.0;
+        let sk = crate::grow(&params);
+        let children = child_index(&sk);
+
+        let mut checked = 0;
+        for run in sk.stem_runs() {
+            let Some(path) = StemPath::build(&sk, &run, &params.mesh, params.seed, &children)
+            else {
+                continue;
+            };
+            let ir = &path.irregular;
+            if ir.knots.len() < 2 {
+                continue;
+            }
+            let apart = |a_arc: f32, a_ang: f32, a_s: f32, a_a: f32,
+                         b_arc: f32, b_ang: f32, b_s: f32, b_a: f32| {
+                let ds = (a_arc - b_arc) / (a_s + b_s).max(1e-4);
+                let da = wrap_pi(a_ang - b_ang) / (a_a + b_a).max(1e-4);
+                ds * ds + da * da >= 1.0
+            };
+            for (i, k) in ir.knots.iter().enumerate() {
+                for other in &ir.knots[i + 1..] {
+                    assert!(
+                        apart(k.arc, k.angle, k.sigma_s, k.sigma_a,
+                              other.arc, other.angle, other.sigma_s, other.sigma_a),
+                        "two knots overlap at {} and {} along the stem",
+                        k.arc,
+                        other.arc
+                    );
+                }
+                for c in &ir.collars {
+                    assert!(
+                        apart(k.arc, k.angle, k.sigma_s, k.sigma_a,
+                              c.arc, c.angle, (c.radius * 2.6).max(0.04), 0.9),
+                        "a knot sits on the branch leaving at {} along the stem",
+                        c.arc
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only {checked} knots placed to check");
     }
 
     #[test]

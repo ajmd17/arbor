@@ -78,6 +78,16 @@ pub struct BarkIrregularity {
     pub burl_depth: f32,
     /// Width of a burl in metres, before it is scaled to the stem.
     pub burl_size: f32,
+    /// Knots per metre of stem thick enough to carry them.
+    ///
+    /// Where a limb was lost the bark grows over it, leaving a dimple inside a raised
+    /// collar. It is the single most recognisable mark on an old bole, and nothing
+    /// else in this model makes a hollow rather than a bump.
+    pub knot_density: f32,
+    /// How deep the dimple runs, as a fraction of the stem's radius.
+    pub knot_depth: f32,
+    /// Width of a knot in metres, before it is scaled to the stem.
+    pub knot_size: f32,
     /// Swelling where a branch leaves, as a fraction of the child's radius. A real
     /// trunk thickens into every limb it carries rather than meeting it at a seam.
     pub collar_depth: f32,
@@ -108,6 +118,9 @@ impl Default for BarkIrregularity {
             burl_density: 0.4,
             burl_depth: 0.46,
             burl_size: 0.42,
+            knot_density: 0.0,
+            knot_depth: 0.35,
+            knot_size: 0.3,
             collar_depth: 0.55,
             min_radius: 0.045,
             rings_per_meter: 14.0,
@@ -148,6 +161,15 @@ pub struct MeshParams {
     pub root_sharpness: f32,
     /// How quickly the buttress dies away with height. Higher keeps it to the foot.
     pub root_taper: f32,
+    /// How much the buttress lobes narrow into separate arms as they near the ground.
+    /// At zero the flare stays an unbroken skirt all the way down.
+    pub root_split: f32,
+    /// How far the roots carry on below the ground, in metres.
+    ///
+    /// A trunk that stops dead at the ground plane is a cut cylinder. Carrying it a
+    /// little way under lets the ground hide the cap, and the roots read as going into
+    /// the soil rather than being sawn off level with it.
+    pub root_depth: f32,
     /// Depth of the finer grooves running down each buttress root.
     pub root_grooves: f32,
     pub tip_length: f32,
@@ -170,6 +192,8 @@ impl Default for MeshParams {
             root_count: 3,
             root_sharpness: 1.0,
             root_taper: 2.0,
+            root_split: 0.0,
+            root_depth: 0.0,
             root_grooves: 0.0,
             tip_length: 0.06,
             socket_flare: 0.35,
@@ -315,6 +339,10 @@ impl Default for ChildParams {
 pub enum ChildPattern {
     None,
     Whorl { every: u32, count: u32 },
+    /// A child at each slot along the stem with this probability.
+    ///
+    /// A probability, not a count: at 1.0 every slot already spawns, and anything
+    /// above that changes nothing at all.
     Continuous { density: f32 },
 }
 

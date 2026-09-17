@@ -52,6 +52,7 @@ struct Startup {
     shadows: Option<bool>,
     translucency: Option<f32>,
     time_of_day: Option<f32>,
+    wireframe: bool,
     sun_elevation: Option<f32>,
     sun_azimuth: Option<f32>,
     sun_intensity: Option<f32>,
@@ -93,6 +94,7 @@ fn main() -> eframe::Result<()> {
         species: flag("--species").cloned(),
         seed: flag("--seed").and_then(|s| s.parse().ok()),
         leaves: args.iter().any(|a| a == "--no-leaves").then_some(false),
+        wireframe: args.iter().any(|a| a == "--wireframe"),
         shadows: args.iter().any(|a| a == "--no-shadows").then_some(false),
         translucency: num("--translucency"),
         time_of_day: num("--time"),
@@ -340,6 +342,7 @@ impl App {
         if let Some(v) = startup.translucency {
             app.leaf_translucency = v;
         }
+        app.wireframe = startup.wireframe;
         if let Some(h) = startup.time_of_day {
             app.time_of_day = h;
             let (el, az) = sun_at_hour(h);
