@@ -273,10 +273,30 @@ impl Irregular {
     /// tree still has, and two of them on the same spot read as damage rather than as
     /// history. Candidates are drawn and rejected until they clear both, which is why
     /// this runs after the collars rather than in the constructor with everything else.
+    ///
+    /// Where they may sit at all comes from the same reasoning. A scar can only be
+    /// where a branch once was, so the zone runs from a little under the lowest branch
+    /// the stem still carries up to its tip; a stem carrying no branches at all has
+    /// lost none either. And a stem has to be thicker than the scar to have grown over
+    /// it, which keeps knots off the twigs and stops one wrapping half way round a thin
+    /// limb.
     fn place_knots(&mut self) {
         let p = &self.params;
-        let want = (self.length * p.knot_density).round().max(0.0) as usize;
-        if want == 0 || !self.active {
+        if !self.active {
+            return;
+        }
+        let Some(lowest) = self
+            .collars
+            .iter()
+            .map(|c| c.arc)
+            .reduce(f32::min)
+        else {
+            return;
+        };
+        let floor = (lowest - p.knot_reach.max(0.0) * self.radius).max(0.0);
+        let span = self.length - floor;
+        let want = (span * p.knot_density).round().max(0.0) as usize;
+        if span <= 0.0 || want == 0 {
             return;
         }
         let r = |i: u64| hash01(self.seed, self.stem.wrapping_mul(1409).wrapping_add(i));
@@ -285,11 +305,14 @@ impl Irregular {
             let i = 400 + attempt * 7;
             attempt += 1;
             let size = p.knot_size * (0.6 + 0.8 * r(i + 3));
+            if self.radius < size * p.knot_min_stem.max(1.0) {
+                continue;
+            }
             let candidate = Knot {
-                arc: r(i) * self.length,
+                arc: floor + r(i) * span,
                 angle: r(i + 1) * TAU,
                 sigma_s: size.max(0.02),
-                sigma_a: (size / self.radius.max(1e-3)).clamp(0.2, 1.4),
+                sigma_a: (size / self.radius.max(1e-3)).clamp(0.2, 0.9),
                 amp: p.knot_depth * (0.6 + 0.8 * r(i + 2)),
             };
             if self.clashes(&candidate) {
@@ -350,12 +373,17 @@ impl Irregular {
             let ds = (s - k.arc) / k.sigma_s;
             let da = wrap_pi(a - k.angle) / k.sigma_a;
             let d2 = ds * ds + da * da;
-            // A raised collar at the rim with a hollow inside it. Both are gaussians,
-            // so the whole thing stays smooth and the analytic normals follow it.
+            // A raised collar at the rim with a shallow dish inside it. Both are
+            // gaussians, so the whole thing stays smooth and the analytic normals
+            // follow it. The rim leads and the dish trails it: wood laid down around a
+            // lost branch swells over the wound faster than the wound itself sinks, so
+            // what a healed scar reads as is a ring standing proud with a dip in the
+            // middle, not a bore hole. Weighting them the other way up sank the centre
+            // by half the radius of the stem, which is a cave.
             let d = d2.sqrt();
             let rim = (-((d - 1.0) * (d - 1.0)) / 0.35).exp();
             let core = (-d2 / 0.5).exp();
-            lumps += k.amp * (0.9 * rim - core);
+            lumps += k.amp * (0.77 * rim - 0.54 * core);
         }
         for c in &self.collars {
             let reach = (c.radius * 2.6).max(0.04);
@@ -1665,6 +1693,121 @@ mod tests {
         assert!(
             spread > 1.15,
             "the bole came out round at every height: widest section only {spread}"
+        );
+    }
+
+    #[test]
+    fn knots_only_sit_where_a_branch_could_have_been() {
+        // A scar can only be where a limb was, so the zone starts a little under the
+        // lowest branch the stem still carries. Below that is clean bole — which on a
+        // trunk is the stretch at eye level, the part anyone standing by the tree
+        // looks at hardest, and the part knots used to land on most jarringly because
+        // they were scattered over the whole length.
+        let params = parse_species(OAK_RON).unwrap();
+        let ir = &params.mesh.irregularity;
+        let sk = crate::grow(&params);
+        let children = child_index(&sk);
+
+        let mut checked = 0;
+        let mut on_trunk = 0;
+        for run in sk.stem_runs() {
+            let Some(path) = StemPath::build(&sk, &run, &params.mesh, params.seed, &children)
+            else {
+                continue;
+            };
+            let knots = &path.irregular.knots;
+            if knots.is_empty() {
+                continue;
+            }
+            let lowest = path
+                .irregular
+                .collars
+                .iter()
+                .map(|c| c.arc)
+                .reduce(f32::min)
+                .expect("a stem with knots carries branches");
+            let floor = (lowest - ir.knot_reach * path.irregular.radius).max(0.0);
+            for k in knots {
+                assert!(
+                    k.arc >= floor - 1e-4,
+                    "a knot at {:.2} m sits {:.2} m below the branched part of its stem",
+                    k.arc,
+                    floor - k.arc
+                );
+                // Thin stems have not laid down enough wood to have buried anything.
+                assert!(
+                    path.irregular.radius >= k.sigma_s * ir.knot_min_stem - 1e-4,
+                    "a knot {:.2} m across sits on a stem of radius {:.2} m",
+                    k.sigma_s,
+                    path.irregular.radius
+                );
+                checked += 1;
+            }
+            if path.is_trunk {
+                on_trunk += knots.len();
+            }
+        }
+        assert!(checked > 5, "only {checked} knots placed to check");
+        assert!(on_trunk > 0, "the trunk carries no knots at all");
+    }
+
+    #[test]
+    fn a_knot_is_a_scar_rather_than_a_bore_hole() {
+        // The dish has to stay shallow against the stem carrying it, and the rim has
+        // to stand proud of the dish. Weighted the other way up, a knot sank the
+        // centre of the trunk by half its radius, which reads as damage rather than as
+        // something the tree healed over decades ago.
+        let params = parse_species(OAK_RON).unwrap();
+        let sk = crate::grow(&params);
+        let children = child_index(&sk);
+
+        let mut worst_dish: f32 = 0.0;
+        let mut checked = 0;
+        for run in sk.stem_runs() {
+            let Some(mut path) =
+                StemPath::build(&sk, &run, &params.mesh, params.seed, &children)
+            else {
+                continue;
+            };
+            // Measured as the difference the knot itself makes, with the flutes, the
+            // swells and the collars held still by sampling the same point twice.
+            // Differencing against a nearby point instead reads the flutes, which run
+            // deeper than a knot does.
+            let knots = std::mem::take(&mut path.irregular.knots);
+            let radius = path.irregular.radius;
+            for k in &knots {
+                let at = |ir: &Irregular, a: f32| {
+                    ir.shape(k.arc, a, Vec3::new(a.cos(), 0.0, a.sin()), radius)
+                };
+                let bare_centre = at(&path.irregular, k.angle);
+                let bare_rim = at(&path.irregular, k.angle + k.sigma_a);
+                path.irregular.knots.push(Knot {
+                    arc: k.arc,
+                    angle: k.angle,
+                    sigma_s: k.sigma_s,
+                    sigma_a: k.sigma_a,
+                    amp: k.amp,
+                });
+                let dish = bare_centre - at(&path.irregular, k.angle);
+                let rim = at(&path.irregular, k.angle + k.sigma_a) - bare_rim;
+                path.irregular.knots.clear();
+
+                assert!(
+                    dish > 0.0 && rim > 0.0,
+                    "a knot with a dish of {dish:.3} and a rim of {rim:.3} is neither"
+                );
+                assert!(
+                    rim > dish * 0.9,
+                    "the rim stands {rim:.3} against a dish of {dish:.3}: that is a hole"
+                );
+                worst_dish = worst_dish.max(dish);
+                checked += 1;
+            }
+        }
+        assert!(checked > 5, "only {checked} knots to measure");
+        assert!(
+            worst_dish < 0.12,
+            "the deepest knot takes {worst_dish:.2} of its stem's radius out of it"
         );
     }
 

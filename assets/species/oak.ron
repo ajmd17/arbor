@@ -305,9 +305,15 @@
             burl_density: 0.35,
             burl_depth: 0.2,
             burl_size: 0.4,
-            knot_density: 0.55,
-            knot_depth: 0.4,
+            // Scars of the limbs the tree shed on its way up, so they start a little
+            // under the lowest branch it still carries and thin out from there. The
+            // clean bole below that is most of what a person standing by the trunk
+            // actually sees.
+            knot_density: 0.3,
+            knot_depth: 0.14,
             knot_size: 0.26,
+            knot_reach: 3.0,
+            knot_min_stem: 1.3,
             collar_depth: 0.85,
             bark_ridge: 0.35,
             min_radius: 0.06,

@@ -88,6 +88,22 @@ pub struct BarkIrregularity {
     pub knot_depth: f32,
     /// Width of a knot in metres, before it is scaled to the stem.
     pub knot_size: f32,
+    /// How far below the lowest branch a stem still carries, as a multiple of its own
+    /// radius, a knot may sit.
+    ///
+    /// A knot is the scar of a branch the tree lost, so one can only be where a branch
+    /// could have been. The lowest living branch marks the bottom of that zone, and
+    /// the wood a little under it is where the ones already shed used to be. Below
+    /// that is clean bole that never carried a limb — which on a trunk is the stretch
+    /// at eye level that anyone standing by the tree looks at hardest.
+    pub knot_reach: f32,
+    /// Smallest stem that may carry a knot, as a multiple of the knot's own width.
+    ///
+    /// Growing over a lost branch takes years of wood laid on around it, so a stem no
+    /// thicker than the scar is younger than the scar it would be wearing. It also
+    /// keeps a knot from wrapping most of the way round a thin stem, which reads as a
+    /// bite taken out of it rather than as a scar on it.
+    pub knot_min_stem: f32,
     /// Height of the branch bark ridge: the raised seam that runs up the parent from
     /// a crotch, where the bark of the two stems meets and is pushed out. It is the
     /// most recognisable mark a living junction leaves, and nothing else here makes it.
@@ -123,8 +139,10 @@ impl Default for BarkIrregularity {
             burl_depth: 0.46,
             burl_size: 0.42,
             knot_density: 0.0,
-            knot_depth: 0.35,
+            knot_depth: 0.12,
             knot_size: 0.3,
+            knot_reach: 3.0,
+            knot_min_stem: 1.2,
             bark_ridge: 0.0,
             collar_depth: 0.55,
             min_radius: 0.045,
