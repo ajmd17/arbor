@@ -351,7 +351,12 @@ fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton) {
             continue;
         }
         let keeps = (stem_base[i] / sp.snap_radius).clamp(0.0, 1.0);
-        if frac > keeps {
+        // Never take the node a stem starts on. Dead wood breaks back to a stub, which
+        // is what this pass is for, and a stub that breaks too is just an absence. It
+        // matters most for the one the envelope leaves on a bare bole: that is a stem
+        // of a single node at `stem_fraction` 1.0, so any `keeps` below one snapped it
+        // off the moment it was marked dead and the bole came out clean again.
+        if frac > keeps && same_stem {
             skeleton.nodes[i].broken = true;
         }
     }
@@ -499,7 +504,13 @@ fn grow_stem(
             // so leave one behind rather than nothing.
             if seg == 0 && sp.dead_stub_length > 0.0 {
                 let stub = base_pos + cur_dir * sp.dead_stub_length;
-                skeleton.push_node(Some(cur), stub, level, child_path(path, 0), v, 1.0, stem);
+                let node =
+                    skeleton.push_node(Some(cur), stub, level, child_path(path, 0), v, 1.0, stem);
+                // A stem the crown refused is dead the moment it is born, and has to
+                // say so: `dead` is what gives the mesher a snapped-off flat end
+                // rather than a twig's taper, and what keeps foliage off it. Left
+                // alive, the stubs on a self-pruned bole read as live branchlets.
+                skeleton.nodes[node as usize].dead = true;
             }
             break;
         }
@@ -1828,15 +1839,21 @@ mod tests {
         };
 
         let sk = grow(&params);
-        let stubs = sk
+        let stubs: Vec<&crate::SkeletonNode> = sk
             .stem_runs()
             .iter()
             .filter(|run| {
                 let n = &sk.nodes[run[0] as usize];
                 run.len() == 1 && n.level == 1 && n.position.y < crown_base
             })
-            .count();
-        assert!(stubs > 5, "only {stubs} dead stubs below the crown");
+            .map(|run| &sk.nodes[run[0] as usize])
+            .collect();
+        assert!(stubs.len() > 5, "only {} dead stubs below the crown", stubs.len());
+        // Dead is not decoration on a stub: the mesher reads it to end the tube in a
+        // flat break instead of a twig's taper, and the foliage pass reads it to keep
+        // leaves off. A stub that is born alive is a live branchlet on a clear bole.
+        let alive = stubs.iter().filter(|n| !n.dead).count();
+        assert_eq!(alive, 0, "{alive} of {} stubs were left alive", stubs.len());
     }
 
     #[test]

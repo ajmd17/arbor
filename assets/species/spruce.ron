@@ -1,12 +1,14 @@
 (
-    name: "Douglas Fir",
+    name: "Spruce",
     seed: 1,
     max_levels: 5,
     max_split_depth: 1,
-    // A Douglas fir is a pine's habit stretched and narrowed. It holds one leader for
-    // its whole life like any conifer, but it carries it half again as high on a bole
-    // that barely tapers, hangs its branchlets where a pine holds them out, and wears
-    // the crown nearly to the ground. Almost everything below is one of those four.
+    // A spruce is a pine's habit stretched and closed up. It holds one leader for its
+    // whole life like any conifer, but it carries it half again as high on a bole that
+    // barely tapers, hangs its branchlets where a pine holds them out, and wears the
+    // crown right down to the ground instead of shedding its lower limbs. Almost
+    // everything below is one of those four. The douglas fir preset is the opposite
+    // tree in every one of them: see `douglas_fir.ron`.
     trunk: (
         length: 27.0,
         length_variance: 0.1,
@@ -25,7 +27,7 @@
         vigor_falloff: 0.22,
         split_probability: 0.015,
         split_angle_deg: 9.0,
-        // Zero, and later up the bole than the pine allows. A fir that forked low would
+        // Zero, and later up the bole than the pine allows. A spruce that forked low would
         // be a different tree; what the occasional fork gives is the forked top of an
         // old one, never a second trunk.
         split_evenness: 0.0,
@@ -36,7 +38,7 @@
             // as finely up the bole, and that is the difference between a crown and a
             // stack of plates: at the coarser spacing a short whorl left a gap a metre
             // deep that the tiers above and below could not cover, and the silhouette
-            // pinched in at the waist. A pine whorls in tidy cohorts; a fir does not.
+            // pinched in at the waist. A pine whorls in tidy cohorts; a spruce does not.
             pattern: Whorl(every: 1, count: 3),
             start_fraction: 0.02,
             end_fraction: 0.995,
@@ -67,7 +69,7 @@
             // The limbs. Long enough that the ones in the middle of the crown reach
             // the envelope rather than stopping short of it; the lowest overshoot it
             // and are cut back, which is the way round the envelope is meant to be
-            // used. They are also the one level here that does not hang. A fir's droop
+            // used. They are also the one level here that does not hang. A spruce's droop
             // is in its branchlets, and putting it in the limbs as well was what pinched
             // the crown: a limb that sags spends its length dropping rather than
             // reaching, and the whole lower half came out half a metre narrow.
@@ -226,10 +228,10 @@
         max_twig_radius: 0.05,
         // The needle art is a whole branchlet rather than a fascicle, and 29% of its own
         // cell is opaque against the pine needle's 16%. That is nearly twice the foliage
-        // per card, which is what pays for a crown this dense: a fir is not a tree you
+        // per card, which is what pays for a crown this dense: a spruce is not a tree you
         // see the sky through.
         //
-        // Density against card size is the whole cost of this tree. A fir carries far
+        // Density against card size is the whole cost of this tree. A spruce carries far
         // more twig than anything else here, so at a pine's card size it wanted 48k
         // cards — four times the oak — for a canopy no fuller. Cards cost by the count
         // and cover by the area, so trading count for size buys the same canopy for
@@ -246,14 +248,14 @@
         crotch_angle_deg: 44.0,
         crotch_variance_deg: 18.0,
         phyllotaxis_deg: 99.5,
-        // A fir's needles come off the shoot all the way round and the spray hangs, so
+        // A spruce's needles come off the shoot all the way round and the spray hangs, so
         // the cards sit shallower to the twig and droop further than a pine's.
         droop_deg: 18.0,
         twist_deg: 60.0,
         normal_blend: 0.65,
         curvature: 0.3,
-        // Cooler and darker than the pine. Douglas fir reads blue-green where a pine
-        // reads yellow-green, and the difference is visible across a whole hillside.
+        // Cooler and darker than the pine. A spruce reads blue-green where a pine reads
+        // yellow-green, and the difference is visible across a whole hillside.
         tint: (0.63, 0.80, 0.66),
         hue_variance: 0.08,
         interior_shade: 0.55,
@@ -286,7 +288,7 @@
         atlas_rows: 1,
         atlas_front: 0,
         atlas_back: 0,
-        texture: "needle_fir",
+        texture: "needle_conifer",
     ),
     wind: (
         strength: 0.3,
@@ -295,11 +297,10 @@
         flexibility: (0.04, 0.12, 0.3, 0.75),
     ),
     mesh: (
-        // Douglas fir bark is the thickest of any tree here — on an old one it is a hand
-        // deep, in corky ridges separated by furrows you can put a finger into. That is
-        // why the flutes run half again as deep as the pine's and over more of them, and
-        // why the knots are dense: a fir sheds its lower limbs for twenty metres and
-        // grows over every one of the scars.
+        // Spruce bark is thinner and scalier than a pine's, in small flaking plates
+        // rather than deep plates, so the flutes run shallow. What it does carry is
+        // knots: a spruce keeps its lower limbs, and the ones it does lose leave scars
+        // all the way down a bole that never had a clear length.
         uv_scale: 1.0,
         silhouette_tolerance: 0.018,
         min_radial: 4,
@@ -315,12 +316,12 @@
         bark_texture: "bark_pine",
         bark_darken_low: 0.3,
         irregularity: (
-            flute_depth: 0.16,
-            flute_waves: 6.0,
+            flute_depth: 0.09,
+            flute_waves: 7.0,
             flute_twist: 0.05,
             swell_depth: 0.07,
             swell_period: 3.6,
-            // A fir carries far fewer burls than a pine and far more branch scars.
+            // A spruce carries far fewer burls than a pine and far more branch scars.
             burl_density: 0.15,
             burl_depth: 0.34,
             burl_size: 0.38,

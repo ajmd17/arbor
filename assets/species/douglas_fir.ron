@@ -1,0 +1,382 @@
+(
+    name: "Douglas Fir",
+    seed: 1,
+    max_levels: 5,
+    max_split_depth: 1,
+    // A mature coast Douglas fir is not a Christmas tree, which is the mistake this
+    // preset exists to avoid — `spruce.ron` is that shape. It is a column of clear
+    // wood with an open crown on the top half of it: fifty metres tall, bare for the
+    // first twenty-five, and what crown there is you can see the trunk through. Four
+    // things carry that and nothing else matters much. The crown envelope starts
+    // halfway up. The branches are born a seventh of the way up and die all the way to
+    // it, leaving the stubs that mark a self-pruning tree. Whorls sit three metres
+    // apart and what lives on them is sparse, so the tiers stand apart with sky between
+    // them. And the limb hangs while its branchlets lift: the limb loses to gravity
+    // from its first segment and sweeps down, and every spray it carries turns its last
+    // third back up to the light. That split — hang on the limb, lift on the fine
+    // levels — is the one silhouette nothing else here makes, and it is a hierarchy
+    // rather than a curve, because `droop` only ever grows along a stem and so no
+    // single stem can fall and then rise.
+    trunk: (
+        length: 52.0,
+        length_variance: 0.05,
+        radius: 0.8,
+        radius_ratio: 0.6,
+        // The clearest bole of any tree here. A fir this size is still nearly a metre
+        // through at twenty-five metres up, and that near-absence of taper is what a
+        // forester means by the species: it is the timber tree of the coast.
+        taper: 0.055,
+        da_vinci_exponent: 2.5,
+        // Long segments. A whorl goes on every one of them, so this is really the
+        // spacing of the tiers, and on a trunk this tall a short segment would both
+        // blow the node budget and stack the crown into a solid column.
+        segment_length: 1.5,
+        curvature: 0.005,
+        phototropism: 0.045,
+        gravity: 0.002,
+        zigzag_deg: 0.0,
+        vigor_falloff: 0.18,
+        split_probability: 0.01,
+        split_angle_deg: 8.0,
+        split_evenness: 0.0,
+        split_start_fraction: 0.85,
+        children: (
+            // A whorl every second segment, so three metres apart rather than one and
+            // a half. Same limb count spread over half as many tiers is the difference
+            // between a continuous column of foliage and tiers with sky between them.
+            pattern: Whorl(every: 2, count: 6),
+            // Branches are born from a seventh of the way up — six metres — and the
+            // envelope kills every one of them until twenty. That gap is the dead-stub
+            // zone, and it has to be a real gap: at the old 0.3 the first branch was
+            // born at fifteen metres and the envelope started at fifteen and a half, so
+            // almost nothing was ever grown and lost and the bole carried no scars at
+            // all. Below the start fraction the bole is clean, because wood that never
+            // carried a limb cannot carry its scar either.
+            start_fraction: 0.12,
+            end_fraction: 0.995,
+            // Thirteen degrees past horizontal at the foot of the crown. A spruce
+            // leaves level and a pine leaves level; a fir limb sets off downward and
+            // is then bent further by its own weight, and only the last stretch comes
+            // back up. That descending-then-rising line is the whole read of the tree.
+            crotch_angle_deg: 103.0,
+            // The taper to the tip is cubed, so it stays near the base angle through
+            // most of the crown and only the last whorls stand up. At 36 the curve had
+            // crossed back above horizontal by the middle of the crown and every limb
+            // that survived the envelope left the trunk pointing up, which is the one
+            // thing this tree must not do. 62 keeps the body of the crown at or below
+            // level and still lets the top few whorls rise.
+            crotch_angle_tip_deg: 62.0,
+            crotch_variance_deg: 16.0,
+            roll_variance_deg: 34.0,
+            phyllotaxis_deg: 137.5,
+            scale: 0.56,
+            scale_variance: 0.55,
+            // Twice the spruce's. An open crown is a crown that lost most of its
+            // contest: a few limbs that won a great deal of drive and many that were
+            // suppressed to nothing, which is what leaves the gaps you see sky through.
+            dominance: 0.28,
+            acrotony: -0.15,
+            planarity: 1.0,
+            count_variance: 2,
+        ),
+    ),
+    branch_levels: [
+        (
+            // The limbs, and their whole job is to hang. Phototropism here is a tenth
+            // of what the levels below it carry: the lift that turns a spray back up
+            // belongs to the branchlets, not to the limb they hang from. Giving the
+            // limb the lift too is what made this tree a spruce.
+            length: 11.0,
+            length_variance: 0.34,
+            radius: 0.1,
+            radius_ratio: 0.48,
+            taper: 0.15,
+            da_vinci_exponent: 2.3,
+            segment_length: 0.4,
+            curvature: 0.05,
+            // A limb must lose to gravity from its first segment. At 0.038 against
+            // 0.032 phototropism won until `droop` caught up a third of the way out,
+            // and since the envelope cuts a limb off at about a third of its planned
+            // length, that was the whole limb: it rose in a straight line and the
+            // cantilever curve this level exists for never grew at all.
+            phototropism: 0.01,
+            gravity: 0.04,
+            droop: 3.5,
+            zigzag_deg: 1.5,
+            vigor_falloff: 0.45,
+            // A fifteenth of the limbs die in the crown and stand there. Separately
+            // from this, every limb born below the envelope is pruned at birth and
+            // leaves a `dead_stub_length` stub on the bole — twenty-odd of them over
+            // the clear length, which is the other half of why it does not read tidy.
+            dieback: 0.07,
+            snap_radius: 0.05,
+            split_probability: 0.05,
+            split_angle_deg: 18.0,
+            split_evenness: 0.0,
+            // Measured from the centreline, and the bole under the crown is still most
+            // of a metre through, so a stub has to be long to stand off it at all.
+            dead_stub_length: 1.5,
+            split_start_fraction: 0.35,
+            children: (
+                // A third of the spruce's. This one number is most of what makes the
+                // crown see-through: at the spruce's density the same skeleton fills
+                // in solid and every gap between the tiers closes.
+                pattern: Continuous(density: 3.2),
+                start_fraction: 0.12,
+                end_fraction: 0.92,
+                crotch_angle_deg: 70.0,
+                crotch_angle_tip_deg: 34.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 11.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.5,
+                scale_variance: 0.45,
+                dominance: 0.35,
+                acrotony: 0.3,
+                planarity: 0.95,
+                count_variance: 0,
+            ),
+        ),
+        (
+            // Every level from here down is a fight between gravity, which hangs the
+            // branchlet, and phototropism, which lifts its tip — and the fine levels
+            // carry more lift than the limbs above them do. That is the curl: a spray
+            // leaves its limb, sags under itself, and turns its last third back up to
+            // the light. Hang without lift is a weeping tree; lift without hang is a
+            // spruce. The curl cannot come from the needle art, which is one flat
+            // branchlet however hard its shoot is curved, so it has to be grown.
+            length: 2.2,
+            length_variance: 0.4,
+            radius: 0.05,
+            radius_ratio: 0.45,
+            taper: 0.17,
+            da_vinci_exponent: 2.3,
+            segment_length: 0.3,
+            zigzag_deg: 3.0,
+            dieback: 0.1,
+            snap_radius: 0.04,
+            curvature: 0.05,
+            phototropism: 0.105,
+            gravity: 0.048,
+            droop: 0.1,
+            vigor_falloff: 0.55,
+            split_probability: 0.04,
+            split_angle_deg: 19.0,
+            split_start_fraction: 0.35,
+            children: (
+                pattern: Continuous(density: 5.0),
+                start_fraction: 0.14,
+                end_fraction: 0.92,
+                crotch_angle_deg: 58.0,
+                crotch_angle_tip_deg: 30.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 13.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.55,
+                scale_variance: 0.42,
+                dominance: 0.35,
+                acrotony: 0.32,
+                planarity: 0.92,
+                count_variance: 0,
+            ),
+        ),
+        (
+            length: 1.0,
+            length_variance: 0.42,
+            radius: 0.022,
+            radius_ratio: 0.42,
+            taper: 0.2,
+            da_vinci_exponent: 2.2,
+            segment_length: 0.2,
+            zigzag_deg: 6.0,
+            dieback: 0.11,
+            snap_radius: 0.03,
+            curvature: 0.05,
+            phototropism: 0.115,
+            gravity: 0.052,
+            droop: 0.1,
+            vigor_falloff: 0.6,
+            split_probability: 0.0,
+            split_angle_deg: 16.0,
+            split_start_fraction: 0.4,
+            children: (
+                pattern: Continuous(density: 6.0),
+                start_fraction: 0.15,
+                end_fraction: 0.92,
+                crotch_angle_deg: 48.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 15.0,
+                phyllotaxis_deg: 180.0,
+                scale: 0.55,
+                scale_variance: 0.38,
+                dominance: 0.35,
+                acrotony: 0.3,
+                planarity: 0.88,
+                count_variance: 0,
+            ),
+        ),
+        (
+            length: 0.4,
+            length_variance: 0.42,
+            radius: 0.01,
+            radius_ratio: 0.45,
+            taper: 0.25,
+            da_vinci_exponent: 2.2,
+            segment_length: 0.11,
+            zigzag_deg: 10.0,
+            dieback: 0.12,
+            snap_radius: 0.02,
+            curvature: 0.06,
+            phototropism: 0.125,
+            gravity: 0.05,
+            droop: 0.1,
+            vigor_falloff: 0.65,
+            split_probability: 0.0,
+            split_angle_deg: 14.0,
+            split_start_fraction: 0.4,
+            children: (
+                pattern: None,
+                start_fraction: 1.0,
+                end_fraction: 0.0,
+                crotch_angle_deg: 30.0,
+                crotch_variance_deg: 10.0,
+                roll_variance_deg: 25.0,
+                phyllotaxis_deg: 137.5,
+                scale: 0.5,
+            ),
+        ),
+    ],
+    gravity_multiplier: 1.0,
+    phototropism_multiplier: 1.0,
+    envelope_scale: 1.0,
+    leaves: (
+        enabled: true,
+        min_level: 2,
+        max_twig_radius: 0.05,
+        // Sparser than the spruce, and kept to the last stretch of every twig. A fir
+        // holds its needles for years, so botanically the foliage does run back along
+        // the shoots — but the inner ones are shaded out by the tree's own crown, and
+        // drawing them is what fills the gaps the crown is supposed to have.
+        density: 8.0,
+        spacing_variance: 0.85,
+        leafy_length: 1.8,
+        cluster_size: 1,
+        cluster_spread_deg: 30.0,
+        card_length: 0.8,
+        card_width: 0.8,
+        size_variance: 0.4,
+        crotch_angle_deg: 46.0,
+        crotch_variance_deg: 20.0,
+        phyllotaxis_deg: 99.5,
+        droop_deg: 22.0,
+        twist_deg: 60.0,
+        normal_blend: 0.65,
+        curvature: 0.3,
+        // Greyer and a shade lighter than the spruce. Douglas fir foliage is a soft
+        // grey-green where a spruce is a hard blue-green.
+        tint: (0.7, 0.82, 0.66),
+        hue_variance: 0.09,
+        interior_shade: 0.42,
+        cluster: Some((
+            // Baked smaller than the spruce's on a card of much the same size, so the
+            // sprays come out finer and do not close up into a mass.
+            count: 5,
+            leaf_length: 0.4,
+            base_angle_deg: 58.0,
+            tip_angle_deg: 28.0,
+            tip_scale: 0.85,
+            angle_variance_deg: 26.0,
+            roll_deg: 137.5,
+            roll_variance_deg: 45.0,
+            depth: 0.62,
+            blade_twist_deg: 52.0,
+            depth_shade: 0.4,
+            size_variance: 0.3,
+            spacing_variance: 0.7,
+            shoot_curve: 0.42,
+            variants: 4,
+            shoot_base: 0.9,
+            shoot_tip: 0.2,
+            source_aspect: 1.0,
+            cell_size: 512,
+        )),
+        atlas_cols: 1,
+        atlas_rows: 1,
+        atlas_front: 0,
+        atlas_back: 0,
+        texture: "needle_conifer",
+    ),
+    wind: (
+        strength: 0.28,
+        gustiness: 0.35,
+        flutter: 0.38,
+        flexibility: (0.03, 0.1, 0.28, 0.72),
+    ),
+    mesh: (
+        // Douglas fir bark is the thickest of any tree — on an old one it is a hand
+        // deep, in corky ridges separated by furrows you can put a finger into. Deep
+        // flutes and many of them, and knots reaching far down the bole, because this
+        // is a tree that grew and shed limbs over the whole of its clear length and
+        // grew over every one of the scars.
+        uv_scale: 1.3,
+        silhouette_tolerance: 0.02,
+        min_radial: 4,
+        min_bark_radius: 0.018,
+        max_radial: 32,
+        root_flare: 1.3,
+        flare_height: 2.6,
+        root_taper: 2.0,
+        root_sharpness: 1.4,
+        root_count: 5,
+        root_depth: 0.3,
+        root_grooves: 0.07,
+        tip_length: 0.06,
+        socket_flare: 0.35,
+        bark_texture: "bark_pine",
+        bark_darken_low: 0.35,
+        irregularity: (
+            flute_depth: 0.17,
+            flute_waves: 7.0,
+            flute_twist: 0.04,
+            swell_depth: 0.06,
+            swell_period: 4.5,
+            burl_density: 0.1,
+            burl_depth: 0.3,
+            burl_size: 0.4,
+            // Dense, and reaching a long way below the lowest living limb: on this tree
+            // that zone is twenty-five metres of bole that all once carried branches.
+            knot_density: 0.5,
+            knot_depth: 0.12,
+            knot_size: 0.3,
+            knot_reach: 14.0,
+            knot_min_stem: 1.3,
+            collar_depth: 0.5,
+            min_radius: 0.045,
+            rings_per_meter: 12.0,
+            ring_tolerance: 0.02,
+        ),
+    ),
+    envelope: (
+        volumes: [
+            // The crown starts halfway up and is narrow: twelve metres across against
+            // twenty-five of crown, which is the proportion the reference plate shows
+            // for a mature tree. Unlike the spruce, one cone fits it — a fir crown
+            // really is a straight taper from the spire to its widest at the base, with
+            // no separate spire volume needed. Everything below is killed at birth, and
+            // that is what makes the clear bole: not that branches are never grown
+            // there, but that they are grown and lost.
+            Cone(base_y: 25.0, apex_y: 52.5, base_radius: 6.4, apex_radius: 0.7),
+            // The underside. A cone has a flat bottom, and a flat bottom is wrong for
+            // any conifer: the lowest limbs leave the trunk pointing down and sweep
+            // down further, so they fell straight out through it and died, and the
+            // crown tapered back in at its own base instead of being widest there.
+            // This is the same cone stood on its head, widening upward, and what it
+            // adds is the sloping underside a real crown has — room for a limb to
+            // droop, but less of it the nearer the trunk you are.
+            Cone(base_y: 20.0, apex_y: 28.0, base_radius: 1.0, apex_radius: 5.8),
+        ],
+        falloff: 0.16,
+        kill_threshold: 0.03,
+        pull_strength: 0.6,
+    ),
+)

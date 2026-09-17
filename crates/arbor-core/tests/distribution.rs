@@ -1,4 +1,6 @@
-use arbor_core::species::{parse_species, BIRCH_RON, FIR_RON, OAK_RON, PINE_RON};
+use arbor_core::species::{
+    parse_species, BIRCH_RON, DOUGLAS_FIR_RON, OAK_RON, PINE_RON, SPRUCE_RON,
+};
 use arbor_core::grow;
 
 fn stems_at_level(
@@ -50,15 +52,15 @@ fn oak_has_split_trunk_and_dense_canopy() {
     assert!(level3_stems > 20, "oak level-3 twigs: {level3_stems}");
 }
 
-/// What separates the fir from the pine, which is the preset it is nearest to: it
+/// What separates the spruce from the pine, which is the preset it is nearest to: it
 /// keeps one leader for its whole height, and it wears its crown nearly to the ground
 /// rather than on a bare pole.
 #[test]
-fn fir_keeps_one_leader_and_a_crown_to_the_ground() {
-    let params = parse_species(FIR_RON).unwrap();
+fn spruce_keeps_one_leader_and_a_crown_to_the_ground() {
+    let params = parse_species(SPRUCE_RON).unwrap();
     let sk = grow(&params);
     let stats = sk.stats();
-    assert!(stats.height > 22.0, "fir height {}", stats.height);
+    assert!(stats.height > 22.0, "spruce height {}", stats.height);
 
     // split_evenness is 0, so a fork must stay a side branch: no two level-0 runs may
     // both be a substantial share of the tree, or the leader has been given up.
@@ -78,7 +80,7 @@ fn fir_keeps_one_leader_and_a_crown_to_the_ground() {
     if let Some(second) = trunk_runs.get(1) {
         assert!(
             *second < trunk_runs[0] * 0.5,
-            "fir grew a co-dominant trunk: runs of {:.1} m and {second:.1} m",
+            "spruce grew a co-dominant trunk: runs of {:.1} m and {second:.1} m",
             trunk_runs[0]
         );
     }
@@ -93,10 +95,76 @@ fn fir_keeps_one_leader_and_a_crown_to_the_ground() {
         .count();
     assert!(
         low > 400,
-        "fir carries only {} cards below {:.1} m",
+        "spruce carries only {} cards below {:.1} m",
         low / 4,
         stats.height * 0.2
     );
+}
+
+/// The douglas fir is the opposite tree to the spruce and the test is the mirror of
+/// it: a clear bole over the bottom third, and a crown that is the sparser of the two.
+#[test]
+fn douglas_fir_has_a_clear_bole_and_an_open_crown() {
+    let params = parse_species(DOUGLAS_FIR_RON).unwrap();
+    let sk = grow(&params);
+    let stats = sk.stats();
+    assert!(stats.height > 44.0, "douglas fir height {}", stats.height);
+
+    // Where the foliage starts is the whole difference between these two presets, and
+    // it is worth stating as one assertion over both: the fir self-prunes its bottom
+    // third away, the spruce keeps its crown to the ground.
+    let spruce = parse_species(SPRUCE_RON).unwrap();
+    let spruce_sk = grow(&spruce);
+    let fir_base = lowest_leaf_fraction(&sk, &params);
+    let spruce_base = lowest_leaf_fraction(&spruce_sk, &spruce);
+    assert!(
+        fir_base > 0.3,
+        "douglas fir carries foliage from {:.0}% of its height; the bottom third          should be clear bole",
+        fir_base * 100.0
+    );
+    assert!(
+        spruce_base < 0.15,
+        "spruce carries foliage only from {:.0}% of its height; its crown should          reach the ground",
+        spruce_base * 100.0
+    );
+
+    // Sparser, too — and the honest way to say that is against the spruce, which is
+    // the same needles on the opposite habit. An absolute cards-per-cubic-metre figure
+    // would just be whatever this preset happened to measure on the day.
+    let open = crown_cards_per_m3(&sk, &params);
+    let solid = crown_cards_per_m3(&spruce_sk, &spruce);
+    assert!(
+        open < solid * 0.8,
+        "douglas fir packs {open:.2} cards per cubic metre against the spruce's          {solid:.2}; it is meant to be the open one"
+    );
+}
+
+/// Height of the lowest leaf card, as a fraction of the tree's own height.
+fn lowest_leaf_fraction(sk: &arbor_core::Skeleton, params: &arbor_core::SpeciesParams) -> f32 {
+    let leaves = arbor_core::build_leaves(sk, params);
+    let base = leaves
+        .positions
+        .iter()
+        .map(|p| p[1])
+        .fold(f32::INFINITY, f32::min);
+    base / sk.stats().height
+}
+
+/// Cards per cubic metre of the crown's own bounding cylinder, the crown being whatever
+/// part of the tree carries foliage.
+fn crown_cards_per_m3(sk: &arbor_core::Skeleton, params: &arbor_core::SpeciesParams) -> f32 {
+    let leaves = arbor_core::build_leaves(sk, params);
+    if leaves.positions.is_empty() {
+        return 0.0;
+    }
+    let (mut base, mut top, mut r2) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f32);
+    for p in &leaves.positions {
+        base = base.min(p[1]);
+        top = top.max(p[1]);
+        r2 = r2.max(p[0] * p[0] + p[2] * p[2]);
+    }
+    let volume = std::f32::consts::PI * r2 * (top - base).max(0.1);
+    (leaves.positions.len() / 4) as f32 / volume
 }
 
 #[test]
@@ -154,7 +222,8 @@ fn stems_arc_without_curling_round_on_themselves() {
         ("pine", PINE_RON),
         ("oak", OAK_RON),
         ("birch", BIRCH_RON),
-        ("fir", FIR_RON),
+        ("spruce", SPRUCE_RON),
+        ("fir", DOUGLAS_FIR_RON),
     ] {
         let params = parse_species(ron).unwrap();
         for seed in 1..=8u64 {
