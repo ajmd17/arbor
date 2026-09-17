@@ -769,6 +769,11 @@ impl GpuMesh {
 /// share this value.
 pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
 
+/// Leaf vertex attributes, in the order the one leaf vertex array binds them. The
+/// colour pass and the depth pass draw from that same array, so they have to agree on
+/// it or the depth pass reads positions out of the tint buffer.
+const LEAF_ATTRIBS: [&str; 5] = ["a_pos", "a_normal", "a_uv", "a_tint", "a_atlas_v"];
+
 /// Which atlas cells a leaf card samples, and how hard the alpha test bites.
 #[derive(Clone, Copy)]
 pub struct LeafMaterialParams {
@@ -785,15 +790,20 @@ impl LeafMaterialParams {
     pub fn from_species(lp: &arbor_core::LeafParams, translucency: f32) -> Self {
         let cols = lp.atlas_cols.max(1);
         let rows = lp.atlas_rows.max(1);
+        // Clustering stacks its arrangements down the sheet, so the atlas the shader
+        // samples is taller than the one the species describes. A card reaches its own
+        // arrangement by the v offset it carries; the cells here are the first one's.
+        let variants = lp.cluster.as_ref().map_or(1, |c| c.variants.max(1));
+        let tall = rows * variants;
         let cell = |index: u32| {
             let i = index.min(cols * rows - 1);
             [
                 (i % cols) as f32 / cols as f32,
-                (i / cols) as f32 / rows as f32,
+                (i / cols) as f32 / tall as f32,
             ]
         };
         Self {
-            atlas_scale: [1.0 / cols as f32, 1.0 / rows as f32],
+            atlas_scale: [1.0 / cols as f32, 1.0 / tall as f32],
             atlas_front: cell(lp.atlas_front),
             atlas_back: cell(lp.atlas_back),
             alpha_cutoff: LEAF_ALPHA_CUTOFF,
@@ -818,7 +828,7 @@ pub struct LeafDepthPass {
 impl LeafDepthPass {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::LEAF_DEPTH_VS, shaders::LEAF_DEPTH_FS, &["a_pos", "a_normal", "a_uv", "a_tint"]);
+            let program = compile_program(gl, shaders::LEAF_DEPTH_VS, shaders::LEAF_DEPTH_FS, &LEAF_ATTRIBS);
             gl.use_program(Some(program));
             gl.uniform_1_i32(Some(&loc(gl, &program, "u_albedo_tex")), 0);
             gl.use_program(None);
@@ -879,6 +889,7 @@ pub struct GpuLeaves {
     vbo_nrm: glow::Buffer,
     vbo_uv: glow::Buffer,
     vbo_tint: glow::Buffer,
+    vbo_atlas_v: glow::Buffer,
     ibo: glow::Buffer,
     index_count: i32,
     u_view_proj: glow::UniformLocation,
@@ -899,12 +910,13 @@ pub struct GpuLeaves {
 impl GpuLeaves {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::LEAF_VS, &shaders::leaf_fs(), &["a_pos", "a_normal", "a_uv", "a_tint"]);
+            let program = compile_program(gl, shaders::LEAF_VS, &shaders::leaf_fs(), &LEAF_ATTRIBS);
             let vao = gl.create_vertex_array().expect("leaf vao");
             let vbo_pos = gl.create_buffer().expect("leaf pos");
             let vbo_nrm = gl.create_buffer().expect("leaf nrm");
             let vbo_uv = gl.create_buffer().expect("leaf uv");
             let vbo_tint = gl.create_buffer().expect("leaf tint");
+            let vbo_atlas_v = gl.create_buffer().expect("leaf atlas v");
             let ibo = gl.create_buffer().expect("leaf ibo");
 
             gl.bind_vertex_array(Some(vao));
@@ -913,6 +925,7 @@ impl GpuLeaves {
                 (1, vbo_nrm, 3, 12),
                 (2, vbo_uv, 2, 8),
                 (3, vbo_tint, 4, 16),
+                (4, vbo_atlas_v, 1, 4),
             ] {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
                 gl.enable_vertex_attrib_array(slot);
@@ -936,6 +949,7 @@ impl GpuLeaves {
                 vbo_nrm,
                 vbo_uv,
                 vbo_tint,
+                vbo_atlas_v,
                 ibo,
                 index_count: 0,
                 u_view_proj: u("u_view_proj"),
@@ -964,6 +978,7 @@ impl GpuLeaves {
                 (self.vbo_nrm, cast_slice(&leaves.normals)),
                 (self.vbo_uv, cast_slice(&leaves.uvs)),
                 (self.vbo_tint, cast_slice(&leaves.tints)),
+                (self.vbo_atlas_v, cast_slice(&leaves.atlas_v)),
             ] {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
                 gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STATIC_DRAW);

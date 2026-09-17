@@ -20,7 +20,15 @@ fn main() {
     let leaves = build_leaves(&sk, &params);
     let costs = stem_costs(&sk, &params);
 
+    let (lo, hi) = mesh.aabb();
     println!("=== {} ===", params.name);
+    println!(
+        "height {:.1} m   spread {:.1} x {:.1} m   trunk radius {:.2} m",
+        hi[1] - lo[1],
+        hi[0] - lo[0],
+        hi[2] - lo[2],
+        params.trunk.radius
+    );
     println!(
         "nodes {}   stems {}   bark tris {}   bark verts {}   leaf tris {}",
         sk.nodes.len(),
@@ -50,6 +58,28 @@ fn main() {
             *tris as f32 / total as f32 * 100.0,
             *tris as f32 / *stems as f32
         );
+    }
+
+    // What each level actually came out at, which is what decides whether a tree
+    // reads as massive or spindly.
+    let mut rad: HashMap<u8, (f32, f32, usize)> = HashMap::new();
+    for run in sk.stem_runs() {
+        let level = sk.nodes[run[0] as usize].level;
+        let r = run
+            .iter()
+            .map(|&i| sk.nodes[i as usize].radius)
+            .fold(0.0f32, f32::max);
+        let e = rad.entry(level).or_insert((0.0, 0.0, 0));
+        e.0 += r;
+        e.1 = e.1.max(r);
+        e.2 += 1;
+    }
+    let mut rl: Vec<_> = rad.into_iter().collect();
+    rl.sort_by_key(|(l, _)| *l);
+    println!("
+level   mean radius   thickest");
+    for (level, (sum, max, n)) in &rl {
+        println!("  {level}      {:.3} m       {max:.3} m", sum / *n as f32);
     }
 
     // Spikes are already the cheap path; everything else is rings and end caps.

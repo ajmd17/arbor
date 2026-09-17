@@ -255,6 +255,8 @@ in vec3 a_pos;
 in vec3 a_normal;
 in vec2 a_uv;
 in vec4 a_tint;
+// Offset down the atlas to the cluster arrangement this card draws.
+in float a_atlas_v;
 uniform mat4 u_view_proj;
 uniform mat4 u_light_view_proj;
 uniform float u_normal_bias;
@@ -263,11 +265,13 @@ out vec3 v_normal;
 out vec2 v_card_uv;
 out vec4 v_tint;
 out vec4 v_shadow;
+out float v_atlas_v;
 void main() {
     v_world = a_pos;
     v_normal = a_normal;
     v_card_uv = a_uv;
     v_tint = a_tint;
+    v_atlas_v = a_atlas_v;
     v_shadow = u_light_view_proj * vec4(a_pos + a_normal * u_normal_bias, 1.0);
     gl_Position = u_view_proj * vec4(a_pos, 1.0);
 }"#;
@@ -277,6 +281,7 @@ in vec3 v_normal;
 in vec2 v_card_uv;
 in vec4 v_tint;
 in vec4 v_shadow;
+in float v_atlas_v;
 uniform vec3 u_cam_pos;
 uniform vec3 u_sun_dir;
 uniform vec3 u_sun_color;
@@ -357,9 +362,11 @@ float sample_shadow(vec4 sc, float ndl) {
 
 void main() {
     // A leaf is one quad seen from both sides: the lit face and the underside are
-    // different cells of the same atlas, picked per fragment.
+    // different cells of the same atlas, picked per fragment. Which arrangement of
+    // the cluster it reads is the card's own business and comes down the pipe with it,
+    // so one canopy is not one motif repeated everywhere.
     vec2 cell = gl_FrontFacing ? u_atlas_front : u_atlas_back;
-    vec2 uv = cell + v_card_uv * u_atlas_scale;
+    vec2 uv = cell + vec2(0.0, v_atlas_v) + v_card_uv * u_atlas_scale;
     vec4 tex = texture(u_albedo_tex, uv);
 
     // While a card is bigger than a pixel its filtered alpha *is* its coverage, and
@@ -449,15 +456,19 @@ pub fn leaf_fs() -> String {
 pub const LEAF_DEPTH_VS: &str = r#"#version 150
 in vec3 a_pos;
 in vec2 a_uv;
+in float a_atlas_v;
 uniform mat4 u_light_view_proj;
 out vec2 v_card_uv;
+out float v_atlas_v;
 void main() {
     v_card_uv = a_uv;
+    v_atlas_v = a_atlas_v;
     gl_Position = u_light_view_proj * vec4(a_pos, 1.0);
 }"#;
 
 pub const LEAF_DEPTH_FS: &str = r#"#version 150
 in vec2 v_card_uv;
+in float v_atlas_v;
 uniform vec2 u_atlas_scale;
 uniform vec2 u_atlas_front;
 uniform float u_alpha_cutoff;
@@ -465,8 +476,10 @@ uniform sampler2D u_albedo_tex;
 out vec4 out_color;
 void main() {
     // Without the same alpha test the depth pass uses, every leaf would cast the
-    // shadow of its bounding quad.
-    if (texture(u_albedo_tex, u_atlas_front + v_card_uv * u_atlas_scale).a < u_alpha_cutoff) {
+    // shadow of its bounding quad. It has to read the card's own arrangement too, or
+    // a card casts the shadow of a cluster it is not drawing.
+    vec2 uv = u_atlas_front + vec2(0.0, v_atlas_v) + v_card_uv * u_atlas_scale;
+    if (texture(u_albedo_tex, uv).a < u_alpha_cutoff) {
         discard;
     }
     out_color = vec4(1.0);

@@ -1,12 +1,21 @@
 //! Foliage as textured cards.
 //!
-//! Each leaf is a single quad anchored on a twig, so the shape of a leaf comes from
-//! the alpha channel of its texture rather than from geometry. What makes a canopy
-//! built this way read as foliage instead of as a heap of flat planes is the
-//! shading: card normals are blended toward the direction pointing out of the crown,
-//! curved across the width of each card, and darkened toward the interior. Those
-//! three together are what stop every leaf from flashing its flat plane at the light
-//! all at once.
+//! Each card is a single quad anchored on a twig, so the shape of what grows on it
+//! comes from the alpha channel of its texture rather than from geometry. For a
+//! species that clusters, one card is a whole shoot of leaves; `cluster` bakes those.
+//!
+//! What makes a canopy built this way read as foliage instead of as a heap of flat
+//! planes is the shading: card normals are blended toward the direction pointing out
+//! of the crown, curved across the width of each card, and darkened toward the
+//! interior. Those three together are what stop every leaf from flashing its flat
+//! plane at the light all at once.
+//!
+//! What stops it reading as a pattern is that no two cards are quite the same job:
+//! anchors are scattered along a twig rather than stepped, they are kept to the last
+//! stretch of it so the foliage is a shell over bare branchwork, each anchor carries
+//! a tuft fanned around it, and every card picks one of the baked arrangements to
+//! draw. Evenly spaced cards all drawing one cluster give a canopy with a single
+//! grain, and the eye finds that grain from a long way off.
 
 use glam::Vec3;
 
@@ -28,6 +37,10 @@ pub struct LeafMesh {
     /// these into whatever atlas cell it draws with, so the same mesh works for a
     /// front face and a back face.
     pub uvs: Vec<[f32; 2]>,
+    /// Which of the baked cluster arrangements this card samples, as an offset down
+    /// the atlas in texture space. The variants sit one under another, so a card
+    /// picks one by shifting where it reads rather than by changing its own uvs.
+    pub atlas_v: Vec<f32>,
     /// rgb is a per-leaf colour multiplier, a is a crown-depth shade term.
     pub tints: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
@@ -62,6 +75,8 @@ struct Card {
     length: f32,
     width: f32,
     hue: f32,
+    /// Offset down the atlas to the cluster arrangement this card draws.
+    atlas_v: f32,
 }
 
 pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
@@ -71,6 +86,10 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
         return mesh;
     }
 
+    // How many arrangements the cluster generator baked, which is how many a card has
+    // to choose between. A species with no cluster block draws art as authored, so it
+    // has exactly one.
+    let variants = lp.cluster.as_ref().map_or(1, |c| c.variants.max(1));
     let tree_rng = TreeRng::new(params.seed ^ 0x1EAF_1EAF_1EAF_1EAF);
     let mut cards: Vec<Card> = Vec::new();
 
@@ -82,7 +101,7 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
         if sk.nodes[first].level < lp.min_level {
             continue;
         }
-        place_on_stem(sk, lp, &tree_rng, &run, &mut cards);
+        place_on_stem(sk, lp, &tree_rng, &run, variants, &mut cards);
     }
 
     if cards.is_empty() {
@@ -93,6 +112,7 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
     mesh.positions.reserve(cards.len() * 4);
     mesh.normals.reserve(cards.len() * 4);
     mesh.uvs.reserve(cards.len() * 4);
+    mesh.atlas_v.reserve(cards.len() * 4);
     mesh.tints.reserve(cards.len() * 4);
     mesh.indices.reserve(cards.len() * 6);
     for card in &cards {
@@ -106,6 +126,7 @@ fn place_on_stem(
     lp: &LeafParams,
     tree_rng: &TreeRng,
     run: &[u32],
+    variants: u32,
     out: &mut Vec<Card>,
 ) {
     // Walk from the attachment point, the same polyline the bark tube is swept
@@ -125,12 +146,20 @@ fn place_on_stem(
 
     let mut rng = tree_rng.stream(sk.nodes[first].path);
     let spacing = (1.0 / lp.density).max(1e-3);
+    let jitter = lp.spacing_variance.clamp(0.0, 0.95);
+    // How far the tip is from every point on the run, so the leafy zone can be
+    // measured back from where the twig ends rather than forward from where it began.
+    let total: f32 = points
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).length())
+        .sum();
     let mut frame = ortho_of((points[1].0 - points[0].0).normalize_or(Vec3::Y));
     let mut azimuth = range_f32(&mut rng, 0.0, std::f32::consts::TAU);
     // Stagger the first leaf so twigs do not all start their sequence flush with
     // the junction.
     let mut until_next = range_f32(&mut rng, 0.0, spacing);
     let mut prev_dir = (points[1].0 - points[0].0).normalize_or(Vec3::Y);
+    let mut walked = 0.0f32;
 
     for w in 0..points.len() - 1 {
         let (a, r_a) = points[w];
@@ -147,7 +176,10 @@ fn place_on_stem(
         let mut travelled = 0.0;
         while until_next <= seg_len - travelled {
             travelled += until_next;
-            until_next = spacing;
+            // Anchors scattered rather than stepped: an even pitch draws a pinstripe
+            // down every twig and gives the whole canopy one grain, where scattering
+            // lets the cards bunch into masses and leave holes between them.
+            until_next = spacing * (1.0 + range_f32(&mut rng, -jitter, jitter));
             if out.len() >= MAX_LEAVES {
                 return;
             }
@@ -155,6 +187,16 @@ fn place_on_stem(
             let radius = r_a + (r_b - r_a) * t;
             if radius > lp.max_twig_radius {
                 continue;
+            }
+            // Leaves grow on this year's shoots, so the foliage is a shell over bare
+            // branchwork. The edge of the zone is drawn per anchor rather than at one
+            // distance, or every twig in the crown would go bare at the same depth and
+            // the shell would show its own surface.
+            if lp.leafy_length > 0.0 {
+                let to_tip = total - (walked + travelled);
+                if to_tip > lp.leafy_length * range_f32(&mut rng, 0.6, 1.4) {
+                    continue;
+                }
             }
             let at = a + dir * travelled;
             // Every card in a cluster shares one anchor and one base direction, and
@@ -174,6 +216,9 @@ fn place_on_stem(
                 } else {
                     0.0
                 };
+                // Cards in one tuft take different arrangements, so even a tuft seen
+                // close up is not the same shoot drawn twice.
+                let variant = range_f32(&mut rng, 0.0, variants as f32) as u32;
                 out.push(make_card(
                     lp,
                     &mut rng,
@@ -182,10 +227,12 @@ fn place_on_stem(
                     frame,
                     radius,
                     base_azimuth + fan,
+                    variant.min(variants - 1) as f32 / variants as f32,
                 ));
             }
         }
         until_next -= seg_len - travelled;
+        walked += seg_len;
     }
 }
 
@@ -198,6 +245,7 @@ fn make_card(
     frame: Vec3,
     twig_radius: f32,
     azimuth: f32,
+    atlas_v: f32,
 ) -> Card {
     let u = ortho_unit(frame, twig_dir);
     let v = twig_dir.cross(u);
@@ -237,6 +285,7 @@ fn make_card(
         length: (lp.card_length * scale).max(1e-3),
         width: (lp.card_width * scale).max(1e-3),
         hue: range_f32(rng, -1.0, 1.0),
+        atlas_v,
     }
 }
 
@@ -293,6 +342,7 @@ fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, ra
         mesh.normals
             .push((blended + bend).normalize_or(blended).to_array());
         mesh.uvs.push(uv);
+        mesh.atlas_v.push(card.atlas_v);
         mesh.tints.push(tint);
     }
     mesh.indices
@@ -389,6 +439,53 @@ mod tests {
             let expected = params.leaves.card_length * (1.0 + params.leaves.size_variance);
             assert!(length <= expected + 1e-3 && width > 0.0);
         }
+    }
+
+    #[test]
+    fn every_card_carries_a_cluster_variant_the_atlas_holds() {
+        // The offset is a jump down the atlas, so one past the end reads whatever
+        // happens to be below the sheet.
+        let params = oak();
+        let variants = params
+            .leaves
+            .cluster
+            .as_ref()
+            .map_or(1, |c| c.variants.max(1));
+        assert!(variants > 1, "the oak is meant to bake several arrangements");
+        let leaves = build_leaves(&crate::grow(&params), &params);
+        assert_eq!(leaves.atlas_v.len(), leaves.vertex_count());
+        let mut seen = vec![false; variants as usize];
+        for quad in leaves.atlas_v.chunks_exact(4) {
+            assert!(
+                quad.iter().all(|v| (*v - quad[0]).abs() < 1e-6),
+                "one card is reading two arrangements at once: {quad:?}"
+            );
+            let index = (quad[0] * variants as f32).round();
+            assert!(
+                (0.0..variants as f32).contains(&index)
+                    && (quad[0] - index / variants as f32).abs() < 1e-5,
+                "{} is not the offset of any baked variant",
+                quad[0]
+            );
+            seen[index as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "some arrangements are never drawn");
+    }
+
+    #[test]
+    fn a_leafy_length_keeps_the_foliage_to_the_ends_of_the_twigs() {
+        // What makes the canopy a shell over bare branchwork rather than a solid
+        // volume with every limb buried in it.
+        let mut params = oak();
+        params.leaves.leafy_length = 0.0;
+        let sk = crate::grow(&params);
+        let everywhere = build_leaves(&sk, &params).leaf_count();
+        params.leaves.leafy_length = 0.4;
+        let shell = build_leaves(&sk, &params).leaf_count();
+        assert!(
+            shell > 0 && shell < everywhere,
+            "a leafy length of 0.4 m kept {shell} of {everywhere} cards"
+        );
     }
 
     #[test]

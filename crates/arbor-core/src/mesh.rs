@@ -150,11 +150,15 @@ struct Irregular {
     /// Integer frequencies, so a cross-section closes on itself, with a phase and a
     /// twist each. Mixed rather than single so the bole is not a tidy cog.
     flutes: [(f32, f32, f32); 3],
-    /// Angular frequency, phase and weight of each swelling along the length.
-    swells: [(f32, f32, f32); 3],
+    /// Each swelling along the length: frequency, phase, weight, and how many times it
+    /// travels round the stem over one turn. That last term is what keeps a swelling
+    /// from being a ring.
+    swells: [(f32, f32, f32, f32); 3],
     burls: Vec<Burl>,
     collars: Vec<Collar>,
     active: bool,
+    /// A trunk has no parent to start inside, so it keeps its bark all the way down.
+    is_trunk: bool,
 }
 
 impl Irregular {
@@ -162,14 +166,22 @@ impl Irregular {
         Self {
             params: BarkIrregularity::default(),
             flutes: [(0.0, 0.0, 0.0); 3],
-            swells: [(0.0, 0.0, 0.0); 3],
+            swells: [(0.0, 0.0, 0.0, 0.0); 3],
             burls: Vec::new(),
             collars: Vec::new(),
             active: false,
+            is_trunk: false,
         }
     }
 
-    fn new(p: &BarkIrregularity, seed: u64, stem: u64, length: f32, radius: f32) -> Self {
+    fn new(
+        p: &BarkIrregularity,
+        seed: u64,
+        stem: u64,
+        length: f32,
+        radius: f32,
+        is_trunk: bool,
+    ) -> Self {
         if radius < p.min_radius || length < 1e-3 {
             return Self::none();
         }
@@ -181,11 +193,16 @@ impl Irregular {
             ((base * 1.75).round().max(2.0), r(3) * TAU, (r(4) - 0.5) * p.flute_twist * TAU),
             ((base * 0.5).round().max(1.0), r(5) * TAU, (r(6) - 0.5) * p.flute_twist * TAU),
         ];
+        // Swellings travel round the bole as they climb it, so a bulge is a lump on one
+        // side rather than a ring at one height. A term that varies only along the stem
+        // puts the same bulge right the way round, and a bole built from those reads as
+        // a stack of discs. The periods are deliberately not multiples of each other,
+        // so a long stem never repeats the same profile twice.
         let period = p.swell_period.max(0.05);
         let swells = [
-            (TAU / period, r(7) * TAU, 0.6),
-            (TAU / (period * 0.45), r(8) * TAU, 0.3),
-            (TAU / (period * 0.2), r(9) * TAU, 0.1),
+            (TAU / period, r(7) * TAU, 0.55, 1.0),
+            (TAU / (period * 0.61), r(8) * TAU, 0.28, 2.0),
+            (TAU / (period * 0.27), r(9) * TAU, 0.17, 3.0),
         ];
 
         let count = (length * p.burl_density).round().max(0.0) as usize;
@@ -210,6 +227,7 @@ impl Irregular {
             burls,
             collars: Vec::new(),
             active: true,
+            is_trunk,
         }
     }
 
@@ -221,16 +239,22 @@ impl Irregular {
         }
         let p = &self.params;
         // Faded in off the socket, so a branch still starts inside its parent and the
-        // junction stays welded.
-        let fade = smoothstep(0.0, radius * 4.0, s);
+        // junction stays welded. A trunk has nothing to start inside, and fading it
+        // there left the one part of the tree people look at closest - the foot -
+        // as the only part with no bark relief on it at all.
+        let fade = if self.is_trunk {
+            1.0
+        } else {
+            smoothstep(0.0, radius * 4.0, s)
+        };
 
         let mut flute = 0.0;
         for (f, phase, twist) in self.flutes {
             flute += (a * f + phase + s * twist).sin() / f.max(1.0).sqrt();
         }
         let mut swell = 0.0;
-        for (w, phase, weight) in self.swells {
-            swell += (s * w + phase).sin() * weight;
+        for (w, phase, weight, around) in self.swells {
+            swell += (s * w + phase + a * around).sin() * weight;
         }
         let mut lumps = 0.0;
         for b in &self.burls {
@@ -487,6 +511,7 @@ impl StemPath {
             sk.nodes[first].stem as u64,
             *arc.last().unwrap_or(&0.0),
             radii.iter().copied().fold(0.0f32, f32::max),
+            is_trunk,
         );
         // A trunk thickens into every limb it carries. Collect where the children leave
         // so the bole can swell to meet them instead of meeting them at a seam.
@@ -572,15 +597,32 @@ impl StemPath {
         let e_r = n * a.cos() + b * a.sin();
         let shaped = base * self.irregular.shape(self.arc[i], a, e_r, base);
 
-        let y = self.points[i].y;
-        if self.is_trunk && y < mp.flare_height && mp.flare_height > 1e-4 {
-            let t = (y / mp.flare_height).clamp(0.0, 1.0);
-            let k = (1.0 - t) * (1.0 - t);
-            let lobe = 0.7 + 0.3 * (a * 3.0 + phase.0).sin() + 0.2 * (a * 7.0 + phase.1).sin();
-            shaped * (1.0 + mp.root_flare * k * lobe.max(0.2))
-        } else {
-            shaped
+        shaped * self.buttress(a, self.points[i].y, mp, phase)
+    }
+
+    /// Widening at the foot of the trunk, as a multiplier on the radius.
+    ///
+    /// A ring of peaked ridges rather than a cone: an old broadleaf stands on a few
+    /// buttress roots with hollows between them, and it is the hollows that make it
+    /// read as a root system rather than as a skirt. Everything here is a smooth
+    /// function of the angle, so the analytic normals follow it for free.
+    fn buttress(&self, a: f32, y: f32, mp: &MeshParams, phase: (f32, f32)) -> f32 {
+        if !self.is_trunk || y >= mp.flare_height || mp.flare_height <= 1e-4 {
+            return 1.0;
         }
+        let t = (y / mp.flare_height).clamp(0.0, 1.0);
+        let k = (1.0 - t).powf(mp.root_taper.max(0.2));
+        let n = mp.root_count.max(1) as f32;
+        // Warping the angle before the ridges are laid out spaces them unevenly,
+        // which is what a real root collar does and a cog does not.
+        let warped = a + 0.35 * (a + phase.1).sin();
+        let ridge = (0.5 + 0.5 * (n * warped + phase.0).cos()).powf(mp.root_sharpness.max(0.1));
+        // Roots are not evenly sized, so a slow wave rides over the ring of them, and
+        // each one carries finer ridges of its own: a real buttress is grooved, not a
+        // set of smooth cones.
+        let uneven = 0.72 + 0.28 * (a * 2.0 + phase.1).sin();
+        let grooves = 1.0 + mp.root_grooves * (a * n * 3.0 + phase.0 * 2.0).sin() * k;
+        1.0 + mp.root_flare * k * ridge * uneven * grooves
     }
 }
 
@@ -646,24 +688,80 @@ fn emit_spike(
     }
 }
 
-/// Sides swept around a stem, from how far the resulting polygon may sit inside the
-/// circle it stands for.
+/// Sides swept around a stem, from how far the swept polygon departs from the surface
+/// it stands for.
 ///
-/// Follows the thickest ring, so a tapering stem keeps its silhouette all the way down
-/// instead of being sized by its average. Solving the error bound rather than scaling
-/// a count by the radius is what lets a trunk and a twig both be right: the error of a
-/// polygon is proportional to the radius, so a fixed count per metre spends far too
-/// much on a twig and far too little on a limb.
-fn radial_for(path: &StemPath, mp: &MeshParams) -> u32 {
-    let r_max = path.radii.iter().copied().fold(0.0f32, f32::max) * path.socket[0];
+/// Solving `r * (1 - cos(pi / n)) = tol` would size a circle correctly, but a bole is
+/// not a circle: it is fluted, it stands on buttress roots, and it swells where limbs
+/// leave it. A side count taken from the radius alone cannot see any of that, and the
+/// detail comes out faceted however fine the tolerance is set. So the profile is
+/// sampled and the polygon measured against it directly, which sizes the sweep by the
+/// shape rather than by its girth.
+fn radial_for(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> u32 {
+    const SAMPLES: usize = 256;
     let tol = mp.silhouette_tolerance.max(1e-5);
-    let sides = if r_max <= tol {
-        3.0
-    } else {
-        // r * (1 - cos(pi / n)) = tol, solved for n.
-        PI / (1.0 - tol / r_max).clamp(-1.0, 1.0).acos()
+    let lo = mp.min_radial.max(3);
+    let hi = mp.max_radial.max(lo);
+
+    // The rings worth measuring: the widest few, where the detail is deepest.
+    let mut order: Vec<usize> = (0..path.len()).collect();
+    order.sort_by(|&a, &b| path.radii[b].total_cmp(&path.radii[a]));
+    order.truncate(4);
+
+    let mut needed = lo;
+    for &i in &order {
+        let profile: Vec<f32> = (0..SAMPLES)
+            .map(|k| path.radius_at(i, k as f32 / SAMPLES as f32 * TAU, mp, phase))
+            .collect();
+        needed = needed.max(sides_for_profile(&profile, tol, lo, hi));
+        if needed >= hi {
+            break;
+        }
+    }
+    needed
+}
+
+/// Smallest side count whose polygon stays within `tol` of the sampled profile.
+fn sides_for_profile(profile: &[f32], tol: f32, lo: u32, hi: u32) -> u32 {
+    for n in lo..hi {
+        if profile_error(profile, n) <= tol {
+            return n;
+        }
+    }
+    hi
+}
+
+/// How far an `n`-sided sweep of this profile sits from the profile itself.
+///
+/// The polygon edge between two surface points is a straight chord, whose distance
+/// from the centre at angle `a` has a closed form, so the error is read straight off
+/// the samples rather than by building the geometry.
+fn profile_error(profile: &[f32], n: u32) -> f32 {
+    let m = profile.len();
+    let at = |a: f32| -> f32 {
+        let t = a / TAU * m as f32;
+        let i = (t.floor() as usize) % m;
+        let f = t - t.floor();
+        profile[i] * (1.0 - f) + profile[(i + 1) % m] * f
     };
-    (sides.ceil() as i32).clamp(mp.min_radial.max(3) as i32, mp.max_radial.max(3) as i32) as u32
+    let step = TAU / n as f32;
+    let mut worst = 0.0f32;
+    for j in 0..n {
+        let a0 = j as f32 * step;
+        let a1 = a0 + step;
+        let (r0, r1) = (at(a0), at(a1));
+        // Walk the arc this edge spans and compare the surface with the chord.
+        for k in 1..8 {
+            let a = a0 + step * k as f32 / 8.0;
+            let denom = r0 * (a - a0).sin() + r1 * (a1 - a).sin();
+            if denom.abs() < 1e-6 {
+                continue;
+            }
+            let chord = r0 * r1 * step.sin() / denom;
+            worst = worst.max((at(a) - chord).abs());
+        }
+    }
+    worst
 }
 
 /// What one stem costs the mesh.
@@ -739,7 +837,7 @@ pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
             level: sk.nodes[stem[0] as usize].level,
             nodes: stem.len(),
             rings: path.len(),
-            radial: radial_for(&path, mp),
+            radial: radial_for(&path, mp, phase),
             triangles: sink.mesh.triangle_count(),
             vertices: sink.mesh.vertex_count(),
             spike: path.is_single_segment(),
@@ -763,7 +861,7 @@ fn child_index(sk: &Skeleton) -> Vec<Vec<u32>> {
 
 fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32, f32)) {
     let last = path.len() - 1;
-    let radial = radial_for(path, mp);
+    let radial = radial_for(path, mp, phase);
 
     // A single-segment branch is drawn as one cone from its anchor ring to a point,
     // rather than a ring pair swept into a tube and then capped with a cone as well.
@@ -1194,6 +1292,134 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "only {checked} junctions checked");
+    }
+
+    #[test]
+    fn a_buttressed_trunk_stands_on_distinct_roots() {
+        // The point of the buttress is the hollows between the roots, not the extra
+        // width: a cone of the same girth reads as a skirt. So count the ridges.
+        let mut params = parse_species(OAK_RON).unwrap();
+        params.mesh.root_count = 5;
+        params.mesh.root_sharpness = 0.9;
+        // Counting roots means counting roots. The finer grooves that ride on them are
+        // turned off here and checked separately below, and so is the bark relief,
+        // which now reaches the foot too and puts ridges of its own round it.
+        params.mesh.root_grooves = 0.0;
+        params.mesh.irregularity.flute_depth = 0.0;
+        params.mesh.irregularity.swell_depth = 0.0;
+        params.mesh.irregularity.burl_density = 0.0;
+        let sk = crate::grow(&params);
+        let path = trunk_path(&params, &sk);
+        let phase = seed_phases(params.seed);
+
+        const N: usize = 360;
+        let r: Vec<f32> = (0..N)
+            .map(|k| path.radius_at(0, k as f32 / N as f32 * TAU, &params.mesh, phase))
+            .collect();
+        let peaks = (0..N)
+            .filter(|&k| {
+                let prev = r[(k + N - 1) % N];
+                let next = r[(k + 1) % N];
+                r[k] > prev && r[k] >= next
+            })
+            .count();
+        assert_eq!(
+            peaks, 5,
+            "wanted five buttress roots round the foot, found {peaks}"
+        );
+
+        // And they have to stand proud of the hollows by a real margin.
+        let lo = r.iter().copied().fold(f32::MAX, f32::min);
+        let hi = r.iter().copied().fold(0.0f32, f32::max);
+        assert!(hi > lo * 1.5, "roots barely stand out: {lo} to {hi}");
+
+        // The buttress is a foot, not a taper: it has to be gone higher up the bole.
+        let high = path.len() - 1;
+        let top = path.radius_at(high, 0.0, &params.mesh, phase);
+        let top_wide = path.radius_at(high, PI, &params.mesh, phase);
+        assert!(
+            (top - top_wide).abs() < top * 0.5,
+            "the bole is still lobed at the top: {top} against {top_wide}"
+        );
+
+        // Grooves put finer relief on those roots without adding roots of their own.
+        params.mesh.root_grooves = 0.3;
+        let grooved: Vec<f32> = (0..N)
+            .map(|k| path.radius_at(0, k as f32 / N as f32 * TAU, &params.mesh, phase))
+            .collect();
+        let ripples = (0..N)
+            .filter(|&k| {
+                let prev = grooved[(k + N - 1) % N];
+                let next = grooved[(k + 1) % N];
+                grooved[k] > prev && grooved[k] >= next
+            })
+            .count();
+        assert!(
+            ripples > peaks * 2,
+            "grooves added no relief: {ripples} ripples against {peaks} roots"
+        );
+    }
+
+    #[test]
+    fn a_bole_swells_in_lumps_rather_than_rings() {
+        // A swelling that varies only along the stem puts the same bulge the whole way
+        // round it, and a bole built from those reads as a stack of tins. The part of
+        // the shape that is the same at every angle - the mean radius of a ring - must
+        // therefore follow the taper and nothing else, with the swelling living in the
+        // variation around the bole instead.
+        let mut params = parse_species(OAK_RON).unwrap();
+        // Configured for the property rather than borrowed from whatever the species
+        // is tuned to today: one long unforked bole with a pronounced swelling on it,
+        // so there is plenty to measure however the oak itself is set up.
+        params.trunk.length = 14.0;
+        params.trunk.split_probability = 0.0;
+        params.mesh.flare_height = 0.5;
+        params.mesh.irregularity.swell_depth = 0.14;
+        params.mesh.irregularity.swell_period = 2.0;
+        // Burls are meant to be local bumps, so they do move the ring mean. This is
+        // about the swelling, so they are out of the way.
+        params.mesh.irregularity.burl_density = 0.0;
+        params.mesh.irregularity.collar_depth = 0.0;
+        let sk = crate::grow(&params);
+        let path = trunk_path(&params, &sk);
+        let phase = seed_phases(params.seed);
+
+        const ANGLES: usize = 64;
+        let ring_mean = |i: usize| -> f32 {
+            (0..ANGLES)
+                .map(|k| path.radius_at(i, k as f32 / ANGLES as f32 * TAU, &params.mesh, phase))
+                .sum::<f32>()
+                / ANGLES as f32
+        };
+        // Above the buttress, where taper is the only thing left that may change girth.
+        let above: Vec<usize> = (0..path.len())
+            .filter(|&i| path.points[i].y > params.mesh.flare_height * 1.15)
+            .collect();
+        assert!(above.len() > 10, "only {} rings above the flare", above.len());
+
+        let mean: Vec<f32> = above.iter().map(|&i| ring_mean(i)).collect();
+        let rises = mean.windows(2).filter(|w| w[1] > w[0] * 1.002).count();
+        assert!(
+            rises <= 1,
+            "the bole puts {rises} rings of swelling round itself: {mean:?}"
+        );
+
+        // The swelling still has to be there, just round the bole rather than along it.
+        let spread = above
+            .iter()
+            .map(|&i| {
+                let r: Vec<f32> = (0..ANGLES)
+                    .map(|k| path.radius_at(i, k as f32 / ANGLES as f32 * TAU, &params.mesh, phase))
+                    .collect();
+                let lo = r.iter().copied().fold(f32::MAX, f32::min);
+                let hi = r.iter().copied().fold(0.0f32, f32::max);
+                hi / lo
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            spread > 1.15,
+            "the bole came out round at every height: widest section only {spread}"
+        );
     }
 
     #[test]

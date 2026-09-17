@@ -136,8 +136,20 @@ pub struct MeshParams {
     /// only the finest hairs. Zero keeps every one of them.
     pub min_bark_radius: f32,
     pub max_radial: u32,
+    /// How much wider than the bole the buttress gets where it meets the ground.
     pub root_flare: f32,
+    /// How far up the bole the buttress reaches.
     pub flare_height: f32,
+    /// Buttress roots around the foot of the trunk. A mature broadleaf stands on a
+    /// handful of distinct ridges running down into the ground, not on a cone.
+    pub root_count: u32,
+    /// How peaked those ridges are. At 1 they are a smooth wave; higher narrows each
+    /// root and opens the hollow between them, which is what reads as buttressing.
+    pub root_sharpness: f32,
+    /// How quickly the buttress dies away with height. Higher keeps it to the foot.
+    pub root_taper: f32,
+    /// Depth of the finer grooves running down each buttress root.
+    pub root_grooves: f32,
     pub tip_length: f32,
     pub socket_flare: f32,
     /// Base name of the bark texture set under `assets/textures`.
@@ -155,6 +167,10 @@ impl Default for MeshParams {
             max_radial: 24,
             root_flare: 0.9,
             flare_height: 1.4,
+            root_count: 3,
+            root_sharpness: 1.0,
+            root_taper: 2.0,
+            root_grooves: 0.0,
             tip_length: 0.06,
             socket_flare: 0.35,
             bark_texture: "bark".to_string(),
@@ -327,6 +343,38 @@ pub struct LeafClusterParams {
     /// card scale is all a needle is.
     pub leaf_narrow: f32,
     pub angle_variance_deg: f32,
+    /// Roll around the shoot between one leaf and the next. A shoot puts its leaves
+    /// on a spiral, not in two flat rows, and that spiral is what the depth terms
+    /// below have to work with: at 180 degrees every leaf lands in the plane of the
+    /// card and the cluster comes out as a ladder of clones.
+    pub roll_deg: f32,
+    pub roll_variance_deg: f32,
+    /// How much a leaf is drawn as though it really pointed out of the card.
+    ///
+    /// The arrangement is worked out in three dimensions and then flattened, so a
+    /// leaf pointing out of the cell foreshortens along its length and a blade turned
+    /// edge-on narrows to a sliver. This is what gives one source leaf a whole range
+    /// of shapes and the cell a ragged outline. At 0 every leaf lies flat in the card
+    /// at full size, which is the ladder again.
+    pub depth: f32,
+    /// How far a leaf may twist about its own stalk. Blades that all lie in one plane
+    /// narrow together as the shoot rolls; spreading the twist keeps some of them
+    /// broad wherever they point.
+    pub blade_twist_deg: f32,
+    /// Darkening of the leaves that point away from the viewer, which is the only
+    /// depth cue a flat card has once the arrangement is flattened into it.
+    pub depth_shade: f32,
+    /// Spread of leaf size within one cluster, as a fraction.
+    pub size_variance: f32,
+    /// How irregularly the leaves are spaced along the shoot, in steps: at 0.5 a leaf
+    /// may sit halfway toward either neighbour.
+    pub spacing_variance: f32,
+    /// How far the shoot leans across the cell by its tip, as a fraction of the cell.
+    pub shoot_curve: f32,
+    /// Separate arrangements baked one under another, for the renderer to pick
+    /// between per card. One cluster repeated over a whole canopy is visible as a
+    /// motif however the cards are turned; a handful of them is not.
+    pub variants: u32,
     /// Where along the cell the first and last leaves attach, 1.0 being the base.
     pub shoot_base: f32,
     pub shoot_tip: f32,
@@ -350,6 +398,15 @@ impl Default for LeafClusterParams {
             tip_scale: 0.55,
             leaf_narrow: 1.0,
             angle_variance_deg: 11.0,
+            roll_deg: 137.5,
+            roll_variance_deg: 25.0,
+            depth: 0.8,
+            blade_twist_deg: 55.0,
+            depth_shade: 0.45,
+            size_variance: 0.28,
+            spacing_variance: 0.45,
+            shoot_curve: 0.06,
+            variants: 1,
             shoot_base: 0.99,
             shoot_tip: 0.26,
             source_aspect: 1.0,
@@ -370,6 +427,17 @@ pub struct LeafParams {
     pub max_twig_radius: f32,
     /// Cluster anchors per metre of twig. Each anchor carries `cluster_size` cards.
     pub density: f32,
+    /// How irregular the gaps between anchors are, as a fraction of the mean gap.
+    /// Evenly spaced anchors read as a pinstripe along every twig and give the whole
+    /// canopy one grain; scattering them is what lets the cards bunch and leave holes.
+    pub spacing_variance: f32,
+    /// Metres back from the tip of a twig that carry leaves, 0 for all of it.
+    ///
+    /// A tree bears its leaves on the shoots it grew this year, so the foliage is a
+    /// shell over bare branchwork rather than a solid volume. Without this the crown
+    /// fills in solid to the trunk: every limb is buried, the silhouette is one dome,
+    /// and none of the light and shade that comes of masses standing apart survives.
+    pub leafy_length: f32,
     /// Leaves emitted together at one point on a twig. Real foliage grows in tufts,
     /// and clumping the cards gives a canopy of masses and gaps instead of a uniform
     /// spray, for the same number of triangles.
@@ -422,6 +490,8 @@ impl Default for LeafParams {
             min_level: 2,
             max_twig_radius: 0.08,
             density: 14.0,
+            spacing_variance: 0.6,
+            leafy_length: 0.0,
             cluster_size: 3,
             cluster_spread_deg: 38.0,
             card_length: 0.22,

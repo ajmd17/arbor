@@ -20,6 +20,16 @@ use crate::species::LeafClusterParams;
 
 /// Alpha above which a pixel counts as part of the leaf when measuring its extent.
 const BOUNDS_CUTOFF: u8 = 8;
+/// Ceiling on the arrangements baked into one sheet, so a species cannot ask for an
+/// atlas that will not fit on a GPU.
+const MAX_VARIANTS: u32 = 16;
+/// Decorrelates one variant's random stream from the next.
+const VARIANT_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+/// Narrowest a blade may be squeezed by turning away from the card, as a fraction of
+/// its own width. A real leaf has thickness and a curl, so even edge-on it is a
+/// sliver rather than nothing, and a cluster that let leaves vanish would lose the
+/// coverage clustering exists to buy.
+const MIN_BLADE_WIDTH: f32 = 0.22;
 
 /// Decoded RGBA8 pixels, the currency between the image decoder and this module.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,20 +205,27 @@ struct Placement {
     cos: f32,
     sin: f32,
     /// Source pixels per destination pixel, across the leaf and along it. They differ
-    /// when a species narrows its leaves into needles.
+    /// when a species narrows its leaves into needles, and again for every leaf once
+    /// the arrangement is flattened, since a blade turned away from the card covers
+    /// less of it.
     inv_scale_x: f32,
     inv_scale_y: f32,
     /// -1 when the leaf is mirrored onto the other side of the shoot.
     mirror: f32,
     pivot: (f32, f32),
     bounds: (i32, i32, i32, i32),
+    /// Multiplier on this leaf's colour, so the ones behind the shoot come out darker.
+    value: f32,
 }
 
-/// Composites `cols` x `rows` cluster cells out of the matching cells of `src`.
+/// Composites `cols` x `rows` cluster cells out of the matching cells of `src`, once
+/// per variant, stacking the variants down the sheet.
 ///
-/// Every cell takes the same placements, so the front and back faces of a card share
-/// one silhouette and cannot show through each other. All three maps composite through
-/// the albedo's coverage, so they keep agreeing pixel for pixel.
+/// Within one variant every cell takes the same placements, so the front and back
+/// faces of a card share one silhouette and cannot show through each other. All three
+/// maps composite through the albedo's coverage, so they keep agreeing pixel for
+/// pixel. Variants are a different matter: each is its own arrangement, and the
+/// renderer picks between them per card so a canopy is not one motif repeated.
 pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) -> BakedMaps {
     let cols = cols.max(1);
     let rows = rows.max(1);
@@ -240,21 +257,28 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
             roughness: src.roughness.cloned(),
         };
     };
-    let places = lay_out(p, size, bounds);
 
-    let mut albedo = Bitmap::new(size * cols, size * rows);
-    let mut normal = src.normal.map(|_| Bitmap::new(size * cols, size * rows));
-    let mut roughness = src.roughness.map(|_| Bitmap::new(size * cols, size * rows));
-    for (i, (a, n, r)) in cells.iter().enumerate() {
-        let ox = (i as u32 % cols) * size;
-        let oy = (i as u32 / cols) * size;
-        let baked = composite(&places, size, bounds, a, n.as_ref(), r.as_ref());
-        blit(&mut albedo, &baked.albedo, ox, oy);
-        if let (Some(dst), Some(s)) = (normal.as_mut(), baked.normal.as_ref()) {
-            blit(dst, s, ox, oy);
-        }
-        if let (Some(dst), Some(s)) = (roughness.as_mut(), baked.roughness.as_ref()) {
-            blit(dst, s, ox, oy);
+    let variants = p.variants.clamp(1, MAX_VARIANTS);
+    let sheet = || Bitmap::new(size * cols, size * rows * variants);
+    let mut albedo = sheet();
+    let mut normal = src.normal.map(|_| sheet());
+    let mut roughness = src.roughness.map(|_| sheet());
+    for v in 0..variants {
+        // Each variant is a shoot in its own right, so it gets its own stream rather
+        // than a continuation of the last one: a species stays reproducible even if
+        // the count of variants changes under it.
+        let places = lay_out(p, size, bounds, p.seed ^ (v as u64).wrapping_mul(VARIANT_STRIDE));
+        for (i, (a, n, r)) in cells.iter().enumerate() {
+            let ox = (i as u32 % cols) * size;
+            let oy = (v * rows + i as u32 / cols) * size;
+            let baked = composite(&places, size, bounds, a, n.as_ref(), r.as_ref());
+            blit(&mut albedo, &baked.albedo, ox, oy);
+            if let (Some(dst), Some(s)) = (normal.as_mut(), baked.normal.as_ref()) {
+                blit(dst, s, ox, oy);
+            }
+            if let (Some(dst), Some(s)) = (roughness.as_mut(), baked.roughness.as_ref()) {
+                blit(dst, s, ox, oy);
+            }
         }
     }
 
@@ -273,72 +297,162 @@ fn blit(dst: &mut Bitmap, src: &Bitmap, ox: u32, oy: u32) {
     }
 }
 
-/// Leaves alternating down a shoot, splayed wide at the base and closing toward the
-/// tip. That taper is what gives the cell a leaf-like silhouette of its own, so a card
-/// reads as a leafy shoot rather than as a rectangle of foliage.
-fn lay_out(p: &LeafClusterParams, size: u32, src: (u32, u32, u32, u32)) -> Vec<Placement> {
+/// A shoot's worth of leaves, arranged in three dimensions and then flattened into
+/// the cell.
+///
+/// The arrangement is the whole difference between a card that reads as foliage and
+/// one that reads as a pattern. Leaves go on a spiral round the shoot, not in two flat
+/// rows, at a crotch angle that closes from base to tip, and each twists about its own
+/// stalk. All of it is worked out as though the shoot stood in space and only then
+/// projected onto the card: a leaf pointing out of the cell foreshortens along its
+/// length, a blade turned edge-on narrows to a sliver, and whatever lies behind the
+/// shoot is darkened and drawn first. One source leaf therefore covers the cell in a
+/// whole range of apparent shapes and sizes, the outline comes out ragged, and the eye
+/// reads depth in something that is flat.
+///
+/// `seed` rather than `p.seed`, because every variant of a cluster is its own shoot.
+fn lay_out(
+    p: &LeafClusterParams,
+    size: u32,
+    src: (u32, u32, u32, u32),
+    seed: u64,
+) -> Vec<Placement> {
     let (bx0, by0, bx1, by1) = src;
     let pivot = ((bx0 + bx1) as f32 * 0.5, by1 as f32);
     let leaf_px = (by1 - by0 + 1) as f32;
 
-    let mut rng = SmallRng::seed_from_u64(p.seed);
+    let mut rng = SmallRng::seed_from_u64(seed);
     let cell = size as f32;
     let count = p.count.clamp(1, 512);
-    let mut places = Vec::with_capacity(count as usize);
+    let narrow = p.leaf_narrow.clamp(0.02, 4.0);
+    let depth = p.depth.clamp(0.0, 1.0);
+    let angle_jitter = p.angle_variance_deg.abs().max(1e-4);
+    let roll_jitter = p.roll_variance_deg.abs().max(1e-4);
+    let size_jitter = p.size_variance.abs().max(1e-4);
+    let twist_jitter = p.blade_twist_deg.abs().max(1e-4);
+    let space_jitter = p.spacing_variance.abs().max(1e-4);
+
+    let mut roll = rng.random_range(0.0..std::f32::consts::TAU);
+    let mut placed: Vec<(f32, Placement)> = Vec::with_capacity(count as usize);
 
     for i in 0..count {
+        // A shoot does not lay its leaves down against a ruler, so the step from one
+        // to the next carries its own jitter rather than every cluster in the canopy
+        // sharing one rhythm.
+        let step = i as f32 + rng.random_range(-space_jitter..=space_jitter);
         let t = if count > 1 {
-            i as f32 / (count - 1) as f32
+            (step / (count - 1) as f32).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        // Emitted base first, so leaves nearer the base sit behind the ones above.
-        let side = if i % 2 == 0 { 1.0f32 } else { -1.0 };
-        let jitter = p.angle_variance_deg.abs().max(1e-4);
-        let splay = (p.base_angle_deg
+
+        roll += (p.roll_deg + rng.random_range(-roll_jitter..=roll_jitter)).to_radians();
+        let crotch = (p.base_angle_deg
             + (p.tip_angle_deg - p.base_angle_deg) * t
-            + rng.random_range(-jitter..=jitter))
+            + rng.random_range(-angle_jitter..=angle_jitter))
         .to_radians();
+
+        // The leaf in three dimensions: x across the cell, y up it toward the tip of
+        // the shoot, z out of the card toward the viewer.
+        let (sc, cc) = crotch.sin_cos();
+        let (sr, cr) = roll.sin_cos();
+        let (dx, dy, dz) = (sc * cr, cc, sc * sr);
+
+        // Flattening it. Whatever points out of the card is lost from the leaf's
+        // apparent length, and `depth` decides how much of that loss is taken: a blade
+        // is not a line, so even one aimed straight at the viewer shows something of
+        // itself.
+        let flat = (dx * dx + dy * dy).sqrt();
+        let along_len = 1.0 + depth * (flat - 1.0);
+        let (sin, cos) = if flat > 1e-4 {
+            (dx / flat, dy / flat)
+        } else {
+            (0.0, 1.0)
+        };
+
+        // The blade is a plane through the leaf's own length. Untwisted it stands
+        // edge-up off the shoot; the twist rolls it about its stalk toward lying flat.
+        // What survives the projection is the part of it running across the leaf, and
+        // that is what decides how broad the blade comes out.
+        let twist = rng.random_range(-twist_jitter..=twist_jitter).to_radians();
+        let (st, ct) = twist.sin_cos();
+        let across = (ct * sr - st * cc * cr, st * sc);
+        let seen = (across.0 * cos - across.1 * sin).abs();
+        let broad = MIN_BLADE_WIDTH + (1.0 - MIN_BLADE_WIDTH) * seen;
+        let across_width = 1.0 + depth * (broad - 1.0);
+
         let scale_t = 1.0 + (p.tip_scale - 1.0) * t;
-        let scale = (scale_t * (1.0 + rng.random_range(-0.10f32..=0.10))).max(0.05);
-
-        let along = p.shoot_base + (p.shoot_tip - p.shoot_base) * t;
-        let attach = (
-            (0.5 + rng.random_range(-0.012f32..=0.012)) * cell,
-            (along + rng.random_range(-0.012f32..=0.012)) * cell,
-        );
-
-        // Rotation is measured off straight up the cell, then mirrored per side, so
-        // both sides splay outward by the same angle.
-        let (sin, cos) = (splay * side).sin_cos();
+        let scale = (scale_t * (1.0 + rng.random_range(-size_jitter..=size_jitter))).max(0.05);
         let scale_px = (p.leaf_length * scale * cell) / leaf_px.max(1.0);
-        let narrow = p.leaf_narrow.clamp(0.02, 4.0);
+        let scale_x = (scale_px * narrow * across_width).max(1e-4);
+        let scale_y = (scale_px * along_len).max(1e-4);
 
+        // The shoot itself leans as it climbs, so a cluster is not built on a plumb
+        // line, and the leaves ride that lean.
+        let along = p.shoot_base + (p.shoot_tip - p.shoot_base) * t;
+        let lean = p.shoot_curve * t * t;
         let mut place = Placement {
-            attach,
+            attach: (
+                (0.5 + lean + rng.random_range(-0.02f32..=0.02)) * cell,
+                (along + rng.random_range(-0.02f32..=0.02)) * cell,
+            ),
             cos,
             sin,
-            inv_scale_x: 1.0 / (scale_px * narrow).max(1e-6),
-            inv_scale_y: 1.0 / scale_px.max(1e-6),
-            mirror: side,
+            inv_scale_x: 1.0 / scale_x,
+            inv_scale_y: 1.0 / scale_y,
+            // Which way a leaf points decides which of its own sides faces out, so the
+            // veining and the notch at its base alternate down the shoot.
+            mirror: if dx >= 0.0 { 1.0 } else { -1.0 },
             pivot,
             bounds: (0, 0, 0, 0),
+            // Everything behind the shoot is in the shoot's own shade. It is the only
+            // depth cue a card has left once the arrangement has been flattened into
+            // it, and without it a cluster lights as one flat sheet of colour.
+            value: 1.0 - p.depth_shade.clamp(0.0, 1.0) * 0.5 * (1.0 - dz),
         };
-        place.bounds = dest_bounds(&place, scale_px * narrow, scale_px, src, size);
-        places.push(place);
+
+        let (lo, hi) = extent(&place, scale_x, scale_y, src);
+        place.attach.0 += nudge_inside(lo.0, hi.0, cell);
+        place.attach.1 += nudge_inside(lo.1, hi.1, cell);
+
+        place.bounds = dest_bounds(&place, scale_x, scale_y, src, size);
+        placed.push((dz, place));
     }
-    places
+
+    // Painter's order for a spray that has depth: whatever sits behind goes down
+    // first. Laying them base to tip instead gives the tidy overlapping stack of a
+    // fern frond, which no broadleaf shoot has.
+    placed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    placed.into_iter().map(|(_, place)| place).collect()
 }
 
-/// Where the source leaf's opaque box lands in the cell, so the resample only walks
-/// the pixels a leaf can actually reach.
-fn dest_bounds(
+/// How far to slide an attachment point so the leaf hanging off it sits inside the
+/// cell.
+///
+/// A leaf cut off by the edge leaves a straight line across the foliage, and cells
+/// butt up against their neighbours in the atlas, so the cut shows up on a card's
+/// front and its back at once. Sliding the attachment beats shrinking the leaf, which
+/// would quietly break the size the species asked for; it also crowds the leaves
+/// toward the tip, which is where a shoot really does carry them closest together.
+/// A leaf too big for the cell at all cannot be saved, so it is centred and loses the
+/// same amount at both ends rather than all of it at one.
+fn nudge_inside(lo: f32, hi: f32, cell: f32) -> f32 {
+    // A pixel of slack at each end: the resample reaches one past the leaf all round
+    // to keep its edge smooth.
+    let (low, high) = (1.0, cell - 2.0);
+    if hi - lo > high - low {
+        return (low + high - lo - hi) * 0.5;
+    }
+    (low - lo).max(0.0) - (hi - high).max(0.0)
+}
+
+/// The continuous box the source leaf's opaque region lands in.
+fn extent(
     p: &Placement,
     scale_x: f32,
     scale_y: f32,
     src: (u32, u32, u32, u32),
-    size: u32,
-) -> (i32, i32, i32, i32) {
+) -> ((f32, f32), (f32, f32)) {
     let (x0, y0, x1, y1) = src;
     let mut lo = (f32::MAX, f32::MAX);
     let mut hi = (f32::MIN, f32::MIN);
@@ -355,6 +469,19 @@ fn dest_bounds(
         lo = (lo.0.min(x), lo.1.min(y));
         hi = (hi.0.max(x), hi.1.max(y));
     }
+    (lo, hi)
+}
+
+/// Where that box lands as whole pixels, so the resample only walks the pixels a leaf
+/// can actually reach.
+fn dest_bounds(
+    p: &Placement,
+    scale_x: f32,
+    scale_y: f32,
+    src: (u32, u32, u32, u32),
+    size: u32,
+) -> (i32, i32, i32, i32) {
+    let (lo, hi) = extent(p, scale_x, scale_y, src);
     let last = size as i32 - 1;
     (
         (lo.0.floor() as i32 - 1).clamp(0, last),
@@ -412,7 +539,7 @@ fn composite(
                 let keep = 1.0 - a;
 
                 for k in 0..3 {
-                    acc_rgb[i][k] = src[k] * a + acc_rgb[i][k] * keep;
+                    acc_rgb[i][k] = src[k] * p.value * a + acc_rgb[i][k] * keep;
                 }
                 if let Some(map) = normal {
                     let t = map.sample(sx, sy).unwrap_or([0.5, 0.5, 1.0, 1.0]);
@@ -555,6 +682,7 @@ fn to_u8(v: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::species::parse_species;
 
     /// A tall thin blade on a transparent sheet, standing on the bottom edge: the
     /// shape every leaf texture in the project has.
@@ -573,8 +701,28 @@ mod tests {
 
     fn params() -> LeafClusterParams {
         LeafClusterParams {
-            count: 16,
+            count: 32,
             cell_size: 128,
+            ..LeafClusterParams::default()
+        }
+    }
+
+    /// One leaf standing straight up the cell at a known size, for the tests that
+    /// measure what came out against what was asked for. Everything that would move
+    /// it is off: an arrangement is not what those are about.
+    fn upright(leaf_length: f32) -> LeafClusterParams {
+        LeafClusterParams {
+            count: 1,
+            cell_size: 256,
+            leaf_length,
+            base_angle_deg: 0.0,
+            tip_angle_deg: 0.0,
+            angle_variance_deg: 0.0,
+            tip_scale: 1.0,
+            size_variance: 0.0,
+            spacing_variance: 0.0,
+            shoot_curve: 0.0,
+            shoot_base: 1.0,
             ..LeafClusterParams::default()
         }
     }
@@ -695,19 +843,8 @@ mod tests {
         // by quietly shrinking them: a card scaled to the cluster must still show a
         // leaf of the length the species asked for.
         let src = leaf(256, 256, 120);
-        let p = LeafClusterParams {
-            count: 1,
-            cell_size: 256,
-            leaf_length: 0.5,
-            base_angle_deg: 0.0,
-            tip_angle_deg: 0.0,
-            angle_variance_deg: 0.0,
-            tip_scale: 1.0,
-            shoot_base: 1.0,
-            ..LeafClusterParams::default()
-        };
         let baked = bake_cluster(
-            &p,
+            &upright(0.5),
             1,
             1,
             LeafMaps {
@@ -718,9 +855,10 @@ mod tests {
         );
         let (_, y0, _, y1) = baked.albedo.alpha_bounds(BOUNDS_CUTOFF).expect("a leaf");
         let got = (y1 - y0 + 1) as f32 / 256.0;
-        // One leaf, upright, asked to be half the cell. The jitter on scale is +-10%.
+        // One leaf, upright, asked to be half the cell, with every source of jitter
+        // turned off: it has to come out at the length it was promised.
         assert!(
-            (got - 0.5).abs() < 0.08,
+            (got - 0.5).abs() < 0.02,
             "leaf came out {got} of the cell, wanted 0.5"
         );
     }
@@ -730,21 +868,13 @@ mod tests {
         // A conifer with no needle art of its own gets its needles this way, so the
         // control has to touch width alone: a shorter leaf would be a smaller leaf.
         let src = leaf(256, 256, 120);
-        let upright = |narrow: f32| LeafClusterParams {
-            count: 1,
-            cell_size: 256,
-            leaf_length: 0.5,
-            base_angle_deg: 0.0,
-            tip_angle_deg: 0.0,
-            angle_variance_deg: 0.0,
-            tip_scale: 1.0,
-            shoot_base: 1.0,
+        let thinned = |narrow: f32| LeafClusterParams {
             leaf_narrow: narrow,
-            ..LeafClusterParams::default()
+            ..upright(0.5)
         };
         let measure = |narrow: f32| {
             let baked = bake_cluster(
-                &upright(narrow),
+                &thinned(narrow),
                 1,
                 1,
                 LeafMaps {
@@ -765,6 +895,153 @@ mod tests {
         assert!(
             (thin_h - wide_h).abs() < wide_h * 0.02,
             "length changed with width: {wide_h} to {thin_h}"
+        );
+    }
+
+    #[test]
+    fn no_leaf_is_cut_off_by_the_edge_of_its_cell() {
+        // Cells butt up against their neighbours in the atlas, so a leaf that ran over
+        // the edge would be sliced by a straight line and would also bleed into the
+        // cell next door. Checked on a cell packed hard enough to push against it.
+        let src = leaf(256, 256, 120);
+        // Packed hard, splayed wide and leaning, but with leaves that do fit the cell:
+        // one longer than the cell itself cannot be saved by moving it.
+        let p = LeafClusterParams {
+            count: 40,
+            cell_size: 192,
+            leaf_length: 0.42,
+            base_angle_deg: 95.0,
+            tip_angle_deg: 40.0,
+            shoot_curve: 0.3,
+            ..LeafClusterParams::default()
+        };
+        let baked = bake_cluster(
+            &p,
+            1,
+            1,
+            LeafMaps {
+                albedo: &src,
+                normal: None,
+                roughness: None,
+            },
+        );
+        let img = &baked.albedo;
+        let last = img.width - 1;
+        for i in 0..img.width {
+            for (x, y) in [(i, 0), (i, last), (0, i), (last, i)] {
+                assert_eq!(img.at(x, y)[3], 0, "foliage reaches the cell edge at {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_oak_arrangement_stays_off_its_own_cell_edges() {
+        // The preset has to be one of the arrangements that fits, in every variant it
+        // bakes, or the canopy shows straight cuts across its foliage.
+        let src = leaf(256, 256, 120);
+        let oak = parse_species(crate::species::OAK_RON).expect("the oak preset parses");
+        let p = LeafClusterParams {
+            cell_size: 192,
+            ..oak.leaves.cluster.expect("the oak clusters its leaves")
+        };
+        let baked = bake_cluster(
+            &p,
+            1,
+            1,
+            LeafMaps {
+                albedo: &src,
+                normal: None,
+                roughness: None,
+            },
+        );
+        let img = &baked.albedo;
+        assert_eq!(img.height, img.width * p.variants);
+        let last = img.width - 1;
+        for v in 0..p.variants {
+            let top = v * img.width;
+            for i in 0..img.width {
+                for (x, y) in [(i, top), (i, top + last), (0, top + i), (last, top + i)] {
+                    assert_eq!(img.at(x, y)[3], 0, "variant {v} reaches its edge at {x},{y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn variants_are_different_arrangements_stacked_down_the_sheet() {
+        // The whole point of them: a canopy drawing one cluster everywhere shows the
+        // motif however the cards are turned.
+        let src = leaf(128, 128, 120);
+        let p = LeafClusterParams {
+            variants: 3,
+            ..params()
+        };
+        let baked = bake_cluster(
+            &p,
+            1,
+            1,
+            LeafMaps {
+                albedo: &src,
+                normal: None,
+                roughness: None,
+            },
+        );
+        let size = p.cell_size;
+        assert_eq!(baked.albedo.height, size * 3);
+        assert_eq!(baked.albedo.width, size);
+        let differing = |a: u32, b: u32| {
+            (0..size)
+                .flat_map(|y| (0..size).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    baked.albedo.at(*x, a * size + y)[3] != baked.albedo.at(*x, b * size + y)[3]
+                })
+                .count()
+        };
+        for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+            assert!(
+                differing(a, b) > (size * size / 20) as usize,
+                "variants {a} and {b} are near enough the same arrangement"
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_behind_the_shoot_come_out_darker_than_the_ones_in_front() {
+        // The depth cue that stops a cluster lighting as one flat sheet of colour.
+        // Measured as the spread of brightness over covered pixels, against the same
+        // arrangement with the shading turned off.
+        let src = leaf(192, 192, 120);
+        let spread = |depth_shade: f32| {
+            let p = LeafClusterParams {
+                count: 24,
+                cell_size: 160,
+                depth_shade,
+                ..LeafClusterParams::default()
+            };
+            let baked = bake_cluster(
+                &p,
+                1,
+                1,
+                LeafMaps {
+                    albedo: &src,
+                    normal: None,
+                    roughness: None,
+                },
+            );
+            let values: Vec<f32> = (0..baked.albedo.height)
+                .flat_map(|y| (0..baked.albedo.width).map(move |x| (x, y)))
+                .filter(|(x, y)| baked.albedo.at(*x, *y)[3] > 200)
+                .map(|(x, y)| baked.albedo.at(x, y)[1] as f32)
+                .collect();
+            assert!(values.len() > 500, "only {} covered pixels", values.len());
+            let mean = values.iter().sum::<f32>() / values.len() as f32;
+            (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt()
+        };
+        let flat = spread(0.0);
+        let shaded = spread(0.6);
+        assert!(
+            shaded > flat + 4.0,
+            "shading the depth barely moved the spread: {flat} to {shaded}"
         );
     }
 
