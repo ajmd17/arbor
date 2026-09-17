@@ -85,7 +85,30 @@ const DOMINANCE_SHAPE: f32 = 3.0;
 /// do the job it should: a suppressed stem has to come out genuinely short, or the
 /// dominant and the suppressed end up within a factor of two of each other and the
 /// crown reads as a bottle brush however unequally the drive was shared out.
-const LENGTH_FLOOR: f32 = 0.15;
+///
+/// It applies to a stem's thickness as well as its length, and it has to apply to both
+/// or the two come apart. Losing the contest should scale a stem down, not distort it:
+/// at the floor a stem is fifteen per cent of its declared length *and* fifteen per cent
+/// of its declared radius, which leaves its proportions where they were. Radius used to
+/// stop at `MIN_RADIUS` instead — an absolute four millimetres, the same for a trunk as
+/// for a twiglet — so a suppressed limb came out 15% as long but pinned to the thickness
+/// of a wire, at nearly four times the length-to-radius of its healthy neighbours. Those
+/// are the stringy bits.
+const SUPPRESSION_FLOOR: f32 = 0.15;
+
+/// The most a stem may grow past what its level declares, as a multiple of it.
+///
+/// Vigor is meant to modulate a stem's length, and mostly it shortens: a suppressed
+/// stem sits near `LENGTH_FLOOR`. But a little headroom above 1 is what keeps the
+/// siblings of one whorl from all pinning to the same number and growing as a wheel of
+/// identical spokes, which `siblings_in_a_whorl_get_different_lengths` watches for.
+///
+/// It used to be 1.6, and that was too much to be paid for twice: `length_variance`
+/// multiplies on top, so a level declaring 2.2 m with a variance of 0.4 could put out a
+/// stem of 4.9 m. Those are the stray hairs — single twigs two or three times the length
+/// of everything around them, running out of the crown with nothing on them. 1.15 is the
+/// most that can be allowed while the whorl still reads as siblings rather than spokes.
+const MAX_DRIVE: f32 = 1.15;
 
 /// A child settled on while its parent was still growing, held back until it has
 /// finished.
@@ -163,17 +186,8 @@ impl GrowCtx<'_> {
 pub fn grow(params: &SpeciesParams) -> Skeleton {
     let mut skeleton = Skeleton::default();
     let root = skeleton.push_node(None, Vec3::ZERO, 0, ROOT_PATH, 1.0, 0.0, TRUNK_STEM);
-    let levels_total = params
-        .max_levels
-        .min(params.branch_levels.len() as u8 + 1)
-        .max(1);
-    let mut nominal = Vec::with_capacity(levels_total as usize + 1);
-    nominal.push(1.0f32);
-    for level in 0..levels_total {
-        let scale = stem_params(params, level).map_or(1.0, |sp| sp.children.scale.max(1e-3));
-        let last = *nominal.last().expect("seeded with the trunk");
-        nominal.push(last * scale);
-    }
+    let levels_total = levels_total(params);
+    let nominal = nominal_vigor(params);
     let ctx = GrowCtx {
         env: params.envelope.scaled(params.envelope_scale),
         levels_total,
@@ -418,8 +432,9 @@ fn grow_stem(
     // for it twice over, so a level five deep ran at a tenth of its declared length
     // and no number in the species file meant what it said.
     let nominal = ctx.nominal(level);
-    let drive = (vigor / nominal).clamp(0.0, 1.6);
-    let length_factor = (LENGTH_FLOOR + (1.0 - LENGTH_FLOOR) * drive).min(1.6);
+    let drive = (vigor / nominal).clamp(0.0, MAX_DRIVE);
+    let length_factor =
+        (SUPPRESSION_FLOOR + (1.0 - SUPPRESSION_FLOOR) * drive).min(MAX_DRIVE);
     let mut stem_len = sp.length
         * length_factor
         * range_f32(&mut rng, 1.0 - sp.length_variance, 1.0 + sp.length_variance).max(0.2);
@@ -546,10 +561,39 @@ fn grow_stem(
             );
         }
 
+        // The most a fork taken here may grow, and the one thing a fork was never held
+        // to. A lateral answers to `lateral_cap`; the fork was exempted from it on the
+        // grounds that it is the same axis carrying on, and so grew against nothing but
+        // its own level's declared length however far out it was taken.
+        //
+        // That exemption is the argument for capping it against the axis, not for
+        // letting it run. A subordinate fork — `split_evenness` at zero, which is every
+        // conifer here — is a side branch by the species file's own account, and it
+        // divides what the stem has left rather than starting a fresh run of its own.
+        // Letting it start one is where the stringy bits come from: it takes 72% of the
+        // drive, which buys most of a limb's length wherever along the parent it is
+        // taken, while its thickness is capped at `radius_ratio` of a parent that has
+        // already tapered. A fork four fifths of the way out starts at a fifth of a
+        // limb's radius and still grows half a limb's length, and it and everything it
+        // carries sit near `MIN_RADIUS` — a crown's worth of wire hanging off one point.
+        //
+        // A co-dominant fork keeps the exemption, because for that one the claim is
+        // true: an oak trading its trunk for two leaders is the axis starting again,
+        // not dividing, and holding each half to what the trunk had left would cost the
+        // tree its crown. `split_evenness` already says which of the two a fork is, so
+        // it is what moves the cap between them.
+        let evenness = sp.split_evenness.clamp(0.0, 1.0);
+        let remaining = stem_len - grown_len;
+        let fork_max = (remaining + (max_len - remaining) * evenness).min(max_len);
         if can_spawn
             && split_depth < ctx.params.max_split_depth
             && sp.split_probability > 0.0
             && frac >= sp.split_start_fraction
+            // A fork with less than a couple of segments to divide is not a fork. The
+            // stem is within a twig's length of finishing and the level below is already
+            // putting twigs there; splitting the axis this late only adds a second tip
+            // beside the one that was coming anyway.
+            && fork_max >= sp.segment_length * 2.0
             && skeleton.nodes.len() < MAX_NODES
             && rng.random::<f32>() < sp.split_probability
         {
@@ -564,7 +608,6 @@ fn grow_stem(
             // share and the fork is a side branch; at full evenness they come away
             // equal and the stem stops being a leader at all, which is how a broadleaf
             // trades a single trunk for a crown of co-dominant limbs.
-            let evenness = sp.split_evenness.clamp(0.0, 1.0);
             let fork_share = SPLIT_VIGOR + (SPLIT_EVEN - SPLIT_VIGOR) * evenness;
             let keep_share = SPLIT_KEEP + (SPLIT_EVEN - SPLIT_KEEP) * evenness;
             grow_stem(
@@ -580,7 +623,7 @@ fn grow_stem(
                 fork_stem,
                 spray,
                 turn_budget,
-                max_len,
+                fork_max,
             );
             // The parent gives up part of its drive to the fork instead of both
             // halves carrying on at full strength.
@@ -909,6 +952,39 @@ fn rand_perpendicular(rng: &mut SmallRng, dir: Vec3) -> Vec3 {
     a * ang.cos() + b * ang.sin()
 }
 
+fn levels_total(params: &SpeciesParams) -> u8 {
+    params
+        .max_levels
+        .min(params.branch_levels.len() as u8 + 1)
+        .max(1)
+}
+
+/// The vigor a healthy stem at each level would carry, as the running product of the
+/// `scale` every level hands its children.
+///
+/// Both the length pass and the thickness pass measure a stem's drive against this
+/// rather than against the trunk's vigor outright, and they have to. `children.scale`
+/// already says how much smaller each level is, and that level's own `length` and
+/// `radius` say it again; charging a stem for its depth a second time by scaling with
+/// raw vigor compounds it, so a level four or five deep comes out at a fraction of
+/// everything its own line of the species file asks for.
+///
+/// The length pass was fixed for this long ago and the thickness pass was not, which is
+/// what made the stray hairs: level-2 stems were carrying vigor around 0.17 against a
+/// nominal of 0.28, so they came out at 19% of their declared radius — a twig a fifth
+/// of its proper thickness, which at any length reads as a wire rather than a branch.
+fn nominal_vigor(params: &SpeciesParams) -> Vec<f32> {
+    let total = levels_total(params);
+    let mut nominal = Vec::with_capacity(total as usize + 1);
+    nominal.push(1.0f32);
+    for level in 0..total {
+        let scale = stem_params(params, level).map_or(1.0, |sp| sp.children.scale.max(1e-3));
+        let last = *nominal.last().expect("seeded with the trunk");
+        nominal.push(last * scale);
+    }
+    nominal
+}
+
 /// Thickness is resolved in two passes: a top-down pass giving every stem a base
 /// radius that tapers along its own length, then a bottom-up pass that widens any
 /// node carrying more cross-section than its taper alone would provide.
@@ -917,6 +993,7 @@ fn resolve_radii(params: &SpeciesParams, skeleton: &mut Skeleton) {
     if n == 0 {
         return;
     }
+    let nominal = nominal_vigor(params);
     let mut radii = vec![0.0f32; n];
     // The untapered radius at the foot of the stem each node belongs to.
     let mut stem_base = vec![0.0f32; n];
@@ -941,10 +1018,29 @@ fn resolve_radii(params: &SpeciesParams, skeleton: &mut Skeleton) {
                     stem_base[p as usize]
                 } else {
                     // A new stem is sized by how much growth it actually carries -
-                    // its own level radius scaled by the vigor it started with, the
+                    // its own level radius scaled by the drive it started with, the
                     // same quantity that sets its length. The parent ratio is only a
                     // ceiling, so a short twig on a thick limb stays a twig.
-                    let own = lp.radius * vigor.clamp(0.0, 1.6);
+                    //
+                    // Drive, not raw vigor: measured against what a healthy stem at this
+                    // level would carry, exactly as the length pass measures it. See
+                    // `nominal_vigor` — using vigor here charged every stem for its own
+                    // depth twice and left the fine levels at a fifth of their declared
+                    // thickness.
+                    let n = nominal
+                        .get(level as usize)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .max(1e-4);
+                    let drive = (vigor / n).clamp(0.0, MAX_DRIVE);
+                    // Floored the same way the length is, so suppression scales a stem
+                    // rather than stretching it. `MIN_RADIUS` stays below as a backstop
+                    // against zero, but it should no longer be what decides a stem's
+                    // thickness: as an absolute length it made every suppressed stem the
+                    // same four millimetres whatever level it belonged to.
+                    let factor =
+                        (SUPPRESSION_FLOOR + (1.0 - SUPPRESSION_FLOOR) * drive).min(MAX_DRIVE);
+                    let own = lp.radius * factor;
                     let ceiling = lp.radius_ratio.clamp(0.05, 0.95) * radii[p as usize];
                     own.min(ceiling).max(MIN_RADIUS)
                 }
@@ -1509,6 +1605,139 @@ mod tests {
     }
 
     #[test]
+    fn a_vigorous_stem_may_not_run_past_its_ceiling() {
+        // The stray-hair failure, and the one end of this that was never guarded.
+        // `low_vigor_modulates_stem_length_instead_of_erasing_it` looks like it covers
+        // it — its own message says "vigor should not lengthen a stem past what it
+        // declares" — but it asserts that on the *shortest* stem of a species built to
+        // have low vigor throughout, so it can never see a stem running long. That is
+        // exactly the case that goes wrong: one twig several times its neighbours,
+        // running out past the foliage with nothing on it.
+        //
+        // So this one hands the children full drive instead, which is what puts them
+        // over the ceiling, and holds `length_variance` at zero so the ceiling is the
+        // only thing deciding the longest stem.
+        let mut params = SpeciesParams {
+            max_levels: 2,
+            max_split_depth: 0,
+            ..Default::default()
+        };
+        params.envelope.volumes = vec![crate::envelope::EnvelopeVolume::Ellipsoid {
+            center: [0.0, 0.0, 0.0],
+            radii: [500.0, 500.0, 500.0],
+        }];
+        params.trunk.split_probability = 0.0;
+        params.trunk.children.pattern = ChildPattern::Continuous { density: 1.0 };
+        // Full drive to the children, and a contest they can win outright, which is
+        // what carries a stem past nominal and into the ceiling. With the drive shared
+        // evenly no stem ever exceeds nominal and the ceiling is never reached, so the
+        // test would pass with the clamp taken out entirely.
+        params.trunk.children.scale = 1.0;
+        params.trunk.children.dominance = 0.95;
+        params.trunk.vigor_falloff = 0.0;
+        let branch = &mut params.branch_levels[0];
+        branch.length = 4.0;
+        branch.length_variance = 0.0;
+        branch.vigor_falloff = 0.0;
+        branch.split_probability = 0.0;
+
+        let declared = params.branch_levels[0].length;
+        let sk = grow(&params);
+        let longest = sk
+            .stem_runs()
+            .iter()
+            .filter(|run| sk.nodes[run[0] as usize].level == 1)
+            .map(|run| stem_length(&sk, run))
+            .fold(f32::MIN, f32::max);
+        assert!(
+            longest > declared * 0.5,
+            "the branches never grew, so nothing is being tested: {longest}"
+        );
+        assert!(
+            longest <= declared * MAX_DRIVE + 1e-3,
+            "a stem grew to {longest:.2} of a declared {declared:.2}, past the \
+             {:.2} that MAX_DRIVE allows; unbounded this is what makes the stray hairs",
+            declared * MAX_DRIVE
+        );
+    }
+
+    #[test]
+    fn a_subordinate_fork_may_not_out_run_the_stem_it_divides() {
+        // The stringy bits, and the other end of the stray-hair failure.
+        // `a_vigorous_stem_may_not_run_past_its_ceiling` holds a stem to its own
+        // level's declared length, which a fork never exceeded — the fault is that for
+        // a fork the declared length is the wrong measure entirely. A fork taken four
+        // fifths of the way along a limb came away with 72% of the drive and so grew
+        // most of a limb again, out of a point where the parent had tapered to a wire
+        // and `radius_ratio` held the fork to a couple of centimetres. Long, thin, and
+        // carrying a whole subtree pinned near `MIN_RADIUS` behind it.
+        //
+        // A subordinate fork divides what the stem has left rather than starting a
+        // fresh run, so the whole fork is measured against the length the parent still
+        // had ahead of it at the point it left, not against the level's `length`.
+        //
+        // Split from the very foot of the stem so the offence has the longest possible
+        // run to show up in, and with the crown big enough that nothing is pruned, so
+        // the length the fork reaches is the length the rule allowed it.
+        // Three levels, because a stem may only fork on a level that still has one
+        // below it to spawn into, so a two-level tree never forks a branch at all.
+        let mut params = SpeciesParams {
+            max_levels: 3,
+            max_split_depth: 1,
+            branch_levels: vec![
+                StemParams::branch_default(1),
+                StemParams::branch_default(2),
+            ],
+            ..Default::default()
+        };
+        params.envelope.volumes = vec![crate::envelope::EnvelopeVolume::Ellipsoid {
+            center: [0.0, 0.0, 0.0],
+            radii: [500.0, 500.0, 500.0],
+        }];
+        params.trunk.split_probability = 0.0;
+        params.trunk.children.pattern = ChildPattern::Continuous { density: 1.0 };
+        params.branch_levels[1].split_probability = 0.0;
+        let branch = &mut params.branch_levels[0];
+        branch.length = 8.0;
+        branch.length_variance = 0.0;
+        branch.vigor_falloff = 0.0;
+        // Every segment past the first forks, so the test sees forks taken at every
+        // fraction along the limb rather than only wherever a low rate happened to
+        // land them.
+        branch.split_probability = 1.0;
+        branch.split_evenness = 0.0;
+        branch.split_start_fraction = 0.0;
+
+        let sk = grow(&params);
+        let mut checked = 0;
+        for run in sk.stem_runs() {
+            let head = &sk.nodes[run[0] as usize];
+            let Some(parent) = head.parent else { continue };
+            let parent = &sk.nodes[parent as usize];
+            // A fork, rather than a lateral: the same level, carrying on off a stem of
+            // its own kind.
+            if parent.level != head.level || head.level == 0 {
+                continue;
+            }
+            let ahead = sk
+                .stem_runs()
+                .iter()
+                .find(|r| sk.nodes[r[0] as usize].stem == parent.stem)
+                .map(|r| stem_length(&sk, r))
+                .unwrap_or(0.0)
+                * (1.0 - parent.stem_fraction);
+            let grew = stem_length(&sk, &run);
+            checked += 1;
+            assert!(
+                grew <= ahead.max(0.2) * 1.35 + 1e-3,
+                "a fork leaving at {:.2} along its parent grew {grew:.2} m where the                  parent had {ahead:.2} m left to run; unbounded this is what makes the                  stringy bits",
+                parent.stem_fraction
+            );
+        }
+        assert!(checked > 5, "no forks were grown, so nothing is being tested");
+    }
+
+    #[test]
     fn low_vigor_modulates_stem_length_instead_of_erasing_it() {
         // Each level already declares its own length, so vigor may only modulate it.
         // Multiplying length by vigor as well shortens a stem once per level, and by
@@ -1568,7 +1797,7 @@ mod tests {
         // Vigor here is near zero, so every stem should sit at the floor. Scaling
         // length by vigor directly would put them near zero instead.
         assert!(
-            shortest >= declared * LENGTH_FLOOR - 1e-3,
+            shortest >= declared * SUPPRESSION_FLOOR - 1e-3,
             "a branch at minimum vigor is {shortest} of a declared {declared}"
         );
         assert!(

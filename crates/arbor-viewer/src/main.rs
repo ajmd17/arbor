@@ -87,8 +87,8 @@ const GRAVITY_MULTIPLIER: (f32, f32) = (0.0, 4.0);
 const PHOTOTROPISM_MULTIPLIER: (f32, f32) = (0.0, 4.0);
 const BRANCH_LEVELS: (i32, i32) = (1, 6);
 const LEAF_DENSITY: (f32, f32) = (0.5, 60.0);
-const CARD_LENGTH: (f32, f32) = (0.03, 1.2);
-const CARD_WIDTH: (f32, f32) = (0.02, 1.2);
+const CARD_LENGTH: (f32, f32) = (0.03, 2.0);
+const CARD_WIDTH: (f32, f32) = (0.02, 2.0);
 const NORMAL_BLEND: (f32, f32) = (0.0, 1.0);
 const LEAF_DROOP: (f32, f32) = (-40.0, 70.0);
 

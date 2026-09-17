@@ -153,7 +153,7 @@ fn douglas_fir_has_a_clear_bole_and_an_open_crown() {
 /// where it set out, the fir's rise and the spruce's fall, and no amount of shared
 /// silhouette changes that.
 #[test]
-fn open_grown_douglas_fir_is_a_broad_cone_that_still_hangs() {
+fn open_grown_douglas_fir_is_a_sparse_spire_that_still_hangs() {
     let params = parse_species(DOUGLAS_FIR_OPEN_RON).unwrap();
     let sk = grow(&params);
     let stats = sk.stats();
@@ -191,13 +191,18 @@ fn open_grown_douglas_fir_is_a_broad_cone_that_still_hangs() {
         forest_base * 100.0
     );
 
-    // Broad, and a cone: widest low down and narrowing the whole way to the leader.
+    // A spire: narrow, and still a cone — widest low down, narrowing the whole way to
+    // the leader. Bounded both ways, because the width is load-bearing in two
+    // directions. Too broad and it reads as a garden conifer rather than a forest one;
+    // too narrow and the envelope has cut the limbs so short that there is no crown left
+    // to speak of, which is not a silhouette problem but a foliage one.
     let profile = crown_radius_profile(&sk, &params);
     let widest = profile.iter().cloned().fold(0.0f32, f32::max);
+    let slenderness = widest * 2.0 / stats.height;
     assert!(
-        widest * 2.0 / stats.height > 0.38,
-        "open-grown fir is {:.2} as wide as it is tall; an open-grown crown is broad",
-        widest * 2.0 / stats.height
+        (0.22..0.36).contains(&slenderness),
+        "open-grown fir is {slenderness:.2} as wide as it is tall; a forest conifer is a \
+         spire, and neither a garden cone nor a pole"
     );
     let lower = profile[2..5].iter().sum::<f32>() / 3.0;
     let upper = profile[7..10].iter().sum::<f32>() / 3.0;
@@ -217,8 +222,12 @@ fn open_grown_douglas_fir_is_a_broad_cone_that_still_hangs() {
     let spruce_params = parse_species(SPRUCE_RON).unwrap();
     let spruce_grown = grow(&spruce_params);
     let solid = crown_card_area_per_m3(&spruce_grown, &spruce_params);
+    // The ceiling moved with the habit: this is per cubic metre, and the same foliage
+    // in a spire rather than a broad cone sits in well under half the volume, so the
+    // number rises without a single card being added. What it is really holding is the
+    // needle you look through, which measures 29% of the spruce's.
     assert!(
-        open_area < solid * 0.25,
+        open_area < solid * 0.35,
         "open-grown fir carries {open_area:.2} square metres of card per cubic metre \
          against the spruce's {solid:.2}; you are meant to see the trunk and the branch \
          tips through it"
@@ -250,6 +259,52 @@ fn open_grown_douglas_fir_is_a_broad_cone_that_still_hangs() {
          within a whorl; at that ratio the structure is lost in the noise"
     );
 
+    // No stray hairs: no level puts out a stem several times the length of its
+    // neighbours. They read as whiskers shooting out of the crown, and they have come
+    // back twice from different causes — first vigor overshooting the declared length,
+    // which `MAX_DRIVE` now bounds, and then a declared length so far above what the
+    // envelope allows that it only ever bit on the few limbs travelling *along* the
+    // envelope rather than across it. Both show up here, as the spread between the
+    // longest stem at a level and the ordinary one, so this catches the next cause too
+    // without having to know what it is.
+    for level in 1..=4u8 {
+        let mut lens = grown_lengths(&sk, level);
+        if lens.len() < 8 {
+            continue;
+        }
+        lens.sort_by(|a, b| a.partial_cmp(b).expect("lengths are finite"));
+        let median = lens[lens.len() / 2].max(1e-3);
+        let longest = lens[lens.len() - 1];
+        assert!(
+            longest / median < 3.5,
+            "open-grown fir level {level}: the longest stem is {longest:.2} m against a \
+             median of {median:.2}, which is {:.1} times it — that is a whisker, not a \
+             branch",
+            longest / median
+        );
+    }
+
+    // And no bristles: a stem has to be thick enough for its length to read as wood.
+    // Length over base radius is what the eye judges that by — a real branch runs about
+    // forty to eighty, and much past that it is a wire however correct its length
+    // is. This is the other half of the stray hairs, and the half that survived two
+    // passes at their length: the thickness pass was scaling every stem by raw vigor
+    // instead of by its drive, so the fine levels came out at a fifth of their declared
+    // radius. See `nominal_vigor` in `growth.rs`.
+    for level in 1..=4u8 {
+        let mut ratios = length_over_radius(&sk, level);
+        if ratios.len() < 8 {
+            continue;
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).expect("ratios are finite"));
+        let median = ratios[ratios.len() / 2];
+        assert!(
+            median < 80.0,
+            "open-grown fir level {level}: the typical stem is {median:.0} times as long \
+             as it is thick, which is a bristle rather than a branch"
+        );
+    }
+
     // And still a fir. This is the one that matters: the outline is now the spruce's,
     // so the limb has to carry the difference on its own.
     let fir_rise = mean_tip_rise(&sk, 2);
@@ -264,6 +319,57 @@ fn open_grown_douglas_fir_is_a_broad_cone_that_still_hangs() {
         "open-grown fir branchlet tips rise {fir_rise:+.2} m and the spruce's {spruce_rise:+.2}; \
          with the outlines this close that gap is the only thing left telling them apart"
     );
+}
+
+/// Every living stem at `level`, by how many times its own base radius it is long.
+///
+/// This is the number that decides whether a stem reads as wood or as wire, and it is
+/// worth measuring rather than trusting: a species declares a `radius` per level, but
+/// what a stem actually gets is that scaled by its drive and then capped by its parent,
+/// so the declared figure can be several times what comes out.
+fn length_over_radius(sk: &arbor_core::Skeleton, level: u8) -> Vec<f32> {
+    let mut out = Vec::new();
+    for run in sk.stem_runs() {
+        let first = run[0] as usize;
+        let node = &sk.nodes[first];
+        if node.level != level || node.broken {
+            continue;
+        }
+        let Some(parent) = node.parent else {
+            continue;
+        };
+        let mut len = (node.position - sk.nodes[parent as usize].position).length();
+        for w in run.windows(2) {
+            len += (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position).length();
+        }
+        out.push(len / node.radius.max(1e-4));
+    }
+    out
+}
+
+/// Every living stem at `level`, by the length it actually grew.
+///
+/// Grown rather than declared, because the two are only loosely related: the envelope
+/// cuts most stems off well short of what their level asks for, so what a species
+/// declares is a ceiling on the outliers rather than a description of the typical stem.
+fn grown_lengths(sk: &arbor_core::Skeleton, level: u8) -> Vec<f32> {
+    let mut out = Vec::new();
+    for run in sk.stem_runs() {
+        let first = run[0] as usize;
+        let node = &sk.nodes[first];
+        if node.level != level || node.broken {
+            continue;
+        }
+        let Some(parent) = node.parent else {
+            continue;
+        };
+        let mut len = (node.position - sk.nodes[parent as usize].position).length();
+        for w in run.windows(2) {
+            len += (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position).length();
+        }
+        out.push(len);
+    }
+    out
 }
 
 /// How far a tree's limbs swing from sloping down at the foot of the crown to pointing up
@@ -512,6 +618,7 @@ fn stems_arc_without_curling_round_on_themselves() {
         ("birch", BIRCH_RON),
         ("spruce", SPRUCE_RON),
         ("fir", DOUGLAS_FIR_RON),
+        ("fir_open", DOUGLAS_FIR_OPEN_RON),
     ] {
         let params = parse_species(ron).unwrap();
         for seed in 1..=8u64 {

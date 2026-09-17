@@ -86,10 +86,21 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
         return mesh;
     }
 
-    // How many arrangements the cluster generator baked, which is how many a card has
-    // to choose between. A species with no cluster block draws art as authored, so it
-    // has exactly one.
-    let variants = lp.cluster.as_ref().map_or(1, |c| c.variants.max(1));
+    // How many arrangements a card has to choose between.
+    //
+    // A species that clusters gets them baked, one under another, and picks by the v
+    // offset each card carries. A species whose art is already whole sprays has them
+    // stacked down the sheet instead, one per row, and picks exactly the same way — so
+    // for that case the rows *are* the variants. The renderer's own `tall` is
+    // `rows * variants`, which comes to the same number either way, so a card reaching
+    // its cell by `atlas_v` works without the shader knowing which kind it is.
+    //
+    // A sheet of one row and no cluster leaves this at 1, which is the old behaviour for
+    // every species that draws its art as authored.
+    let variants = lp
+        .cluster
+        .as_ref()
+        .map_or_else(|| lp.atlas_rows.max(1), |c| c.variants.max(1));
     let tree_rng = TreeRng::new(params.seed ^ 0x1EAF_1EAF_1EAF_1EAF);
     let mut cards: Vec<Card> = Vec::new();
 
