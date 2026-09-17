@@ -84,9 +84,15 @@ pub struct BarkIrregularity {
     /// Stems thinner than this stay clean: a twig has no room for any of it, and
     /// paying for the rings to describe it would be waste.
     pub min_radius: f32,
-    /// Rings per metre on stems that do carry the detail. The skeleton is segmented
-    /// for growth, far too coarsely to show a burl.
+    /// Rings per metre on stems that do carry the detail, before the ones that are
+    /// not earning their place are dropped again. The skeleton is segmented for
+    /// growth, far too coarsely to show a burl.
     pub rings_per_meter: f32,
+    /// How far the surface may move when a ring is dropped, as a fraction of the
+    /// stem's radius there. Rings are laid down densely and then thinned against this,
+    /// so a smooth stretch of bole costs what a smooth stretch should and the rings
+    /// end up where the shape actually needs them.
+    pub ring_tolerance: f32,
 }
 
 impl Default for BarkIrregularity {
@@ -103,6 +109,7 @@ impl Default for BarkIrregularity {
             collar_depth: 0.55,
             min_radius: 0.045,
             rings_per_meter: 14.0,
+            ring_tolerance: 0.02,
         }
     }
 }
@@ -111,8 +118,21 @@ impl Default for BarkIrregularity {
 #[serde(default)]
 pub struct MeshParams {
     pub uv_scale: f32,
-    pub radial_per_meter: f32,
+    /// How far a swept tube may cut the corner off the circle it stands for, in metres.
+    ///
+    /// A stem sweept at `n` sides misses its true radius by `r * (1 - cos(pi/n))` at
+    /// every corner, so this decides the sides directly: thick stems earn more of them
+    /// and twigs earn fewer, which is what a fixed count per metre of radius could not
+    /// express. A quarter of a centimetre is about a pixel on a trunk filling a screen.
+    pub silhouette_tolerance: f32,
     pub min_radial: u32,
+    /// Stems thinner than this get no bark at all.
+    ///
+    /// The finest twigs are a third of the triangles and two thirds of the vertices,
+    /// and each is a sliver a centimetre across carrying leaf cards many times its own
+    /// size. Under foliage they cannot be seen at all; bare, a few millimetres costs
+    /// only the finest hairs. Zero keeps every one of them.
+    pub min_bark_radius: f32,
     pub max_radial: u32,
     pub root_flare: f32,
     pub flare_height: f32,
@@ -127,8 +147,9 @@ impl Default for MeshParams {
     fn default() -> Self {
         Self {
             uv_scale: 1.2,
-            radial_per_meter: 44.0,
-            min_radial: 4,
+            silhouette_tolerance: 0.010,
+            min_radial: 3,
+            min_bark_radius: 0.0045,
             max_radial: 24,
             root_flare: 0.9,
             flare_height: 1.4,

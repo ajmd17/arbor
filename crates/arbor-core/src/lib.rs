@@ -12,6 +12,6 @@ pub use cluster::{bake_cluster, BakedMaps, Bitmap, LeafMaps};
 pub use envelope::EnvelopeParams;
 pub use growth::grow;
 pub use leaves::{build_leaves, LeafMesh};
-pub use mesh::{build_mesh, Mesh};
+pub use mesh::{build_mesh, stem_costs, Mesh, StemCost};
 pub use skeleton::{Skeleton, SkeletonNode, SkeletonStats};
 pub use species::{LeafClusterParams, LeafParams, SpeciesParams};

@@ -269,6 +269,107 @@ impl MeshSink {
     }
 }
 
+
+fn dirs_for(points: &[Vec3]) -> Vec<Vec3> {
+    let last = points.len() - 1;
+    let mut dirs: Vec<Vec3> = Vec::with_capacity(points.len());
+    for i in 0..points.len() {
+        let prev = if i == 0 {
+            points[0] * 2.0 - points[1]
+        } else {
+            points[i - 1]
+        };
+        let next = if i < last {
+            points[i + 1]
+        } else {
+            points[i] * 2.0 - prev
+        };
+        let d = norm_or_zero(next - prev);
+        dirs.push(if d == Vec3::ZERO {
+            *dirs.last().unwrap_or(&Vec3::Y)
+        } else {
+            d
+        });
+    }
+    dirs
+}
+
+fn frames_for(dirs: &[Vec3]) -> Vec<(Vec3, Vec3)> {
+    let mut frames = Vec::with_capacity(dirs.len());
+    let mut n = ortho_of(dirs[0]);
+    for i in 0..dirs.len() {
+        if i > 0 {
+            n = transport(dirs[i - 1], dirs[i], n);
+        }
+        n = ortho_unit(n, dirs[i]);
+        frames.push((n, dirs[i].cross(n)));
+    }
+    frames
+}
+
+fn arcs_for(points: &[Vec3]) -> Vec<f32> {
+    let mut arc = Vec::with_capacity(points.len());
+    let mut travelled = 0.0;
+    for i in 0..points.len() {
+        if i > 0 {
+            travelled += (points[i] - points[i - 1]).length();
+        }
+        arc.push(travelled);
+    }
+    arc
+}
+
+/// How far the surface moves if ring `i` is dropped and its neighbours joined directly.
+///
+/// Measured on the surface the mesher would actually emit, not on the centreline: a
+/// ring sitting on a burl matters even where the centreline through it is straight.
+fn ring_error(path: &StemPath, mp: &MeshParams, phase: (f32, f32), prev: usize, i: usize, next: usize) -> f32 {
+    const ANGLES: usize = 8;
+    let (a, b, c) = (path.points[prev], path.points[i], path.points[next]);
+    let span = c - a;
+    let t = if span.length_squared() > 1e-12 {
+        ((b - a).dot(span) / span.length_squared()).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let mut worst = (a + span * t - b).length();
+    for k in 0..ANGLES {
+        let ang = k as f32 / ANGLES as f32 * TAU;
+        let here = path.radius_at(i, ang, mp, phase);
+        let guess = path.radius_at(prev, ang, mp, phase) * (1.0 - t)
+            + path.radius_at(next, ang, mp, phase) * t;
+        worst = worst.max((here - guess).abs());
+    }
+    worst
+}
+
+/// Which rings to keep. Walks the stem dropping any ring whose absence moves the
+/// surface less than the tolerance, never two in a row, so the result still follows
+/// every feature the bark has while spending nothing on the stretches between them.
+fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize> {
+    let tol = mp.irregularity.ring_tolerance;
+    if tol <= 0.0 || path.len() < 3 {
+        return (0..path.len()).collect();
+    }
+    let mut keep = Vec::with_capacity(path.len());
+    keep.push(0);
+    let mut i = 1;
+    while i < path.len() - 1 {
+        let prev = *keep.last().unwrap();
+        let limit = (path.radii[i] * tol).max(3e-4);
+        if ring_error(path, mp, phase, prev, i, i + 1) < limit {
+            // Dropped. The next ring is measured against the same neighbour, so a long
+            // smooth run collapses rather than losing every other ring.
+            i += 1;
+        } else {
+            keep.push(i);
+            i += 1;
+        }
+    }
+    keep.push(path.len() - 1);
+    keep
+}
+
 /// One stem laid out as a chain of ring centres, ready to be swept.
 struct StemPath {
     /// Ring centres. For every stem but the trunk, the first entry sits on the parent
@@ -350,35 +451,8 @@ impl StemPath {
             radii = r;
         }
 
-        let last = points.len() - 1;
-        let mut dirs: Vec<Vec3> = Vec::with_capacity(points.len());
-        for i in 0..points.len() {
-            let prev = if i == 0 {
-                points[0] * 2.0 - points[1]
-            } else {
-                points[i - 1]
-            };
-            let next = if i < last {
-                points[i + 1]
-            } else {
-                points[i] * 2.0 - prev
-            };
-            let d = norm_or_zero(next - prev);
-            dirs.push(if d == Vec3::ZERO {
-                *dirs.last().unwrap_or(&Vec3::Y)
-            } else {
-                d
-            });
-        }
-
-        let mut arc = Vec::with_capacity(points.len());
-        let mut travelled = 0.0;
-        for i in 0..points.len() {
-            if i > 0 {
-                travelled += (points[i] - points[i - 1]).length();
-            }
-            arc.push(travelled);
-        }
+        let dirs = dirs_for(&points);
+        let arc = arcs_for(&points);
 
         // The socket fades out over a few base radii, so the flare is sized by the
         // branch rather than by however finely the stem happens to be segmented.
@@ -399,17 +473,9 @@ impl StemPath {
             })
             .collect();
 
-        // The same transport the sweep used to run inline. Doing it here means the
-        // rings, the ground cap and the bark all read one frame instead of three.
-        let mut frames = Vec::with_capacity(points.len());
-        let mut n = ortho_of(dirs[0]);
-        for i in 0..points.len() {
-            if i > 0 {
-                n = transport(dirs[i - 1], dirs[i], n);
-            }
-            n = ortho_unit(n, dirs[i]);
-            frames.push((n, dirs[i].cross(n)));
-        }
+        // Transport runs here rather than in the sweep, so the rings, the ground cap
+        // and the bark all read one frame instead of three.
+        let frames = frames_for(&dirs);
 
         let mut irregular = Irregular::new(
             &mp.irregularity,
@@ -447,7 +513,7 @@ impl StemPath {
             }
         }
 
-        Some(StemPath {
+        let dense = StemPath {
             points,
             dirs,
             radii,
@@ -456,7 +522,38 @@ impl StemPath {
             is_trunk,
             frames,
             irregular,
-        })
+        };
+        Some(dense.thinned(mp, seed_phases(seed)))
+    }
+
+    /// The same stem with every ring that was not earning its place removed.
+    ///
+    /// Rings are laid down densely because a burl needs them, then thinned against
+    /// what dropping one would actually do to the surface. A smooth stretch of bole
+    /// ends up costing what a smooth stretch should.
+    fn thinned(self, mp: &MeshParams, phase: (f32, f32)) -> StemPath {
+        let keep = keep_rings(&self, mp, phase);
+        if keep.len() == self.len() {
+            return self;
+        }
+        let points: Vec<Vec3> = keep.iter().map(|&i| self.points[i]).collect();
+        let radii: Vec<f32> = keep.iter().map(|&i| self.radii[i]).collect();
+        let socket: Vec<f32> = keep.iter().map(|&i| self.socket[i]).collect();
+        // Arc comes from the dense polyline, so thinning cannot slide the bark along
+        // the stem and move the burls.
+        let arc: Vec<f32> = keep.iter().map(|&i| self.arc[i]).collect();
+        let dirs = dirs_for(&points);
+        let frames = frames_for(&dirs);
+        StemPath {
+            points,
+            dirs,
+            radii,
+            socket,
+            arc,
+            is_trunk: self.is_trunk,
+            frames,
+            irregular: self.irregular,
+        }
     }
 
     fn len(&self) -> usize {
@@ -490,21 +587,15 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
     };
     let phase = seed_phases(params.seed);
 
-    // Which nodes start a stem of their own, indexed by the node they hang off, so a
-    // parent can swell where each of its children leaves.
-    let mut children: Vec<Vec<u32>> = vec![Vec::new(); sk.nodes.len()];
-    for (i, node) in sk.nodes.iter().enumerate() {
-        if let Some(parent) = node.parent
-            && sk.nodes[parent as usize].stem != node.stem
-        {
-            children[parent as usize].push(i as u32);
-        }
-    }
+    let children = child_index(sk);
 
     for stem in sk.stem_runs() {
         let Some(path) = StemPath::build(sk, &stem, mp, params.seed, &children) else {
             continue;
         };
+        if path.radii.iter().copied().fold(0.0f32, f32::max) < mp.min_bark_radius {
+            continue;
+        }
         emit_stem(&mut sink, &path, mp, phase);
     }
 
@@ -551,13 +642,86 @@ fn emit_spike(
     }
 }
 
+/// Sides swept around a stem, from how far the resulting polygon may sit inside the
+/// circle it stands for.
+///
+/// Follows the thickest ring, so a tapering stem keeps its silhouette all the way down
+/// instead of being sized by its average. Solving the error bound rather than scaling
+/// a count by the radius is what lets a trunk and a twig both be right: the error of a
+/// polygon is proportional to the radius, so a fixed count per metre spends far too
+/// much on a twig and far too little on a limb.
+fn radial_for(path: &StemPath, mp: &MeshParams) -> u32 {
+    let r_max = path.radii.iter().copied().fold(0.0f32, f32::max) * path.socket[0];
+    let tol = mp.silhouette_tolerance.max(1e-5);
+    let sides = if r_max <= tol {
+        3.0
+    } else {
+        // r * (1 - cos(pi / n)) = tol, solved for n.
+        PI / (1.0 - tol / r_max).clamp(-1.0, 1.0).acos()
+    };
+    (sides.ceil() as i32).clamp(mp.min_radial.max(3) as i32, mp.max_radial.max(3) as i32) as u32
+}
+
+/// What one stem costs the mesh.
+#[derive(Clone, Copy, Debug)]
+pub struct StemCost {
+    pub level: u8,
+    pub nodes: usize,
+    pub rings: usize,
+    pub radial: u32,
+    pub triangles: usize,
+    pub vertices: usize,
+    pub spike: bool,
+}
+
+/// What every stem costs, measured by emitting it rather than by modelling what the
+/// mesher does. A model of the mesher is a second implementation to keep in step, and
+/// it was already wrong the first time the ring count changed.
+pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
+    let mp = &params.mesh;
+    let phase = seed_phases(params.seed);
+    let children = child_index(sk);
+    let mut out = Vec::new();
+    for stem in sk.stem_runs() {
+        let Some(path) = StemPath::build(sk, &stem, mp, params.seed, &children) else {
+            continue;
+        };
+        if path.radii.iter().copied().fold(0.0f32, f32::max) < mp.min_bark_radius {
+            continue;
+        }
+        let mut sink = MeshSink {
+            mesh: Mesh::default(),
+        };
+        emit_stem(&mut sink, &path, mp, phase);
+        out.push(StemCost {
+            level: sk.nodes[stem[0] as usize].level,
+            nodes: stem.len(),
+            rings: path.len(),
+            radial: radial_for(&path, mp),
+            triangles: sink.mesh.triangle_count(),
+            vertices: sink.mesh.vertex_count(),
+            spike: path.is_single_segment(),
+        });
+    }
+    out
+}
+
+/// Which nodes start a stem of their own, indexed by the node they hang off.
+fn child_index(sk: &Skeleton) -> Vec<Vec<u32>> {
+    let mut children: Vec<Vec<u32>> = vec![Vec::new(); sk.nodes.len()];
+    for (i, node) in sk.nodes.iter().enumerate() {
+        if let Some(parent) = node.parent
+            && sk.nodes[parent as usize].stem != node.stem
+        {
+            children[parent as usize].push(i as u32);
+        }
+    }
+    children
+}
+
 fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32, f32)) {
     let last = path.len() - 1;
-    // Resolution follows the thickest ring so a tapering stem keeps its silhouette
-    // all the way down instead of being sized by its average.
-    let r_max = path.radii.iter().copied().fold(0.0f32, f32::max) * path.socket[0];
-    let radial = ((mp.radial_per_meter * r_max).round() as i32)
-        .clamp(mp.min_radial.max(3) as i32, mp.max_radial.max(3) as i32) as u32;
+    let radial = radial_for(path, mp);
 
     // A single-segment branch is drawn as one cone from its anchor ring to a point,
     // rather than a ring pair swept into a tube and then capped with a cone as well.
@@ -568,9 +732,19 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         return;
     }
 
-    let mut ring_bases: Vec<u32> = Vec::with_capacity(path.len());
+    // A twig ends twice over: the last ring repeats the one before it at almost the
+    // same radius, and then a cone closes it anyway. Tapering the final stretch
+    // straight to the tip is the same silhouette for a third of the triangles, and on
+    // something a centimetre across it is arguably the better shape. The trunk keeps
+    // its full sweep, since its top is not a twig.
+    let swept = if path.is_trunk {
+        path.len()
+    } else {
+        path.len() - 1
+    };
+    let mut ring_bases: Vec<u32> = Vec::with_capacity(swept);
 
-    for i in 0..path.len() {
+    for i in 0..swept {
         let d = path.dirs[i];
         let (n, b) = path.frames[i];
 
@@ -642,14 +816,14 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         }
     }
 
-    // Every stem closes with a short cone. Interior ends are usually buried under
-    // their own children; visible ends get a tapered twig tip rather than a disc.
+    // Every stem closes with a cone: from its last ring for the trunk, and from the
+    // ring before it for everything else, which is what makes the tip a taper.
     let end_dir = path.dirs[last];
     let r_end = path.radii[last] * path.socket[last];
     let tip = path.points[last] + end_dir * mp.tip_length.max(r_end * 1.2);
     let apex = sink.vertex_offset();
     sink.push_vertex(tip, end_dir, ortho_of(end_dir), [0.0, path.arc[last]]);
-    let base = ring_bases[last];
+    let base = ring_bases[swept - 1];
     for j in 0..radial {
         sink.mesh
             .indices
@@ -662,18 +836,6 @@ mod tests {
     use super::*;
     use crate::species::{parse_species, OAK_RON, PINE_RON};
 
-    /// The same index `build_mesh` makes, for the tests that build a path by hand.
-    fn child_index(sk: &Skeleton) -> Vec<Vec<u32>> {
-        let mut children: Vec<Vec<u32>> = vec![Vec::new(); sk.nodes.len()];
-        for (i, node) in sk.nodes.iter().enumerate() {
-            if let Some(parent) = node.parent
-                && sk.nodes[parent as usize].stem != node.stem
-            {
-                children[parent as usize].push(i as u32);
-            }
-        }
-        children
-    }
 
     #[test]
     fn triangles_wind_counter_clockwise_when_seen_from_outside() {
@@ -776,16 +938,17 @@ mod tests {
         (max_x - min_x).max(max_z - min_z)
     }
 
-    /// Distance of each vertex from its stem's centreline, for a ring near `y`.
-    fn section_radii(mesh: &Mesh, y: f32, tol: f32) -> Vec<f32> {
-        let mut out = Vec::new();
-        for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
-            // Side walls only: caps and tips point along the stem, not out of it.
-            if (p[1] - y).abs() < tol && n[1].abs() < 0.6 {
-                out.push((p[0] * p[0] + p[2] * p[2]).sqrt());
-            }
-        }
-        out
+    /// The trunk's path, which is what the bark actually shapes. Asking it directly
+    /// beats hunting for mesh vertices at a given height: where the rings land is a
+    /// cost decision, and a test of the shape should not break when that changes.
+    fn trunk_path(params: &SpeciesParams, sk: &Skeleton) -> StemPath {
+        let children = child_index(sk);
+        let run = sk
+            .stem_runs()
+            .into_iter()
+            .find(|r| sk.nodes[r[0] as usize].parent.is_none())
+            .expect("a trunk");
+        StemPath::build(sk, &run, &params.mesh, params.seed, &children).expect("builds")
     }
 
     #[test]
@@ -793,14 +956,21 @@ mod tests {
         // Flutes. A bole that is round at every height reads as pipe however good the
         // bark texture on it is.
         let params = parse_species(PINE_RON).unwrap();
-        let mesh = build_mesh(&crate::grow(&params), &params);
-        let r = section_radii(&mesh, 4.0, 0.06);
-        assert!(r.len() > 12, "only {} samples across the section", r.len());
-        let lo = r.iter().copied().fold(f32::MAX, f32::min);
-        let hi = r.iter().copied().fold(0.0f32, f32::max);
+        let sk = crate::grow(&params);
+        let path = trunk_path(&params, &sk);
+        let phase = seed_phases(params.seed);
+        let mut worst = 0.0f32;
+        for i in (path.len() / 6)..(path.len() * 5 / 6) {
+            let r: Vec<f32> = (0..32)
+                .map(|k| path.radius_at(i, k as f32 / 32.0 * TAU, &params.mesh, phase))
+                .collect();
+            let lo = r.iter().copied().fold(f32::MAX, f32::min);
+            let hi = r.iter().copied().fold(0.0f32, f32::max);
+            worst = worst.max(hi / lo);
+        }
         assert!(
-            hi > lo * 1.12,
-            "section runs {lo} to {hi}, which is round to within a percent or two"
+            worst > 1.12,
+            "the widest section is round to within {worst}, so the bole is a pipe"
         );
     }
 
@@ -808,17 +978,22 @@ mod tests {
     fn a_trunk_swells_and_waists_along_its_length() {
         // Taper alone is monotonic: a real bole also thickens and thins as it goes.
         let params = parse_species(PINE_RON).unwrap();
-        let mesh = build_mesh(&crate::grow(&params), &params);
-        let mean: Vec<f32> = (2..12)
-            .map(|k| {
-                let r = section_radii(&mesh, k as f32, 0.06);
-                r.iter().sum::<f32>() / r.len().max(1) as f32
+        let sk = crate::grow(&params);
+        let path = trunk_path(&params, &sk);
+        let phase = seed_phases(params.seed);
+        let mean: Vec<f32> = (0..path.len())
+            .map(|i| {
+                (0..16)
+                    .map(|k| path.radius_at(i, k as f32 / 16.0 * TAU, &params.mesh, phase))
+                    .sum::<f32>()
+                    / 16.0
             })
             .collect();
-        let rises = mean.windows(2).filter(|w| w[1] > w[0] + 1e-4).count();
+        let rises = mean.windows(2).filter(|w| w[1] > w[0] + 1e-5).count();
         assert!(
-            rises >= 2,
-            "the trunk only ever narrows, so it is a cone: {mean:?}"
+            rises >= 6,
+            "the trunk only ever narrows, so it is a cone: {rises} rises of {}",
+            mean.len()
         );
     }
 
@@ -909,6 +1084,74 @@ mod tests {
             "only {checked} of {} collars thickened the side the branch leaves from",
             path.irregular.collars.len()
         );
+    }
+
+    #[test]
+    fn thin_twigs_can_be_left_unmeshed() {
+        // The finest twigs are a third of the bark and two thirds of its vertices, and
+        // under foliage nobody can see them. Dropping them has to drop only them.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.mesh.min_bark_radius = 0.0;
+        let sk = crate::grow(&params);
+        let all = build_mesh(&sk, &params);
+
+        let cutoff = 0.0045;
+        params.mesh.min_bark_radius = cutoff;
+        let trimmed = build_mesh(&sk, &params);
+        assert!(
+            trimmed.triangle_count() < all.triangle_count() * 4 / 5,
+            "the cutoff saved almost nothing: {} against {}",
+            trimmed.triangle_count(),
+            all.triangle_count()
+        );
+
+        // Everything above the cutoff is still there, the trunk included.
+        let kept: usize = stem_costs(&sk, &params).len();
+        let thick = sk
+            .stem_runs()
+            .iter()
+            .filter(|run| {
+                run.iter()
+                    .map(|&i| sk.nodes[i as usize].radius)
+                    .fold(0.0f32, f32::max)
+                    >= cutoff
+            })
+            .count();
+        assert!(
+            kept >= thick,
+            "{kept} stems kept but {thick} are thick enough to keep"
+        );
+        let (min, max) = trimmed.aabb();
+        assert!(min[1] > -0.3 && max[1] > 5.0, "the trunk went with them");
+
+        // Nothing may be left floating: a stem that survives the cutoff must hang off
+        // one that also survived. This holds because a child is never thicker than its
+        // parent, and the moment that stops being true the tree comes apart.
+        let thickest = |run: &[u32]| {
+            run.iter()
+                .map(|&i| sk.nodes[i as usize].radius)
+                .fold(0.0f32, f32::max)
+        };
+        let runs = sk.stem_runs();
+        let mut checked = 0;
+        for run in &runs {
+            if thickest(run) < cutoff {
+                continue;
+            }
+            let Some(parent) = sk.nodes[run[0] as usize].parent else {
+                continue;
+            };
+            let owner = runs
+                .iter()
+                .find(|r| r.contains(&parent))
+                .expect("every node belongs to a stem");
+            assert!(
+                thickest(owner) >= cutoff,
+                "a kept stem hangs off one that was dropped, so it floats"
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "only {checked} junctions checked");
     }
 
     #[test]

@@ -39,10 +39,20 @@ fn main() {
         p.mesh.min_radial = r;
         row(&format!("min_radial {r} (from {})", base.mesh.min_radial), &p);
     }
-    for k in [0.75f32, 0.5] {
+    for tol in [0.006f32, 0.012, 0.020] {
         let mut p = base.clone();
-        p.mesh.radial_per_meter = base.mesh.radial_per_meter * k;
-        row(&format!("radial_per_meter x{k}"), &p);
+        p.mesh.silhouette_tolerance = tol;
+        row(&format!("silhouette_tolerance {tol}"), &p);
+    }
+    for tol in [0.0f32, 0.05, 0.15] {
+        let mut p = base.clone();
+        p.mesh.irregularity.ring_tolerance = tol;
+        row(&format!("ring_tolerance {tol}"), &p);
+    }
+    for r in [0.08f32, 0.2] {
+        let mut p = base.clone();
+        p.mesh.irregularity.min_radius = r;
+        row(&format!("bark min_radius {r}"), &p);
     }
 
     // Fewer, bigger cards: card area held constant so the canopy keeps its coverage.
