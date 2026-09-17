@@ -101,6 +101,10 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
         if sk.nodes[first].level < lp.min_level {
             continue;
         }
+        // Dead wood keeps its bark and loses its leaves.
+        if sk.nodes[first].dead {
+            continue;
+        }
         place_on_stem(sk, lp, &tree_rng, &run, variants, &mut cards);
     }
 
@@ -356,6 +360,32 @@ mod tests {
 
     fn oak() -> SpeciesParams {
         parse_species(OAK_RON).unwrap()
+    }
+
+    #[test]
+    fn dead_wood_carries_no_leaves() {
+        // Dead wood keeps its bark and loses its leaves, so a tree whose every branch
+        // has died has no canopy at all.
+        let mut params = oak();
+        for level in &mut params.branch_levels {
+            level.dieback = 0.0;
+        }
+        let full = build_leaves(&crate::grow(&params), &params).leaf_count();
+        assert!(full > 500, "expected a canopy to start with, got {full}");
+
+        for level in &mut params.branch_levels {
+            level.dieback = 1.0;
+        }
+        let sk = crate::grow(&params);
+        assert!(
+            sk.nodes.iter().any(|n| n.dead),
+            "nothing died at full dieback"
+        );
+        assert_eq!(
+            build_leaves(&sk, &params).leaf_count(),
+            0,
+            "leaves grew on a tree with nothing living left"
+        );
     }
 
     #[test]

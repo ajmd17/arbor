@@ -733,6 +733,7 @@ impl eframe::App for App {
                 let tree_height = self.stats.height.max(1.0);
                 let bark_material = self.bark_material;
                 let leaf_material = self.leaf_material;
+                let bark_look = gpu::BarkLook::from_species(&self.params.mesh);
                 let mut leaf_params =
                     LeafMaterialParams::from_species(&self.params.leaves, self.leaf_translucency);
                 leaf_params.coverage_lod = self.coverage_lod;
@@ -854,6 +855,7 @@ impl eframe::App for App {
                             }
 
                             let draw_params = MeshDrawParams {
+                                bark: bark_look,
                                 sky: &sky,
                                 normal_bias,
                                 view_proj,

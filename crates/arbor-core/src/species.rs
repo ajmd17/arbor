@@ -191,6 +191,15 @@ pub struct MeshParams {
     pub socket_bias: f32,
     /// Base name of the bark texture set under `assets/textures`.
     pub bark_texture: String,
+    /// Colour of the moss and lichen that grows on the bark.
+    pub moss_color: [f32; 3],
+    /// How far up the tree moss reaches, in metres.
+    pub moss_height: f32,
+    /// How much of the bark it takes at its thickest. Zero is bare bark.
+    pub moss_amount: f32,
+    /// How much darker the bark is at the foot of the tree than high in the crown.
+    /// Old bark low down weathers and holds damp; new wood above it does not.
+    pub bark_darken_low: f32,
     pub irregularity: BarkIrregularity,
 }
 
@@ -215,6 +224,10 @@ impl Default for MeshParams {
             socket_power: 2.0,
             socket_bias: 0.0,
             bark_texture: "bark".to_string(),
+            moss_color: [0.20, 0.27, 0.13],
+            moss_height: 0.0,
+            moss_amount: 0.0,
+            bark_darken_low: 0.0,
             irregularity: BarkIrregularity::default(),
         }
     }
@@ -238,14 +251,52 @@ pub struct StemParams {
     pub curvature: f32,
     pub phototropism: f32,
     pub gravity: f32,
+    /// How much further a stem sags toward its tip than at its base.
+    ///
+    /// Gravity on its own bends a stem evenly, which is not how a limb behaves: the
+    /// bending moment accumulates along it while the wood thins, so the last part of a
+    /// long branch droops far more than the first. Zero keeps the even bend.
+    pub droop: f32,
+    /// How far a stem jogs sideways at each node, in degrees.
+    ///
+    /// A shoot is not one smooth curve. The terminal bud aborts at the end of each
+    /// season and a lateral takes over the axis, so the stem is a chain of short
+    /// straight runs meeting at slight angles. The jog alternates sides, so it adds no
+    /// net turn and a stem still goes where the rest of the model sends it; what it
+    /// changes is that the wood stops reading as extruded. It matters most on the fine
+    /// levels, which are short enough that nothing else bends them measurably.
+    pub zigzag_deg: f32,
     pub vigor_falloff: f32,
     pub split_probability: f32,
     /// How far a co-dominant fork leans away from the stem it splits from.
     pub split_angle_deg: f32,
+    /// How evenly a fork divides the drive of the stem it leaves.
+    ///
+    /// At 0 the fork is a side branch: it takes the smaller share and the original
+    /// carries on as the leader, which is what a conifer does for its whole life. At 1
+    /// the two come away equal and neither is the trunk any more. A mature broadleaf
+    /// does exactly that — it gives up its leader partway up and builds the crown out
+    /// of three or four co-dominant limbs — and that one difference is most of what
+    /// separates a rounded oak from a conical spruce.
+    pub split_evenness: f32,
     /// Length left behind when the crown prunes a stem on its very first segment.
     /// Those are branches born outside the crown, which on a real conifer are the
     /// dead stubs along the bare lower trunk. Zero removes them entirely.
     pub dead_stub_length: f32,
+    /// Share of stems at this level that the tree has lost.
+    ///
+    /// Every mature broadleaf carries dead wood: branches shaded out by their own
+    /// neighbours that never shed. They keep their bark, carry no leaves, and end in a
+    /// break. The weakest go first, so this is weighted by vigor rather than drawn
+    /// evenly.
+    pub dieback: f32,
+    /// Radius at which dead wood still stands, in metres.
+    ///
+    /// A dead limb thicker than this keeps its length; anything thinner snaps back
+    /// toward its base, and the thinner it is the less of it is left. Without this a
+    /// dead twig stands intact above the crown for ever, which is the one thing dead
+    /// wood never does.
+    pub snap_radius: f32,
     /// Earliest point along a stem, as a fraction of its length, where it may fork.
     /// Without it a trunk can split at ground level and grow a second pole flush
     /// against the first.
@@ -267,10 +318,15 @@ impl StemParams {
             curvature: 0.03,
             phototropism: 0.015,
             gravity: 0.012,
+            droop: 0.0,
+            zigzag_deg: 0.0,
             vigor_falloff: 0.5,
             split_probability: 0.04,
             split_angle_deg: 22.0,
+            split_evenness: 0.0,
             dead_stub_length: 0.0,
+            dieback: 0.0,
+            snap_radius: 0.0,
             split_start_fraction: 0.3,
             children: ChildParams::default(),
         }
@@ -290,10 +346,15 @@ impl Default for StemParams {
             curvature: 0.015,
             phototropism: 0.03,
             gravity: 0.005,
+            droop: 0.0,
+            zigzag_deg: 0.0,
             vigor_falloff: 0.35,
             split_probability: 0.02,
             split_angle_deg: 25.0,
+            split_evenness: 0.0,
             dead_stub_length: 0.0,
+            dieback: 0.0,
+            snap_radius: 0.0,
             split_start_fraction: 0.35,
             children: ChildParams::default(),
         }
@@ -322,6 +383,25 @@ pub struct ChildParams {
     /// the same drive and so the same length, which reads as a wheel spoke pattern
     /// rather than a tree.
     pub scale_variance: f32,
+    /// How unequally siblings share the drive going into them.
+    ///
+    /// `scale_variance` spreads them symmetrically, which keeps every branch close to
+    /// the mean and gives a crown of near-clones — a bottle brush. A real crown is a
+    /// few limbs that won and a great many that were suppressed, so the draw here is
+    /// skewed: at 1 most children come away well under the mean and a handful come
+    /// away at several times it, while the average is unchanged. That hierarchy is
+    /// what the eye reads as a tree having competed for its shape.
+    pub dominance: f32,
+    /// How much of a parent's drive goes to the children near its tip rather than its
+    /// base, from -1 to 1.
+    ///
+    /// Temperate broadleaves are acrotonic: the strongest shoots of a season form at
+    /// the distal end of what grew last season, which is what carries a crown outward
+    /// and leaves the inside of it open. At 0 the drive is spread evenly down the
+    /// parent and the foliage comes out as a band along every limb instead. Negative
+    /// favours the base, which is what a stem whose lower branches have had the most
+    /// years to grow wants.
+    pub acrotony: f32,
     /// How far children are pulled into the flat plane of the limb carrying them.
     /// Conifer branchlets grow in a plane, and the flat sprays that makes are most
     /// of what gives a fir its layered silhouette; at 0 they spiral around the limb
@@ -346,6 +426,8 @@ impl Default for ChildParams {
             phyllotaxis_deg: 137.5,
             scale: 0.5,
             scale_variance: 0.0,
+            dominance: 0.0,
+            acrotony: 0.0,
             planarity: 0.0,
             count_variance: 0,
         }
@@ -356,10 +438,13 @@ impl Default for ChildParams {
 pub enum ChildPattern {
     None,
     Whorl { every: u32, count: u32 },
-    /// A child at each slot along the stem with this probability.
+    /// Children per metre of the parent stem.
     ///
-    /// A probability, not a count: at 1.0 every slot already spawns, and anything
-    /// above that changes nothing at all.
+    /// A rate, not a chance: 3.0 really is three children to the metre, and changing a
+    /// level's `segment_length` no longer changes how much it ramifies. It used to be
+    /// the probability that one segment carried one child, which saturated at 1.0 —
+    /// every value at or above that was the same value — and that ceiling was what
+    /// held the presets to two or three orders of branching.
     Continuous { density: f32 },
 }
 

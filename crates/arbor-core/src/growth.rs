@@ -25,18 +25,45 @@ const BEND_WANDER: f32 = 0.22;
 /// slack enough that nothing in the presets reaches it, tight enough that no run of
 /// influences can fold a stem back on itself over a single segment.
 const MAX_TURN_PER_M: f32 = 1.5;
-/// Total turning any one stem may bank over its whole length, in radians. Enough for
-/// a limb to be bent into line by the crown and to sag under its own weight on the
-/// way out, far short of the turn it would take to come round on itself.
-const MAX_STEM_TURN: f32 = 1.0;
-/// A fork takes this share of the parent vigor; the original stem keeps the rest.
+/// Turning a stem may bank, in radians per metre of the length it will grow.
+///
+/// The bank exists because every influence is a nudge per segment, so a stem cut into
+/// more segments bends further on the same settings, without limit, until it comes
+/// round on itself. Budgeting the total is what stops that. Scaling the budget with
+/// length is what keeps the rule fair between a fourteen-metre limb and a twig: a flat
+/// allowance is nothing to the twig and a straitjacket on the limb, and a limb held to
+/// a few degrees over its whole run is exactly what reads as extruded rather than
+/// grown.
+const TURN_BANK_PER_M: f32 = 0.26;
+/// Ceiling on that bank however long the stem, in radians. A limb may turn through a
+/// right angle and more on its way out; it may not come round on itself.
+const MAX_STEM_TURN: f32 = 1.7;
+/// Shares of the parent drive a fork and the stem it leaves come away with, when the
+/// fork is a side branch and the original carries on as the leader. `split_evenness`
+/// moves both toward `SPLIT_EVEN`, where neither is the leader any more.
 const SPLIT_VIGOR: f32 = 0.72;
 const SPLIT_KEEP: f32 = 0.86;
-/// Length a stem keeps at zero vigor. Each level already declares its own `length`,
-/// so letting vigor scale length outright would shorten deep twigs twice over and
-/// collapse them into specks. Vigor modulates the declared length, it does not
-/// replace it.
-const LENGTH_FLOOR: f32 = 0.35;
+const SPLIT_EVEN: f32 = 0.86;
+/// Side of the cells the crowding field counts wood into, in metres. About the reach
+/// of one season's shoot: fine enough to tell the inside of a crown from its surface,
+/// coarse enough that a stem is not judged by its own thickness.
+const CROWDING_CELL: f32 = 1.2;
+/// Most children one node of a parent may carry, so a runaway rate cannot spend the
+/// whole node budget at one point on one stem.
+const MAX_CHILDREN_PER_NODE: u32 = 8;
+/// Shape of the draw that decides how unequally siblings share their parent's drive.
+/// Cubed, so most children come away well under the mean and a few come away at
+/// several times it; the times four puts the mean back at one.
+const DOMINANCE_SHAPE: f32 = 3.0;
+/// Length a stem keeps at zero drive, as a share of what its level declares.
+///
+/// It used to be high, because drive was measured absolutely and compounded down the
+/// levels, so without a floor a deep twig was shortened once by its level's `length`
+/// and again by the scales above it. Drive is relative now, which frees the floor to
+/// do the job it should: a suppressed stem has to come out genuinely short, or the
+/// dominant and the suppressed end up within a factor of two of each other and the
+/// crown reads as a bottle brush however unequally the drive was shared out.
+const LENGTH_FLOOR: f32 = 0.15;
 
 struct GrowCtx<'a> {
     params: &'a SpeciesParams,
@@ -47,11 +74,27 @@ struct GrowCtx<'a> {
     /// own crown and everything on the upper trunk would be pruned at birth. Hanging
     /// the envelope off this instead makes the whole crown lean with the tree.
     leader: RefCell<Vec<Vec3>>,
+    /// The drive a stem at each level comes away with when nothing has gone wrong for
+    /// it: the product of the `children.scale` of every level above. Vigor is measured
+    /// against this rather than against 1, so `length` at a level means the length a
+    /// healthy stem there actually reaches. Without it the scales compound and a level
+    /// five deep runs at a tenth of what the species asked for, which makes the whole
+    /// file impossible to reason about.
+    nominal: Vec<f32>,
 }
 
 impl GrowCtx<'_> {
     fn record_leader(&self, pos: Vec3) {
         self.leader.borrow_mut().push(pos);
+    }
+
+    /// The drive expected of a healthy stem at this level.
+    fn nominal(&self, level: u8) -> f32 {
+        self.nominal
+            .get(level as usize)
+            .copied()
+            .unwrap_or(1.0)
+            .max(1e-4)
     }
 
     /// Where the trunk sits horizontally at height `y`. Above the part of the trunk
@@ -80,14 +123,23 @@ impl GrowCtx<'_> {
 pub fn grow(params: &SpeciesParams) -> Skeleton {
     let mut skeleton = Skeleton::default();
     let root = skeleton.push_node(None, Vec3::ZERO, 0, ROOT_PATH, 1.0, 0.0, TRUNK_STEM);
+    let levels_total = params
+        .max_levels
+        .min(params.branch_levels.len() as u8 + 1)
+        .max(1);
+    let mut nominal = Vec::with_capacity(levels_total as usize + 1);
+    nominal.push(1.0f32);
+    for level in 0..levels_total {
+        let scale = stem_params(params, level).map_or(1.0, |sp| sp.children.scale.max(1e-3));
+        let last = *nominal.last().expect("seeded with the trunk");
+        nominal.push(last * scale);
+    }
     let ctx = GrowCtx {
         env: params.envelope.scaled(params.envelope_scale),
-        levels_total: params
-            .max_levels
-            .min(params.branch_levels.len() as u8 + 1)
-            .max(1),
+        levels_total,
         params,
         leader: RefCell::new(Vec::new()),
+        nominal,
     };
     let tree_rng = TreeRng::new(params.seed);
     grow_stem(
@@ -102,10 +154,176 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
         0,
         TRUNK_STEM,
         Vec3::ZERO,
-        MAX_STEM_TURN,
+        f32::MAX,
     );
     resolve_radii(params, &mut skeleton);
+    mark_dieback(params, &mut skeleton);
+    // Reads the radii, so it has to follow them, and it is its own pass rather than
+    // the tail of the one above: a species that loses no wood to dieback still has
+    // wood the crown pruned, and that has to break back too.
+    break_dead_wood(params, &mut skeleton);
     skeleton
+}
+
+/// How hemmed in every node is by the rest of its own tree, from 0 to 1.
+///
+/// What shades a branch out is almost always its own neighbours, so the wood packed
+/// into the space around a stem stands in for the light that never reaches it. Wood is
+/// measured as length rather than as a count of nodes, because a level with short
+/// segments lays down many more nodes per metre than one with long segments and
+/// counting them would report the finest twigs — which live on the outside of the
+/// crown — as the most crowded thing in the tree.
+///
+/// This is what hollows a crown into a shell of foliage over open branchwork. Without
+/// it the only thing that removes a stem is growing outside the envelope, so the crown
+/// fills solid to the trunk and every limb inside it is buried.
+fn crowding_field(skeleton: &Skeleton) -> Vec<f32> {
+    let cell = |v: f32| (v / CROWDING_CELL).floor() as i32;
+    let key = |p: Vec3| (cell(p.x), cell(p.y), cell(p.z));
+
+    let mut wood: std::collections::HashMap<(i32, i32, i32), f32> =
+        std::collections::HashMap::new();
+    for node in &skeleton.nodes {
+        let Some(p) = node.parent else { continue };
+        let run = (node.position - skeleton.nodes[p as usize].position).length();
+        *wood.entry(key(node.position)).or_insert(0.0) += run;
+    }
+
+    let mut local: Vec<f32> = Vec::with_capacity(skeleton.nodes.len());
+    for node in &skeleton.nodes {
+        let (cx, cy, cz) = key(node.position);
+        let mut total = 0.0;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    total += wood.get(&(cx + dx, cy + dy, cz + dz)).copied().unwrap_or(0.0);
+                }
+            }
+        }
+        local.push(total);
+    }
+
+    // Measured against a high quantile rather than the maximum, so one freak cell at a
+    // fork cannot push the whole crown toward zero.
+    let mut sorted = local.clone();
+    sorted.sort_by(f32::total_cmp);
+    let hi = sorted
+        .get(sorted.len().saturating_mul(9) / 10)
+        .copied()
+        .unwrap_or(1.0)
+        .max(1e-3);
+    local.iter().map(|&v| (v / hi).clamp(0.0, 1.0)).collect()
+}
+
+/// Marks the stems the tree has lost.
+///
+/// A branch dies as a unit and takes everything it carries with it, so this runs as a
+/// pass over the finished skeleton rather than during growth: a stem cannot know
+/// whether it will be shaded out until the neighbours that shade it exist. Nodes are
+/// created parents first, so one forward pass both decides and propagates.
+fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) {
+    let any = stem_params(params, 0).is_some_and(|sp| sp.dieback > 0.0)
+        || params.branch_levels.iter().any(|sp| sp.dieback > 0.0);
+    if !any {
+        return;
+    }
+    let crowding = crowding_field(skeleton);
+    for (i, &crowd) in crowding.iter().enumerate() {
+        let node = &skeleton.nodes[i];
+        let (parent, level, stem, path, vigor) =
+            (node.parent, node.level, node.stem, node.path, node.vigor);
+        let inherited = parent.is_some_and(|p| skeleton.nodes[p as usize].dead);
+        if inherited {
+            skeleton.nodes[i].dead = true;
+            continue;
+        }
+        // Only the first node of a stem decides; the rest of the run follows it.
+        let starts_stem = parent.is_none_or(|p| skeleton.nodes[p as usize].stem != stem);
+        if !starts_stem {
+            skeleton.nodes[i].dead = skeleton.nodes[parent.unwrap() as usize].dead;
+            continue;
+        }
+        let Some(sp) = stem_params(params, level) else {
+            continue;
+        };
+        if sp.dieback <= 0.0 {
+            continue;
+        }
+        // The weakest go first, and so do the ones with the most wood around them:
+        // being suppressed is what makes a stem vulnerable, and being buried in the
+        // middle of the crown is what finishes it. Crowding is the term that puts the
+        // losses on the inside rather than scattering them evenly, which is the
+        // difference between a hollow crown and a solid one.
+        //
+        // Both act on the share that survives rather than on the share that dies, so
+        // they compose without ever contradicting the number the species wrote down:
+        // a level told to lose everything loses everything, however exposed its stems,
+        // and a level told to lose nothing loses nothing however buried they are.
+        let weakness = ((0.5 - vigor.min(0.5)) / 0.5).clamp(0.0, 1.0);
+        let exposure = ((0.4 + 1.6 * weakness) * (0.35 + 1.65 * crowd) / 1.5).clamp(0.0, 4.0);
+        let survives = (1.0 - sp.dieback.clamp(0.0, 1.0)).powf(exposure);
+        let chance = (1.0 - survives).clamp(0.0, 1.0);
+        let roll = hash_unit(params.seed ^ 0xDEAD_5EED, path);
+        if roll < chance {
+            skeleton.nodes[i].dead = true;
+        }
+    }
+}
+
+/// Snaps the thin, exposed ends off the wood the tree has lost.
+///
+/// Dead wood does not stand intact: the further out along a dead branch, the thinner
+/// and more exposed it is, and it goes first. What is left is a stub. A limb thicker
+/// than its level's `snap_radius` keeps its length; below that it breaks back in
+/// proportion, and everything it carried goes with it.
+fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton) {
+    // The radius the stem started at, carried along its run.
+    let mut stem_base = vec![0.0f32; skeleton.nodes.len()];
+    for i in 0..skeleton.nodes.len() {
+        let node = &skeleton.nodes[i];
+        let (parent, stem, radius, frac, level, dead) = (
+            node.parent,
+            node.stem,
+            node.radius,
+            node.stem_fraction,
+            node.level,
+            node.dead,
+        );
+
+        if parent.is_some_and(|p| skeleton.nodes[p as usize].broken) {
+            skeleton.nodes[i].broken = true;
+            continue;
+        }
+        let same_stem = parent.is_some_and(|p| skeleton.nodes[p as usize].stem == stem);
+        stem_base[i] = if same_stem {
+            stem_base[parent.unwrap() as usize]
+        } else {
+            radius
+        };
+        if !dead {
+            continue;
+        }
+        let Some(sp) = stem_params(params, level) else {
+            continue;
+        };
+        if sp.snap_radius <= 0.0 {
+            continue;
+        }
+        let keeps = (stem_base[i] / sp.snap_radius).clamp(0.0, 1.0);
+        if frac > keeps {
+            skeleton.nodes[i].broken = true;
+        }
+    }
+}
+
+/// One value in 0..1 from a seed and a path, so dieback is the same every time a tree
+/// is grown and different for every stem in it.
+fn hash_unit(seed: u64, path: u64) -> f32 {
+    let mut x = seed ^ path.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    (x >> 11) as f32 / (1u64 << 53) as f32
 }
 
 fn stem_params(params: &SpeciesParams, level: u8) -> Option<&StemParams> {
@@ -145,7 +363,13 @@ fn grow_stem(
     };
     let mut rng = tree_rng.stream(path);
     let base_pos = skeleton.nodes[base_node as usize].position;
-    let drive = vigor.clamp(0.0, 1.6);
+    // Drive is read against what a healthy stem at this level would have, not against
+    // the trunk's. `children.scale` already says how much smaller each level is, and
+    // each level's `length` says it again; measuring vigor absolutely charged the tree
+    // for it twice over, so a level five deep ran at a tenth of its declared length
+    // and no number in the species file meant what it said.
+    let nominal = ctx.nominal(level);
+    let drive = (vigor / nominal).clamp(0.0, 1.6);
     let length_factor = (LENGTH_FLOOR + (1.0 - LENGTH_FLOOR) * drive).min(1.6);
     let stem_len = sp.length
         * length_factor
@@ -172,8 +396,12 @@ fn grow_stem(
     // How much turning this stem has left to spend, across every influence that bends
     // it. Without a ceiling the crown pull alone settles into an orbit: whatever its
     // strength, there is a radius at which it supplies exactly the turn a circle
-    // needs, and the stem rides it round.
-    let mut turn_budget = budget.max(0.0);
+    // needs, and the stem rides it round. The bank is earned by the length the stem is
+    // about to grow, so a long limb may wander and a twig may not; `budget` caps it
+    // with whatever a fork's parent had left.
+    let mut turn_budget = budget
+        .min(TURN_BANK_PER_M * stem_len)
+        .clamp(0.0, MAX_STEM_TURN);
 
     for seg in 0..seg_count {
         let mut jitter = rand_perpendicular(&mut rng, cur_dir);
@@ -190,12 +418,24 @@ fn grow_stem(
             pos,
             bend,
             seg_len,
+            seg as f32 / seg_count.max(1) as f32,
             shaped_by_envelope,
             &mut turn_budget,
         );
         frame = transport(cur_dir, next_dir, frame);
         bend = transport(cur_dir, next_dir, bend);
         cur_dir = next_dir;
+
+        // The jog at each node. It alternates sides, so it costs nothing from the turn
+        // bank and leaves the stem on the course everything above chose for it; what it
+        // breaks is the smooth extrusion, which is what a stem grown a season at a time
+        // never is.
+        if sp.zigzag_deg > 1e-3 {
+            let kink = (sp.zigzag_deg * range_f32(&mut rng, 0.55, 1.45)).to_radians();
+            let side = if seg % 2 == 0 { 1.0 } else { -1.0 };
+            let across = ortho_unit(frame, cur_dir) * side;
+            cur_dir = turn_toward(cur_dir, norm_or_up(cur_dir + across), kink);
+        }
         pos += cur_dir * seg_len;
 
         // Anything the envelope steers, it also prunes. Steering a stem that can
@@ -236,6 +476,7 @@ fn grow_stem(
                 level + 1,
                 seg,
                 seg_count,
+                seg_len,
                 &mut azimuth,
                 &mut slot,
                 path,
@@ -257,13 +498,20 @@ fn grow_stem(
             let split_dir = child_dir(cur_dir, frame, az, crotch);
             let p = child_path(path, slot);
             let fork_stem = skeleton.nodes.len() as u32;
+            // How the two halves divide what the stem had. A leader keeps the larger
+            // share and the fork is a side branch; at full evenness they come away
+            // equal and the stem stops being a leader at all, which is how a broadleaf
+            // trades a single trunk for a crown of co-dominant limbs.
+            let evenness = sp.split_evenness.clamp(0.0, 1.0);
+            let fork_share = SPLIT_VIGOR + (SPLIT_EVEN - SPLIT_VIGOR) * evenness;
+            let keep_share = SPLIT_KEEP + (SPLIT_EVEN - SPLIT_KEEP) * evenness;
             grow_stem(
                 ctx,
                 skeleton,
                 tree_rng,
                 cur,
                 split_dir,
-                v * SPLIT_VIGOR,
+                v * fork_share,
                 level,
                 p,
                 split_depth + 1,
@@ -273,11 +521,11 @@ fn grow_stem(
             );
             // The parent gives up part of its drive to the fork instead of both
             // halves carrying on at full strength.
-            v *= SPLIT_KEEP;
+            v *= keep_share;
         }
 
         v *= 1.0 - sp.vigor_falloff / seg_count as f32;
-        if v < MIN_VIGOR {
+        if v < MIN_VIGOR * nominal {
             break;
         }
     }
@@ -297,6 +545,7 @@ fn spawn_children(
     child_level: u8,
     seg: usize,
     seg_count: usize,
+    seg_len: f32,
     azimuth: &mut f32,
     slot: &mut u32,
     stem_path: u64,
@@ -334,7 +583,24 @@ fn spawn_children(
         } else {
             Vec3::ZERO
         };
-        let drive = child.scale * (1.0 + range_f32(rng, -child.scale_variance, child.scale_variance));
+        // What the child comes away with. Three things decide it, and only the first
+        // was here before: the level's `scale`, a symmetric jitter, a skewed lottery
+        // that makes a few siblings dominant and most of them suppressed, and where on
+        // the parent it sits. Siblings drawn from one narrow band around the mean are
+        // what makes a crown read as a bottle brush however well everything else is
+        // tuned.
+        let spread = 1.0 + range_f32(rng, -child.scale_variance, child.scale_variance);
+        let lottery = {
+            let u: f32 = rng.random();
+            let skewed = u.powf(DOMINANCE_SHAPE) * (DOMINANCE_SHAPE + 1.0);
+            1.0 + child.dominance.clamp(0.0, 1.0) * (skewed - 1.0)
+        };
+        // Acrotony: the strongest shoots of a season form at the far end of what grew
+        // last season, which is what carries a crown outward and leaves its inside
+        // open. Spread evenly instead and the foliage comes out as a band down every
+        // limb.
+        let acro = 1.0 + child.acrotony.clamp(-1.0, 1.0) * (2.0 * t - 1.0);
+        let drive = child.scale * spread * lottery.max(0.0) * acro.max(0.05);
         let p = child_path(stem_path, *slot);
         let child_stem = skeleton.nodes.len() as u32;
         grow_stem(
@@ -381,8 +647,28 @@ fn spawn_children(
             }
         }
         ChildPattern::Continuous { density } => {
-            *azimuth += child.phyllotaxis_deg.to_radians();
-            if rng.random::<f32>() < density {
+            // Children per metre of the parent, counted over the length of this
+            // segment. It used to be the chance that this one segment carried a child,
+            // which meant the ramification of a level moved whenever its segment
+            // length did, and — worse — that every rate of one or more was the same
+            // rate, since a chance saturates. Three of the oak's four levels were
+            // pinned there, which is why its branching collapsed two orders early
+            // however high the number went. Whole children are spawned outright and
+            // the fraction left over is taken as a chance, so a rate below one child
+            // per segment still behaves as it did.
+            let expected = (density * seg_len).max(0.0);
+            let mut count = expected.floor() as u32;
+            if rng.random::<f32>() < expected.fract() {
+                count += 1;
+            }
+            let count = count.min(MAX_CHILDREN_PER_NODE);
+            if count == 0 {
+                // The bud was there and came to nothing; the spiral still moves on.
+                *azimuth += child.phyllotaxis_deg.to_radians();
+                return;
+            }
+            for _ in 0..count {
+                *azimuth += child.phyllotaxis_deg.to_radians();
                 let az = *azimuth
                     + range_f32(rng, -child.roll_variance_deg, child.roll_variance_deg).to_radians();
                 spawn_one(az, skeleton, slot, rng);
@@ -407,13 +693,18 @@ fn steer(
     pos: Vec3,
     bend: Vec3,
     seg_len: f32,
+    // How far along the stem this segment sits, 0 at the base and 1 at the tip.
+    along: f32,
     shaped_by_envelope: bool,
     // Turning this stem has left to spend, drawn down by whatever it uses.
     turn_budget: &mut f32,
 ) -> Vec3 {
+    // A limb is a cantilever: the moment it carries grows with distance from where it
+    // is held and the wood thins as it goes, so the sag is far from even along it.
+    let sag = sp.gravity * (1.0 + sp.droop * along * along);
     let mut d = dir
         + Vec3::Y * sp.phototropism * ctx.params.phototropism_multiplier
-        - Vec3::Y * sp.gravity * ctx.params.gravity_multiplier;
+        - Vec3::Y * sag * ctx.params.gravity_multiplier;
     d += bend * sp.curvature;
     let mut d = norm_or_up(d);
 
@@ -597,6 +888,356 @@ fn da_vinci_exp(params: &SpeciesParams, level: u8) -> f32 {
 mod tests {
     use super::*;
     use crate::species::{parse_species, OAK_RON, PINE_RON};
+
+    /// Every stem in the skeleton, as (level, length, children it carries, the
+    /// fraction along its parent where it attaches).
+    fn stems(sk: &Skeleton) -> Vec<(u8, f32, usize, f32)> {
+        sk.stem_runs()
+            .into_iter()
+            .filter(|run| !run.is_empty())
+            .map(|run| {
+                let head = &sk.nodes[run[0] as usize];
+                let mut length = 0.0;
+                if let Some(p) = head.parent {
+                    length += (head.position - sk.nodes[p as usize].position).length();
+                }
+                for w in run.windows(2) {
+                    length +=
+                        (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position).length();
+                }
+                let children = run
+                    .iter()
+                    .map(|&i| {
+                        sk.nodes[i as usize]
+                            .children
+                            .iter()
+                            .filter(|&&c| sk.nodes[c as usize].stem != sk.nodes[i as usize].stem)
+                            .count()
+                    })
+                    .sum();
+                let attach = head.parent.map_or(0.0, |p| sk.nodes[p as usize].stem_fraction);
+                (head.level, length, children, attach)
+            })
+            .collect()
+    }
+
+    fn mean(v: &[f32]) -> f32 {
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
+    }
+
+    #[test]
+    fn a_continuous_rate_is_children_per_metre_not_per_segment() {
+        // It was a chance per segment, which saturated at 1.0 and moved whenever a
+        // level's segment length did. Both of those silently capped how far the
+        // presets could ramify, and neither was visible in the file.
+        let base = parse_species(OAK_RON).unwrap();
+        let carried = |density: f32, segment: f32| {
+            let mut params = base.clone();
+            params.branch_levels[1].segment_length = segment;
+            if let ChildPattern::Continuous { density: d } =
+                &mut params.branch_levels[1].children.pattern
+            {
+                *d = density;
+            } else {
+                panic!("the oak's third level is meant to branch continuously");
+            }
+            let sk = grow(&params);
+            let counts: Vec<f32> = stems(&sk)
+                .iter()
+                .filter(|(level, ..)| *level == 2)
+                .map(|(_, _, kids, _)| *kids as f32)
+                .collect();
+            mean(&counts)
+        };
+
+        // A rate above one per segment is not the same as a rate of one per segment.
+        let single = carried(2.0, 0.28);
+        let double = carried(4.0, 0.28);
+        assert!(
+            double > single * 1.5,
+            "doubling the rate moved the children per stem from {single:.1} to {double:.1}"
+        );
+        // And the rate means the same thing however the stem is cut into segments.
+        let coarse = carried(3.0, 0.42);
+        let fine = carried(3.0, 0.21);
+        assert!(
+            (coarse - fine).abs() < coarse * 0.35,
+            "halving the segment length moved the children per stem from {coarse:.1} to {fine:.1}"
+        );
+    }
+
+    #[test]
+    fn a_levels_declared_length_is_what_its_stems_reach() {
+        // Drive used to be measured absolutely and compounded down the levels, so each
+        // level ran at a smaller fraction of what it declared than the one above and
+        // no number in the file meant what it said. The crown still cuts stems short,
+        // so the test is that the shortfall stops growing with depth.
+        let params = parse_species(OAK_RON).unwrap();
+        let sk = grow(&params);
+        let all = stems(&sk);
+        let mut ratios = Vec::new();
+        for level in 1..params.branch_levels.len() as u8 {
+            let declared = params.branch_levels[level as usize - 1].length;
+            let lengths: Vec<f32> = all
+                .iter()
+                .filter(|(l, ..)| *l == level)
+                .map(|(_, len, _, _)| *len)
+                .collect();
+            if lengths.len() < 20 {
+                continue;
+            }
+            ratios.push((level, mean(&lengths) / declared));
+        }
+        assert!(ratios.len() >= 3, "not enough levels to compare");
+        let shallow = ratios.first().expect("checked above").1;
+        let deep = ratios.last().expect("checked above").1;
+        assert!(
+            deep > shallow * 0.45,
+            "levels run at {ratios:?} of what they declare: the shortfall still compounds"
+        );
+    }
+
+    #[test]
+    fn dominance_makes_some_siblings_win_and_most_lose() {
+        // Siblings drawn from one narrow band around the mean are what makes a crown
+        // read as a bottle brush however well everything else is tuned.
+        let spread_at = |dominance: f32| {
+            let mut params = parse_species(OAK_RON).unwrap();
+            for level in &mut params.branch_levels {
+                level.children.dominance = dominance;
+                level.dieback = 0.0;
+            }
+            params.trunk.children.dominance = dominance;
+            let sk = grow(&params);
+            let lengths: Vec<f32> = stems(&sk)
+                .iter()
+                .filter(|(l, ..)| *l == 2)
+                .map(|(_, len, _, _)| *len)
+                .collect();
+            let m = mean(&lengths);
+            let sd = (lengths.iter().map(|x| (x - m).powi(2)).sum::<f32>()
+                / lengths.len().max(1) as f32)
+                .sqrt();
+            sd / m.max(1e-4)
+        };
+        let flat = spread_at(0.0);
+        let ranked = spread_at(1.0);
+        assert!(
+            ranked > flat * 1.25,
+            "dominance barely widened the spread of sibling length: {flat:.2} to {ranked:.2}"
+        );
+    }
+
+    #[test]
+    fn acrotony_carries_the_growth_to_the_ends_of_the_parent() {
+        // Spread evenly instead and the foliage comes out as a band down every limb
+        // rather than massing at the surface of the crown.
+        let attach_at = |acrotony: f32| {
+            let mut params = parse_species(OAK_RON).unwrap();
+            for level in &mut params.branch_levels {
+                level.children.acrotony = acrotony;
+            }
+            params.trunk.children.acrotony = acrotony;
+            let sk = grow(&params);
+            let lengths: Vec<(f32, f32)> = stems(&sk)
+                .iter()
+                .filter(|(l, ..)| *l >= 2)
+                .map(|(_, len, _, attach)| (*attach, *len))
+                .collect();
+            // Weighted by how much stem each attachment point actually grew: what
+            // acrotony moves is the drive, not the count.
+            let total: f32 = lengths.iter().map(|(_, len)| *len).sum();
+            lengths.iter().map(|(a, len)| a * len).sum::<f32>() / total.max(1e-4)
+        };
+        let even = attach_at(0.0);
+        let distal = attach_at(0.8);
+        assert!(
+            distal > even + 0.04,
+            "acrotony moved the weighted attachment point from {even:.2} to {distal:.2}"
+        );
+    }
+
+    #[test]
+    fn a_zigzag_breaks_the_line_without_bending_the_stem() {
+        // The jog has to leave a stem going where everything else sent it, or it is
+        // just another source of curvature and the model already has several.
+        let measure = |zigzag: f32| {
+            let mut params = parse_species(OAK_RON).unwrap();
+            for level in &mut params.branch_levels {
+                level.zigzag_deg = zigzag;
+            }
+            let sk = grow(&params);
+            let (mut net, mut wander, mut n) = (0.0f32, 0.0f32, 0usize);
+            for run in sk.stem_runs() {
+                if run.len() < 5 {
+                    continue;
+                }
+                let step = |i: usize| {
+                    sk.nodes[run[i] as usize].position - sk.nodes[run[i - 1] as usize].position
+                };
+                let (Some(a), Some(b)) = (step(1).try_normalize(), step(run.len() - 1).try_normalize())
+                else {
+                    continue;
+                };
+                net += a.dot(b).clamp(-1.0, 1.0).acos().to_degrees();
+                let path: f32 = (1..run.len()).map(|i| step(i).length()).sum();
+                let reach = (sk.nodes[run[run.len() - 1] as usize].position
+                    - sk.nodes[run[0] as usize].position)
+                    .length();
+                wander += 1.0 - reach / path.max(1e-4);
+                n += 1;
+            }
+            (net / n as f32, wander / n as f32)
+        };
+        let (straight_net, straight_wander) = measure(0.0);
+        let (kinked_net, kinked_wander) = measure(12.0);
+        // A jog of a few degrees is meant to be a small effect on the path and no
+        // effect at all on the heading, so this is a ratio rather than a margin.
+        assert!(
+            kinked_wander > straight_wander * 1.8,
+            "the jog added no path length: {straight_wander:.3} to {kinked_wander:.3}"
+        );
+        assert!(
+            kinked_net < straight_net + 12.0,
+            "the jog bent the stems as well: {straight_net:.0} to {kinked_net:.0} degrees net"
+        );
+    }
+
+    #[test]
+    fn an_even_split_gives_up_the_leader() {
+        // A conifer keeps one trunk to the top; a mature broadleaf trades it for a
+        // crown of co-dominant limbs. The difference is the share a fork comes away
+        // with, and it should show up as how much of the tree the longest level-zero
+        // stem accounts for.
+        // What the fork comes away with against what the stem it left keeps. Measured
+        // at the fork itself: further out the crown prunes whichever limb reaches its
+        // boundary first, and that says more about where a fork happened to start than
+        // about which of the two is the leader.
+        let fork_against_leader = |evenness: f32| {
+            let mut params = parse_species(OAK_RON).unwrap();
+            params.trunk.split_evenness = evenness;
+            let sk = grow(&params);
+            let mut ratios = Vec::new();
+            for node in &sk.nodes {
+                let Some(p) = node.parent else { continue };
+                let parent = &sk.nodes[p as usize];
+                // A fork carries on at its parent's level on a stem of its own; a
+                // child at the next level down is a branch, not a fork.
+                if node.level != 0 || parent.level != 0 || node.stem == parent.stem {
+                    continue;
+                }
+                // Against the parent's own continuation, not against the parent
+                // node: the stem gives up its share to the fork after that node was
+                // recorded, so the node still carries the undivided drive.
+                let carries_on = parent
+                    .children
+                    .iter()
+                    .map(|&c| &sk.nodes[c as usize])
+                    .find(|c| c.stem == parent.stem);
+                if let Some(carries_on) = carries_on.filter(|c| c.vigor > 1e-4) {
+                    ratios.push(node.vigor / carries_on.vigor);
+                }
+            }
+            (mean(&ratios), ratios.len())
+        };
+        let (subordinate, forks_low) = fork_against_leader(0.0);
+        let (co_dominant, forks_high) = fork_against_leader(1.0);
+        assert!(forks_low > 0 && forks_high > 0, "the trunk never forked at all");
+        assert!(
+            subordinate < 0.9,
+            "a fork with no evenness should be the lesser of the two, not {subordinate:.2}"
+        );
+        assert!(
+            co_dominant > 0.95,
+            "an even split should leave neither limb the leader, got {co_dominant:.2}"
+        );
+    }
+
+    #[test]
+    fn crowding_takes_the_inside_of_the_crown_before_the_outside() {
+        // What hollows a crown into a shell. Losses scattered evenly over the whole
+        // volume leave it solid however many of them there are.
+        let mut params = parse_species(OAK_RON).unwrap();
+        for level in &mut params.branch_levels {
+            level.dieback = 0.3;
+        }
+        let sk = grow(&params);
+        let crowding = crowding_field(&sk);
+        let mut inside = (0usize, 0usize);
+        let mut outside = (0usize, 0usize);
+        for (i, node) in sk.nodes.iter().enumerate() {
+            if node.level < 2 {
+                continue;
+            }
+            let bucket = if crowding[i] > 0.6 {
+                &mut inside
+            } else if crowding[i] < 0.2 {
+                &mut outside
+            } else {
+                continue;
+            };
+            bucket.1 += 1;
+            if node.dead {
+                bucket.0 += 1;
+            }
+        }
+        assert!(
+            inside.1 > 200 && outside.1 > 200,
+            "not enough wood either side of the crown to compare: {inside:?} {outside:?}"
+        );
+        let share = |(dead, all): (usize, usize)| dead as f32 / all as f32;
+        assert!(
+            share(inside) > share(outside) * 1.3,
+            "the crowded wood died at {:.2} against {:.2} out in the open",
+            share(inside),
+            share(outside)
+        );
+    }
+
+    #[test]
+    fn dieback_takes_whole_branches_and_everything_they_carry() {
+        // A branch dies as a unit: the tree does not keep a live twig on a dead limb.
+        let mut params = parse_species(OAK_RON).unwrap();
+        for level in &mut params.branch_levels {
+            level.dieback = 0.0;
+        }
+        let alive = grow(&params);
+        assert!(
+            alive.nodes.iter().all(|n| !n.dead),
+            "nothing should die when no level dies back"
+        );
+
+        for level in &mut params.branch_levels {
+            level.dieback = 0.25;
+        }
+        let sk = grow(&params);
+        let dead = sk.nodes.iter().filter(|n| n.dead).count();
+        assert!(dead > 50, "only {dead} nodes died at a quarter dieback");
+        assert!(dead < sk.nodes.len(), "the whole tree died");
+
+        for node in &sk.nodes {
+            if !node.dead {
+                continue;
+            }
+            for &child in &node.children {
+                assert!(
+                    sk.nodes[child as usize].dead,
+                    "a live stem hangs off dead wood"
+                );
+            }
+        }
+
+        // And the same tree twice over gives the same dead wood.
+        assert_eq!(
+            grow(&params).nodes.iter().filter(|n| n.dead).count(),
+            dead,
+            "dieback is not deterministic"
+        );
+    }
 
     #[test]
     fn trunk_keeps_its_thickness_up_the_stem() {
@@ -812,29 +1453,57 @@ mod tests {
             let env = params.envelope.scaled(params.envelope_scale);
             let sk = grow(&params);
             let trunk_stem = sk.nodes[0].stem;
-            let mut leader: Vec<Vec3> = sk
+            // In the order the trunk grew, not sorted by height. A trunk that leans
+            // hard enough to dip has a polyline whose sorted form is a different shape
+            // altogether, and reconstructing the anchor from that one answers a
+            // question growth never asked.
+            let leader: Vec<Vec3> = sk
                 .nodes
                 .iter()
                 .filter(|n| n.stem == trunk_stem)
                 .map(|n| n.position)
                 .collect();
-            leader.sort_by(|a, b| a.y.total_cmp(&b.y));
+
+            // What `crown_offset` would have returned for a node at `y`, given that
+            // only the first `grown` points of the leader had been recorded when it
+            // was asked. Growth is depth first, so a branch sees the trunk only as far
+            // as the trunk had climbed, and every prefix is a height some branch saw.
+            let anchor_at = |y: f32, grown: usize| -> Vec3 {
+                let seen = &leader[..grown];
+                let Some(first) = seen.first() else {
+                    return Vec3::ZERO;
+                };
+                if y <= first.y {
+                    return horizontal(*first);
+                }
+                for pair in seen.windows(2) {
+                    let (a, b) = (pair[0], pair[1]);
+                    if y <= b.y {
+                        let span = b.y - a.y;
+                        let t = if span > 1e-5 { (y - a.y) / span } else { 0.0 };
+                        return horizontal(a.lerp(b, t.clamp(0.0, 1.0)));
+                    }
+                }
+                horizontal(*seen.last().expect("checked non-empty"))
+            };
 
             // A dead stub is deliberately outside the crown: it is what is left of a
-            // branch the crown pruned the moment it appeared.
+            // branch the crown pruned the moment it appeared. Found from the nodes
+            // themselves rather than from `stem_runs`, which hides the wood that has
+            // since died and broken and would hand back no run for a stub at all.
             let mut stubs: std::collections::HashSet<u32> = std::collections::HashSet::new();
-            for run in sk.stem_runs() {
-                if run.len() != 1 {
+            for (i, node) in sk.nodes.iter().enumerate() {
+                let Some(parent) = node.parent else { continue };
+                let alone = sk.nodes[parent as usize].stem != node.stem && node.children.is_empty();
+                if !alone {
                     continue;
                 }
-                let node = &sk.nodes[run[0] as usize];
-                let Some(parent) = node.parent else { continue };
                 let expected = stem_params(&params, node.level)
                     .map(|sp| sp.dead_stub_length)
                     .unwrap_or(0.0);
                 let reach = (node.position - sk.nodes[parent as usize].position).length();
                 if expected > 0.0 && (reach - expected).abs() < 1e-3 {
-                    stubs.insert(run[0]);
+                    stubs.insert(i as u32);
                 }
             }
 
@@ -843,19 +1512,12 @@ mod tests {
                 if node.level == 0 || stubs.contains(&(i as u32)) {
                     continue;
                 }
-                // Growth interpolates along the trunk, so the anchors it could have
-                // used are the whole polyline below the node, not just its vertices.
+                // Every prefix of the leader is a trunk some branch was grown against,
+                // so the node has to sit inside the crown at least one of them offers.
                 let mut best = env.density(node.position);
-                for pair in leader.windows(2) {
-                    // Fine enough that the sampled anchor matches the continuous one
-                    // growth used to within far less than the crown falloff.
-                    for k in 0..=64 {
-                        let p = pair[0].lerp(pair[1], k as f32 / 64.0);
-                        if p.y > node.position.y + 1e-4 {
-                            continue;
-                        }
-                        best = best.max(env.density(node.position - horizontal(p)));
-                    }
+                for grown in 1..=leader.len() {
+                    let offset = anchor_at(node.position.y, grown);
+                    best = best.max(env.density(node.position - offset));
                 }
                 assert!(
                     best >= params.envelope.kill_threshold - 1e-4,

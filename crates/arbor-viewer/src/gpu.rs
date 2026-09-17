@@ -600,6 +600,10 @@ pub struct GpuMesh {
     u_sun_dir: glow::UniformLocation,
     u_sun_color: glow::UniformLocation,
     u_albedo_color: glow::UniformLocation,
+    u_moss_color: glow::UniformLocation,
+    u_moss_height: glow::UniformLocation,
+    u_moss_amount: glow::UniformLocation,
+    u_bark_darken_low: glow::UniformLocation,
     u_roughness: glow::UniformLocation,
     u_metallic: glow::UniformLocation,
     u_mode: glow::UniformLocation,
@@ -607,7 +611,29 @@ pub struct GpuMesh {
     u_normal_bias: glow::UniformLocation,
 }
 
+/// Colour of the moss on the bark, how far up it reaches, how much of the bark it
+/// takes, and how far the bark weathers darker toward the foot of the tree.
+#[derive(Clone, Copy, Debug)]
+pub struct BarkLook {
+    pub moss_color: Vec3,
+    pub moss_height: f32,
+    pub moss_amount: f32,
+    pub darken_low: f32,
+}
+
+impl BarkLook {
+    pub fn from_species(mp: &arbor_core::species::MeshParams) -> Self {
+        Self {
+            moss_color: Vec3::from(mp.moss_color),
+            moss_height: mp.moss_height,
+            moss_amount: mp.moss_amount,
+            darken_low: mp.bark_darken_low,
+        }
+    }
+}
+
 pub struct MeshDrawParams<'a> {
+    pub bark: BarkLook,
     pub sky: &'a SkyParams,
     pub normal_bias: f32,
     pub view_proj: Mat4,
@@ -676,6 +702,10 @@ impl GpuMesh {
                 u_sun_dir: u("u_sun_dir"),
                 u_sun_color: u("u_sun_color"),
                 u_albedo_color: u("u_albedo_color"),
+                u_moss_color: u("u_moss_color"),
+                u_moss_height: u("u_moss_height"),
+                u_moss_amount: u("u_moss_amount"),
+                u_bark_darken_low: u("u_bark_darken_low"),
                 u_roughness: u("u_roughness"),
                 u_metallic: u("u_metallic"),
                 u_mode: u("u_mode"),
@@ -742,6 +772,15 @@ impl GpuMesh {
             gl.uniform_3_f32(Some(&self.u_albedo_color), 1.0, 1.0, 1.0);
             gl.uniform_1_f32(Some(&self.u_roughness), 1.0);
             gl.uniform_1_f32(Some(&self.u_metallic), 0.0);
+            gl.uniform_3_f32(
+                Some(&self.u_moss_color),
+                p.bark.moss_color.x,
+                p.bark.moss_color.y,
+                p.bark.moss_color.z,
+            );
+            gl.uniform_1_f32(Some(&self.u_moss_height), p.bark.moss_height);
+            gl.uniform_1_f32(Some(&self.u_moss_amount), p.bark.moss_amount);
+            gl.uniform_1_f32(Some(&self.u_bark_darken_low), p.bark.darken_low);
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
             gl.uniform_1_i32(
                 Some(&self.u_use_normal_map),

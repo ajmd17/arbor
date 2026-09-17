@@ -64,8 +64,16 @@ fn node_budget_is_respected() {
 /// itself, which is what an unbounded pull toward the crown axis produces: whatever
 /// its strength there is a radius at which it supplies exactly the turn a circle
 /// needs, and the stem rides it round instead of settling.
+/// The worst net turn any stem makes between setting out and finishing, in degrees,
+/// and the worst ratio of how far a stem got to how far it travelled.
+///
+/// Both are about curling, and neither counts the jog a stem makes at every node.
+/// Summing the turn between consecutive segments would: a shoot that alternates a few
+/// degrees each way banks a large total while going perfectly straight, and that jog
+/// is wanted. What is not wanted is a stem that comes round on itself, which shows up
+/// as a large net turn, or as a path far longer than the distance it covered.
 fn worst_stem_turn(sk: &arbor_core::Skeleton) -> (f32, f32) {
-    let (mut worst, mut worst_per_m) = (0.0f32, 0.0f32);
+    let (mut worst, mut worst_wander) = (0.0f32, 1.0f32);
     for run in sk.stem_runs() {
         let mut dirs = Vec::new();
         let mut length = 0.0f32;
@@ -76,17 +84,19 @@ fn worst_stem_turn(sk: &arbor_core::Skeleton) -> (f32, f32) {
                 dirs.push(step.normalize());
             }
         }
-        let turn: f32 = dirs
-            .windows(2)
-            .map(|pair| pair[0].dot(pair[1]).clamp(-1.0, 1.0).acos())
-            .sum::<f32>()
-            .to_degrees();
-        worst = worst.max(turn);
-        if length > 1e-3 {
-            worst_per_m = worst_per_m.max(turn / length);
+        let (Some(first), Some(last)) = (dirs.first(), dirs.last()) else {
+            continue;
+        };
+        worst = worst.max(first.dot(*last).clamp(-1.0, 1.0).acos().to_degrees());
+        // Short stems are two or three segments long, so their straightness says more
+        // about the segment count than about their shape.
+        if length > 1.0 {
+            let reach = sk.nodes[run[run.len() - 1] as usize].position
+                - sk.nodes[run[0] as usize].position;
+            worst_wander = worst_wander.min(reach.length() / length);
         }
     }
-    (worst, worst_per_m)
+    (worst, worst_wander)
 }
 
 #[test]
@@ -97,14 +107,16 @@ fn stems_arc_without_curling_round_on_themselves() {
             let mut params = params.clone();
             params.seed = seed;
             let sk = grow(&params);
-            let (turn, per_m) = worst_stem_turn(&sk);
+            let (turn, straightness) = worst_stem_turn(&sk);
+            // A limb may sweep from upright to below the horizontal on its way out —
+            // that is the whole shape of an oak limb — but it may not come round.
             assert!(
-                turn < 75.0,
-                "{name} seed {seed} has a stem turning {turn:.0} degrees over its length"
+                turn < 115.0,
+                "{name} seed {seed} has a stem turning {turn:.0} degrees end to end"
             );
             assert!(
-                per_m < 60.0,
-                "{name} seed {seed} has a stem bending {per_m:.0} degrees per metre"
+                straightness > 0.6,
+                "{name} seed {seed} has a stem covering only {straightness:.2} of its own length"
             );
         }
     }

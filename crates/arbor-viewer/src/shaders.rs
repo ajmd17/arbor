@@ -16,6 +16,24 @@ uniform vec3 u_ground_bounce;
 uniform vec3 u_sh[9];
 uniform float u_exposure;
 
+// Value noise on a world position, for breaking up anything that would otherwise be
+// uniform across a whole surface.
+float hash31(vec3 p) {
+    return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float value_noise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash31(i), n100 = hash31(i + vec3(1, 0, 0));
+    float n010 = hash31(i + vec3(0, 1, 0)), n110 = hash31(i + vec3(1, 1, 0));
+    float n001 = hash31(i + vec3(0, 0, 1)), n101 = hash31(i + vec3(1, 0, 1));
+    float n011 = hash31(i + vec3(0, 1, 1)), n111 = hash31(i + vec3(1, 1, 1));
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
 vec3 sky_color(vec3 dir) {
     float h = clamp(dir.y, -1.0, 1.0);
     vec3 dome = mix(u_sky_horizon, u_sky_zenith, pow(max(h, 0.0), 0.42));
@@ -89,6 +107,10 @@ uniform vec3 u_cam_pos;
 uniform vec3 u_sun_dir;
 uniform vec3 u_sun_color;
 uniform vec3 u_albedo_color;
+uniform vec3 u_moss_color;
+uniform float u_moss_height;
+uniform float u_moss_amount;
+uniform float u_bark_darken_low;
 uniform float u_roughness;
 uniform float u_metallic;
 uniform int u_mode;
@@ -180,6 +202,19 @@ void main() {
         return;
     }
     vec3 albedo = texture(u_albedo_tex, v_uv).rgb * u_albedo_color;
+
+    // Bark is not one material. It weathers darker at the foot of a tree than high in
+    // the crown, and it carries moss where damp sits: low down, and on surfaces that
+    // face up rather than ones rain runs off. Both are read straight off world
+    // position and the surface normal, so no extra mesh data is needed for either.
+    albedo *= 1.0 - u_bark_darken_low * exp(-max(v_world.y, 0.0) * 0.35);
+    if (u_moss_amount > 0.0) {
+        float low = 1.0 - smoothstep(0.0, max(u_moss_height, 0.01), v_world.y);
+        float facing = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+        float mottle = value_noise(v_world * 1.7) * 0.65 + value_noise(v_world * 6.0) * 0.35;
+        float moss = u_moss_amount * low * facing * facing * smoothstep(0.35, 0.75, mottle);
+        albedo = mix(albedo, u_moss_color, clamp(moss, 0.0, 1.0));
+    }
     float rough = clamp(texture(u_rough_tex, v_uv).r * u_roughness, 0.045, 1.0);
     float metallic = clamp(u_metallic, 0.0, 1.0);
 

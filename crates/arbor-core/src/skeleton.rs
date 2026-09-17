@@ -15,6 +15,18 @@ pub struct SkeletonNode {
     /// share a `stem` form one unbroken tube; a change of `stem` between a node and
     /// its parent marks a real junction (branch or fork), not a mesh seam.
     pub stem: u32,
+    /// Whether this node belongs to a stem the tree has lost.
+    ///
+    /// Dead wood still stands on a mature tree: it carries no leaves, and it ends in a
+    /// break rather than tapering to a living tip. Set for a whole stem at once, since
+    /// a branch dies as a unit.
+    pub dead: bool,
+    /// Whether this node has already broken off and is no longer part of the tree.
+    ///
+    /// Dead wood does not stand for ever: the thin, exposed end of a dead branch snaps
+    /// and falls, leaving a stub. Broken nodes are skipped by everything downstream, so
+    /// they are absent rather than merely dead.
+    pub broken: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -45,6 +57,8 @@ impl Skeleton {
             stem_fraction,
             radius: 0.0,
             stem,
+            dead: false,
+            broken: false,
         });
         if let Some(p) = parent {
             self.nodes[p as usize].children.push(index);
@@ -67,12 +81,17 @@ impl Skeleton {
         let mut runs: Vec<Vec<u32>> = Vec::new();
         let mut slot: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         for (i, node) in self.nodes.iter().enumerate() {
+            // Broken wood is gone, not merely dead, so nothing downstream ever sees it.
+            if node.broken {
+                continue;
+            }
             let entry = *slot.entry(node.stem).or_insert_with(|| {
                 runs.push(Vec::new());
                 runs.len() - 1
             });
             runs[entry].push(i as u32);
         }
+        runs.retain(|r| !r.is_empty());
         runs
     }
 

@@ -528,6 +528,9 @@ struct StemPath {
     /// True for the stem that starts at the root node, which gets the buttress flare
     /// and the ground cap.
     is_trunk: bool,
+    /// True for a stem the tree has lost: no leaves, and a broken end rather than a
+    /// tapered one.
+    is_dead: bool,
     /// Parallel-transported frame at each ring. Built once here rather than in the
     /// sweep, because the bark needs to know which way a point on the surface faces
     /// before it can put a branch collar on the right side of the trunk.
@@ -681,6 +684,7 @@ impl StemPath {
             under,
             arc,
             is_trunk,
+            is_dead: sk.nodes[first].dead,
             frames,
             irregular,
         };
@@ -714,6 +718,7 @@ impl StemPath {
             under: self.under,
             arc,
             is_trunk: self.is_trunk,
+            is_dead: self.is_dead,
             frames,
             irregular: self.irregular,
         }
@@ -1014,6 +1019,9 @@ pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
 fn child_index(sk: &Skeleton) -> Vec<Vec<u32>> {
     let mut children: Vec<Vec<u32>> = vec![Vec::new(); sk.nodes.len()];
     for (i, node) in sk.nodes.iter().enumerate() {
+        if node.broken {
+            continue;
+        }
         if let Some(parent) = node.parent
             && sk.nodes[parent as usize].stem != node.stem
         {
@@ -1103,7 +1111,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     // straight to the tip is the same silhouette for a third of the triangles, and on
     // something a centimetre across it is arguably the better shape. The trunk keeps
     // its full sweep, since its top is not a twig.
-    let swept = if path.is_trunk {
+    let swept = if path.is_trunk || path.is_dead {
         path.len()
     } else {
         path.len() - 1
@@ -1176,10 +1184,15 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     }
 
     // Every stem closes with a cone: from its last ring for the trunk, and from the
-    // ring before it for everything else, which is what makes the tip a taper.
+    // ring before it for everything else, which is what makes the tip a taper. A stem
+    // the tree has lost ends where it snapped instead, so it gets a flat break.
     let end_dir = path.dirs[last];
     let r_end = path.radii[last];
-    let tip = path.points[last] + end_dir * mp.tip_length.max(r_end * 1.2);
+    let tip = if path.is_dead {
+        path.points[last]
+    } else {
+        path.points[last] + end_dir * mp.tip_length.max(r_end * 1.2)
+    };
     let apex = sink.vertex_offset();
     sink.push_vertex(tip, end_dir, ortho_of(end_dir), [0.0, path.arc[last]]);
     let base = ring_bases[swept - 1];
