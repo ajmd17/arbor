@@ -230,17 +230,19 @@
         // random angle about it (the full twist), so from any side some are seen edge
         // on and some face on and together they make a bottle brush. The negative
         // droop turns them up off the twig, which is how a pine's shoot tips stand.
-        cluster_size: 6,
+        cluster_size: 4,
         cluster_spread_deg: 20.0,
-        // Density and card size are held together by the leaf budget: this pine sits
-        // at about 146k of the 150k leaf triangles `leaf_budget_is_respected` allows,
-        // so a denser crown from here wants bigger cards, not more of them.
+        // Four cards to a tuft rather than six, each 0.56 m rather than 0.46: the same
+        // card area per tuft for two thirds of the cards, which took the leaves from
+        // 146k triangles to 97k with the brushes still reading as brushes. Much past
+        // this size a card starts to read as one lobed leaf again (0.6 m did), so the
+        // next saving has to come from fewer tufts, not bigger ones.
         // One photographed Scots pine shoot per card. The cell is 640 by 1088 and the
-        // card carries the same proportion, so the needles are not stretched. Small
-        // cards and many of them: at 0.6 m each tuft read as one lobed leaf at a
-        // distance, and the fine grain of a pine crown is many small brushes.
-        card_length: 0.46,
-        card_width: 0.27,
+        // card carries the same proportion, so the needles are not stretched. Kept
+        // under 0.6 m: at that size each tuft read as one lobed leaf at a distance,
+        // and the fine grain of a pine crown is many small brushes.
+        card_length: 0.56,
+        card_width: 0.33,
         size_variance: 0.3,
         crotch_angle_deg: 10.0,
         crotch_variance_deg: 8.0,
