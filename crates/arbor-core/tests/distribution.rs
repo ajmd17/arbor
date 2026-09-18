@@ -639,3 +639,101 @@ fn stems_arc_without_curling_round_on_themselves() {
         }
     }
 }
+
+/// What makes the pine read as a forest-grown Scots pine rather than a young one: the
+/// crown has climbed past the lower half of the bole and left its old limbs standing
+/// dead beneath it, whole limbs with their twigs on and no foliage, over a clear bole
+/// with stubs. Held across seeds, since a band that only one seed grows is luck.
+#[test]
+fn pine_carries_its_dead_limbs_under_a_living_crown() {
+    for seed in 1..=4u64 {
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.seed = seed;
+        let sk = grow(&params);
+        let height = sk.stats().height;
+
+        // Limbs off the trunk, long enough to be limbs rather than the stubs left on
+        // the bole below the crown.
+        let (mut low, mut low_dead, mut high, mut high_alive) = (0, 0, 0, 0);
+        for run in sk.stem_runs() {
+            let head = &sk.nodes[run[0] as usize];
+            let Some(parent) = head.parent else { continue };
+            let parent = &sk.nodes[parent as usize];
+            if head.level != 1 || parent.level != 0 || run.len() < 3 {
+                continue;
+            }
+            let at = parent.position.y / height;
+            if at < 0.45 {
+                low += 1;
+                low_dead += usize::from(head.dead);
+            } else if at > 0.65 {
+                high += 1;
+                high_alive += usize::from(!head.dead);
+            }
+        }
+        assert!(low >= 15, "seed {seed}: only {low} limbs in the dead band, so it is not a band");
+        assert!(
+            low_dead * 10 >= low * 9,
+            "seed {seed}: {low_dead} of {low} limbs under the crown are dead"
+        );
+        assert!(
+            high_alive * 10 >= high * 9,
+            "seed {seed}: {high_alive} of {high} limbs in the crown are alive"
+        );
+
+        // The dead band is the crown the tree had when it was younger and smaller, so
+        // its limbs are shorter than the living ones and most of their fine twigs have
+        // fallen. It used to be grown as wide as the living crown: dead limbs reaching
+        // five metres from the trunk carrying two kilometres of dead twig between them,
+        // a thicket where the reference shows a sparse band. Both ends are held — the
+        // floor is what stops it being thinned into a comb of bare pegs instead.
+        let (mut reaches, mut twig_wood) = (Vec::new(), 0.0f32);
+        for run in sk.stem_runs() {
+            let head = &sk.nodes[run[0] as usize];
+            let Some(parent) = head.parent else { continue };
+            if !head.dead || head.position.y > height * 0.55 {
+                continue;
+            }
+            let base = sk.nodes[parent as usize].position;
+            let mut length = (head.position - base).length();
+            for w in run.windows(2) {
+                length += (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position).length();
+            }
+            if head.level >= 2 {
+                twig_wood += length;
+            } else if head.level == 1 && run.len() >= 2 {
+                let reach = run
+                    .iter()
+                    .map(|&i| {
+                        let d = sk.nodes[i as usize].position - base;
+                        (d.x * d.x + d.z * d.z).sqrt()
+                    })
+                    .fold(0.0f32, f32::max);
+                reaches.push(reach);
+            }
+        }
+        reaches.sort_by(f32::total_cmp);
+        let p90 = reaches[reaches.len() * 9 / 10];
+        assert!(
+            p90 < 3.1,
+            "seed {seed}: the dead limbs reach {p90:.2} m from the trunk (90th percentile)"
+        );
+        assert!(
+            (150.0..1000.0).contains(&twig_wood),
+            "seed {seed}: {twig_wood:.0} m of dead twig in the band"
+        );
+
+        // And the foliage is up in the crown, not hung on the dead band.
+        let leaves = arbor_core::build_leaves(&sk, &params);
+        let below = leaves
+            .positions
+            .iter()
+            .filter(|p| p[1] < height * 0.4)
+            .count();
+        assert!(
+            below * 10 < leaves.positions.len(),
+            "seed {seed}: {below} of {} leaf vertices sit in the dead band",
+            leaves.positions.len()
+        );
+    }
+}

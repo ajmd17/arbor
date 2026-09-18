@@ -768,7 +768,12 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                self.camera_input(&resp, ctx);
+                // A capture opens its window wherever the cursor happens to be, and a
+                // stray scroll or drag over it would move the camera the command line
+                // placed before the frame is taken.
+                if self.capture.is_none() {
+                    self.camera_input(&resp, ctx);
+                }
 
                 let mesh_gpu = Arc::clone(&self.mesh_gpu);
                 let leaves_gpu = Arc::clone(&self.leaves_gpu);

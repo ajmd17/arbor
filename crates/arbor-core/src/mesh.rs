@@ -14,6 +14,9 @@ pub struct Mesh {
     pub normals: Vec<[f32; 3]>,
     pub tangents: Vec<[f32; 4]>,
     pub uvs: Vec<[f32; 2]>,
+    /// Per vertex, 1 on wood the tree has lost and 0 on living wood, for the renderer
+    /// to weather by `dead_wood_weathering`.
+    pub weathering: Vec<f32>,
     pub indices: Vec<u32>,
 }
 
@@ -411,8 +414,12 @@ impl Irregular {
     }
 }
 
+#[derive(Default)]
 struct MeshSink {
     mesh: Mesh,
+    /// Written onto every vertex pushed until it is changed: the stem being swept is
+    /// dead or it is not, and everything in it is the same.
+    weathering: f32,
 }
 
 impl MeshSink {
@@ -422,6 +429,7 @@ impl MeshSink {
         let t = norm_or_zero(tangent - normal * tangent.dot(normal));
         self.mesh.tangents.push([t.x, t.y, t.z, 1.0]);
         self.mesh.uvs.push(uv);
+        self.mesh.weathering.push(self.weathering);
     }
 
     fn vertex_offset(&self) -> u32 {
@@ -822,9 +830,7 @@ impl StemPath {
 
 pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
     let mp: &MeshParams = &params.mesh;
-    let mut sink = MeshSink {
-        mesh: Mesh::default(),
-    };
+    let mut sink = MeshSink::default();
     let phase = seed_phases(params.seed);
 
     let children = child_index(sk);
@@ -833,13 +839,26 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
         let Some(path) = StemPath::build(sk, &stem, mp, params.seed, &children) else {
             continue;
         };
-        if path.radii.iter().copied().fold(0.0f32, f32::max) < mp.min_bark_radius {
+        if too_thin_for_bark(&path, mp) {
             continue;
         }
+        sink.weathering = if path.is_dead { 1.0 } else { 0.0 };
         emit_stem(&mut sink, &path, mp, phase);
     }
 
     sink.mesh
+}
+
+/// Whether a stem is below the radius worth sweeping. Living twigs are culled against
+/// `min_bark_radius` because foliage hides them; dead wood carries none and answers to
+/// `dead_bark_radius` instead, when that is set.
+fn too_thin_for_bark(path: &StemPath, mp: &MeshParams) -> bool {
+    let cutoff = if path.is_dead && mp.dead_bark_radius > 0.0 {
+        mp.dead_bark_radius
+    } else {
+        mp.min_bark_radius
+    };
+    path.radii.iter().copied().fold(0.0f32, f32::max) < cutoff
 }
 
 /// One cone: the anchor ring of a stem drawn straight to its tip.
@@ -991,13 +1010,11 @@ pub fn stem_costs(sk: &Skeleton, params: &SpeciesParams) -> Vec<StemCost> {
         let Some(path) = StemPath::build(sk, &stem, mp, params.seed, &children) else {
             continue;
         };
-        if path.radii.iter().copied().fold(0.0f32, f32::max) < mp.min_bark_radius {
+        if too_thin_for_bark(&path, mp) {
             continue;
         }
         let counts = ring_sides(&path, mp, phase);
-        let mut sink = MeshSink {
-            mesh: Mesh::default(),
-        };
+        let mut sink = MeshSink::default();
         emit_stem(&mut sink, &path, mp, phase);
         let sides = |r: f32| -> usize {
             let tol = mp.silhouette_tolerance.max(1e-5);
@@ -1520,6 +1537,10 @@ mod tests {
         // under foliage nobody can see them. Dropping them has to drop only them.
         let mut params = parse_species(PINE_RON).unwrap();
         params.mesh.min_bark_radius = 0.0;
+        // Dead wood answers to a cutoff of its own; this is about the living one, so
+        // hold the dead to it too. `dead_twigs_answer_to_their_own_cutoff` covers the
+        // other.
+        params.mesh.dead_bark_radius = 0.0;
         let sk = crate::grow(&params);
         let all = build_mesh(&sk, &params);
 
@@ -1961,5 +1982,50 @@ mod tests {
         let (min, max) = mesh.aabb();
         assert!(min[1] > -0.3, "mesh dips below ground: {}", min[1]);
         assert!(max[1] > 5.0, "mesh too short: {}", max[1]);
+    }
+    #[test]
+    fn dead_twigs_answer_to_their_own_cutoff() {
+        // Living twigs are culled from the bark because foliage hides them. Dead wood
+        // carries none, so its thin twigs are on show, and a species can keep them
+        // while still dropping the living ones.
+        let mut params = parse_species(PINE_RON).unwrap();
+        let sk = crate::grow(&params);
+        assert!(sk.nodes.iter().any(|n| n.dead), "this preset should carry dead wood");
+
+        params.mesh.min_bark_radius = 0.02;
+        params.mesh.dead_bark_radius = 0.0;
+        let follows = build_mesh(&sk, &params);
+        params.mesh.dead_bark_radius = 0.001;
+        let keeps = build_mesh(&sk, &params);
+
+        let dead_verts = |m: &Mesh| m.weathering.iter().filter(|&&w| w > 0.5).count();
+        assert!(
+            dead_verts(&keeps) > dead_verts(&follows) * 2,
+            "a lower dead cutoff kept {} dead vertices against {}",
+            dead_verts(&keeps),
+            dead_verts(&follows)
+        );
+        let live_verts = |m: &Mesh| m.weathering.iter().filter(|&&w| w < 0.5).count();
+        assert_eq!(
+            live_verts(&keeps),
+            live_verts(&follows),
+            "the dead cutoff changed how much living wood was meshed"
+        );
+    }
+
+    #[test]
+    fn dead_wood_is_marked_for_weathering_and_living_wood_is_not() {
+        // The renderer bleaches dead wood by a per-vertex flag, so the flag has to be
+        // on every vertex of a dead stem, off every living one, and one per vertex.
+        let params = parse_species(PINE_RON).unwrap();
+        let sk = crate::grow(&params);
+        let mesh = build_mesh(&sk, &params);
+        assert_eq!(mesh.weathering.len(), mesh.positions.len());
+        let dead = mesh.weathering.iter().filter(|&&w| w == 1.0).count();
+        let alive = mesh.weathering.iter().filter(|&&w| w == 0.0).count();
+        assert_eq!(dead + alive, mesh.weathering.len(), "weathering is 0 or 1 per stem");
+        assert!(dead > 0 && alive > 0, "{dead} dead and {alive} living vertices");
+        // The trunk is alive, and it is the stem that starts at the root.
+        assert_eq!(mesh.weathering[0], 0.0, "the first vertex is the trunk's");
     }
 }

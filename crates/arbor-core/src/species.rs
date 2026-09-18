@@ -230,6 +230,26 @@ pub struct MeshParams {
     /// How much darker the bark is at the foot of the tree than high in the crown.
     /// Old bark low down weathers and holds damp; new wood above it does not.
     pub bark_darken_low: f32,
+    /// Colour multiplier over the bark texture, for pulling a bark set to the tone a
+    /// species wants without re-authoring the art.
+    pub bark_tint: [f32; 3],
+    /// Colour dead wood weathers toward.
+    ///
+    /// A branch that has lost its bark, or kept it and been bleached for years, goes
+    /// silver-grey whatever the living bark was, and on a conifer that is what makes
+    /// the dead lower limbs read as dead at a glance rather than as bare living ones.
+    pub dead_wood_color: [f32; 3],
+    /// How far dead wood has gone toward `dead_wood_color`, from 0 to 1. The grain
+    /// of the bark is kept and only its colour is pulled across.
+    pub dead_wood_weathering: f32,
+    /// Dead wood thinner than this gets no bark, in metres. Zero follows
+    /// `min_bark_radius`.
+    ///
+    /// The cull there exists because the finest twigs are buried in foliage, and dead
+    /// wood carries none: the dead twigs under a pine's crown are the finest wood on
+    /// the tree and among the most visible, so they want a lower threshold than the
+    /// living twigs do.
+    pub dead_bark_radius: f32,
     pub irregularity: BarkIrregularity,
 }
 
@@ -258,6 +278,10 @@ impl Default for MeshParams {
             moss_height: 0.0,
             moss_amount: 0.0,
             bark_darken_low: 0.0,
+            bark_tint: [1.0, 1.0, 1.0],
+            dead_wood_color: [0.62, 0.61, 0.58],
+            dead_wood_weathering: 0.0,
+            dead_bark_radius: 0.0,
             irregularity: BarkIrregularity::default(),
         }
     }
@@ -453,6 +477,30 @@ pub struct ChildParams {
     /// Whorls vary by up to this many branches either way, and may come out empty,
     /// which is what breaks the ladder rhythm of a whorl on every single node.
     pub count_variance: u32,
+    /// Share of the parent, from its base, whose children the crown has shaded out.
+    ///
+    /// A tree grows its lowest limbs first and then overtops them: the crown above
+    /// takes their light and they die where they stand, keeping their wood and their
+    /// twigs but none of their foliage. On the trunk this is the band of dead limbs
+    /// under the living crown of a pine; on a limb it is the bare, dead-twigged inside
+    /// of the limb with the foliage carried out at its end. Measured along the length
+    /// the parent actually grew, not the length it set out to, because a limb the
+    /// envelope cut short is shaded along what it has. Zero kills nothing.
+    pub shade_line: f32,
+    /// Depth of the transition under `shade_line`, as a share of the parent. At the
+    /// shade line every child still lives; this far below it every child is dead, and
+    /// in between the odds run evenly from one to the other, so the lowest living limb
+    /// is not a ruled line across the tree. Zero is a hard line.
+    pub shade_blend: f32,
+    /// How much of its length a shaded-out child keeps, at the parent's base.
+    ///
+    /// A limb that died years ago stopped growing when it died, and its thin outer end
+    /// has broken off since, so the dead limbs of a forest pine are shorter than the
+    /// living ones above them — and the oldest, lowest ones shortest of all. This is the
+    /// share kept by a child at the very base of the parent; it runs up to all of it
+    /// at the shade line, where the limbs have only just died. At 1 nothing is cut back
+    /// and the dead band is as long as the tree grew it.
+    pub shade_keep: f32,
 }
 
 impl Default for ChildParams {
@@ -472,6 +520,9 @@ impl Default for ChildParams {
             acrotony: 0.0,
             planarity: 0.0,
             count_variance: 0,
+            shade_line: 0.0,
+            shade_blend: 0.0,
+            shade_keep: 1.0,
         }
     }
 }
@@ -562,6 +613,14 @@ pub struct LeafClusterParams {
     /// Leaves are rotated in pixels, so a cell whose pixels are not square in world
     /// terms has to be stretched first or every rotated leaf comes out sheared.
     pub source_aspect: f32,
+    /// Alternative leaves stacked down the source, one `atlas_cols` x `atlas_rows` grid
+    /// each, and every leaf placed in the cluster picks one of them.
+    ///
+    /// A photographed set comes as several different sprays rather than one leaf, and a
+    /// tuft built from one of them repeated reads as that spray stamped round a point.
+    /// Drawing each leaf from the whole set is what makes a cluster look gathered
+    /// rather than cloned. One is a single source, as before.
+    pub sources: u32,
     /// Resolution of one generated cell. Cells are square, so a species that clusters
     /// wants a square card as well.
     pub cell_size: u32,
@@ -591,6 +650,7 @@ impl Default for LeafClusterParams {
             shoot_base: 0.99,
             shoot_tip: 0.26,
             source_aspect: 1.0,
+            sources: 1,
             cell_size: 1024,
             seed: 7,
         }
@@ -649,6 +709,36 @@ pub struct LeafParams {
     pub hue_variance: f32,
     /// Darkening applied to leaves deep inside the crown.
     pub interior_shade: f32,
+    /// How crisp the cutout edge stays as a card shrinks on screen, from 0 to 1.
+    ///
+    /// At 0 the filtered alpha is handed straight to alpha-to-coverage, which is soft:
+    /// a broad leaf keeps a clean outline and overlapping cards blend into a mass. Fine
+    /// art — needles a couple of texels wide — does not survive that. A few mip levels
+    /// down each needle has been averaged into the air around it and the foliage comes
+    /// out as smudges. At 1 the alpha is rescaled by how fast it changes across the
+    /// screen, so every edge is resolved to about a pixel whatever the mip, and the
+    /// strands stay strands.
+    pub edge_sharpness: f32,
+    /// How far a card seen from behind keeps the crown's outward shading, from 0 to 1.
+    ///
+    /// A card is one quad drawn from both sides, and seen from behind its shading normal
+    /// is turned round with it. For a broad leaf that is right: its underside faces
+    /// into the crown. But the normal has been leaned toward the outside of the crown
+    /// (`normal_blend`), and turning all of it round leans it inward instead, so every
+    /// card seen from its back shades as though buried. Half a canopy of randomly
+    /// rolled cards goes near black that way. A tuft of needles has no front and back —
+    /// it is a volume — so at 1 only the card's own flat share of the normal is turned
+    /// and the outward share stays put.
+    pub backface_volume: f32,
+    /// How dark foliage in shadow goes, from 0 to 1.
+    ///
+    /// The shadow map is a hard yes or no, and a card behind other foliage gets the
+    /// no: all of the sun taken away, and only the sky left. A broad leaf really does
+    /// throw a shadow that dense. A crown of needles does not — light comes through it
+    /// in a thousand gaps — and holding every card behind another to the sky alone
+    /// makes the shaded side of the crown go black where it should stay green. Below 1
+    /// that much of the sun is let through the shadow.
+    pub self_shadow: f32,
     /// When set, the leaf texture named below is a single leaf, and the atlas the
     /// renderer actually samples is generated from it at load. `atlas_cols` and
     /// `atlas_rows` describe both, since clustering maps each source cell to one
@@ -688,6 +778,9 @@ impl Default for LeafParams {
             tint: [1.0, 1.0, 1.0],
             hue_variance: 0.12,
             interior_shade: 0.35,
+            edge_sharpness: 0.0,
+            backface_volume: 0.0,
+            self_shadow: 1.0,
             cluster: None,
             atlas_cols: 1,
             atlas_rows: 1,

@@ -78,6 +78,7 @@ in vec3 a_pos;
 in vec3 a_normal;
 in vec2 a_uv;
 in vec4 a_tangent;
+in float a_weathering;
 uniform mat4 u_view_proj;
 uniform mat4 u_light_view_proj;
 uniform float u_normal_bias;
@@ -86,11 +87,13 @@ out vec3 v_normal;
 out vec2 v_uv;
 out vec4 v_tangent;
 out vec4 v_shadow;
+out float v_weathering;
 void main() {
     v_world = a_pos;
     v_normal = a_normal;
     v_uv = a_uv;
     v_tangent = a_tangent;
+    v_weathering = a_weathering;
     // Looked up a little along the normal rather than at the surface itself. With a
     // low sun the light grazes everything, and that is where plain depth bias either
     // stripes the bark with acne or lifts the shadow off its caster.
@@ -103,10 +106,13 @@ in vec3 v_normal;
 in vec2 v_uv;
 in vec4 v_tangent;
 in vec4 v_shadow;
+in float v_weathering;
 uniform vec3 u_cam_pos;
 uniform vec3 u_sun_dir;
 uniform vec3 u_sun_color;
 uniform vec3 u_albedo_color;
+uniform vec3 u_dead_color;
+uniform float u_dead_weathering;
 uniform vec3 u_moss_color;
 uniform float u_moss_height;
 uniform float u_moss_amount;
@@ -208,6 +214,15 @@ void main() {
     // face up rather than ones rain runs off. Both are read straight off world
     // position and the surface normal, so no extra mesh data is needed for either.
     albedo *= 1.0 - u_bark_darken_low * exp(-max(v_world.y, 0.0) * 0.35);
+    // Dead wood bleaches toward one silver-grey whatever the living bark was. The
+    // texture's own light and dark are kept as a modulation around that colour, so
+    // the grain survives and only the hue and the tone move across.
+    float dead = clamp(v_weathering * u_dead_weathering, 0.0, 1.0);
+    if (dead > 0.0) {
+        float grain = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+        vec3 weathered = u_dead_color * clamp(0.55 + 1.8 * grain, 0.35, 1.6);
+        albedo = mix(albedo, weathered, dead);
+    }
     if (u_moss_amount > 0.0) {
         float low = 1.0 - smoothstep(0.0, max(u_moss_height, 0.01), v_world.y);
         float facing = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
@@ -326,6 +341,14 @@ uniform vec2 u_atlas_back;
 uniform float u_alpha_cutoff;
 // Mip level at which coverage starts giving way to a hard cutoff.
 uniform float u_coverage_lod;
+// How far the soft cutout edge is sharpened toward a one-pixel one.
+uniform float u_edge_sharpness;
+// How far the stored normal leans toward the outside of the crown, and how much of
+// that lean a card seen from behind keeps.
+uniform float u_normal_blend;
+uniform float u_backface_volume;
+// How much of the sun a leaf in shadow loses: 1 is all of it.
+uniform float u_self_shadow;
 uniform float u_translucency;
 uniform int u_mode;
 uniform sampler2D u_albedo_tex;
@@ -421,6 +444,15 @@ void main() {
     float lod = 0.5 * log2(max(dot(du, du), dot(dv, dv)) + 1e-8);
     float snap = clamp((lod - u_coverage_lod) * 0.5, 0.0, 1.0);
     float coverage = mix(tex.a, step(u_alpha_cutoff, tex.a), snap);
+    // Fine art — needles a texel or two wide — averages into the air around it a few
+    // mips down, and handing that straight to coverage draws the strands as smudges.
+    // Rescaling alpha about the cutoff by its own screen-space rate of change puts the
+    // edge back to about one pixel wide at any mip, still anti-aliased by the samples,
+    // and the coverage-preserving mip chain is what keeps the density honest.
+    if (u_edge_sharpness > 0.0) {
+        float sharp = clamp((tex.a - u_alpha_cutoff) / max(fwidth(tex.a), 1e-4) + 0.5, 0.0, 1.0);
+        coverage = mix(coverage, sharp, u_edge_sharpness * (1.0 - snap));
+    }
     if (coverage < 1.0 / 255.0) {
         discard;
     }
@@ -434,7 +466,14 @@ void main() {
     // side while the direct terms use the flipped one and never go flat black.
     vec3 geometric = N;
     if (!gl_FrontFacing) {
-        N = -N;
+        // Turning the whole normal round also turns the crown's outward lean inward,
+        // which shades a card seen from behind as though it were buried. A volume of
+        // needles has no back, so it turns only the card's own flat share of the
+        // normal; the face comes from the derivatives, and its sign does not matter
+        // because it is used twice.
+        vec3 face = normalize(cross(dFdx(v_world), dFdy(v_world)));
+        vec3 kept = normalize(N - 2.0 * (1.0 - u_normal_blend) * dot(N, face) * face);
+        N = normalize(mix(-N, kept, u_backface_volume));
     }
     if (u_mode == 2) {
         out_color = vec4(N * 0.5 + 0.5, 1.0);
@@ -450,7 +489,9 @@ void main() {
     // Until the ambient is occluded, foliage is held to a matte floor.
     float rough = clamp(texture(u_rough_tex, uv).r, 0.55, 1.0);
     float ndl = max(dot(N, u_sun_dir), 0.0);
-    float shadow = sample_shadow(v_shadow, ndl);
+    // A needle crown lets light through in a thousand gaps, so shadow on foliage is
+    // not the yes-or-no the shadow map says.
+    float shadow = mix(1.0, sample_shadow(v_shadow, ndl), u_self_shadow);
 
     // Wrapped diffuse: a thin blade scatters enough that it never goes fully black
     // at grazing angles, and hard terminators across a canopy read as faceted. The

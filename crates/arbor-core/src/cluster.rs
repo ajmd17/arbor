@@ -23,6 +23,9 @@ const BOUNDS_CUTOFF: u8 = 8;
 /// Ceiling on the arrangements baked into one sheet, so a species cannot ask for an
 /// atlas that will not fit on a GPU.
 const MAX_VARIANTS: u32 = 16;
+/// Most alternative leaves a source may stack. Each is a full grid of cells decoded
+/// for the whole bake, so the ceiling is on memory rather than on sense.
+const MAX_SOURCES: u32 = 16;
 /// Decorrelates one variant's random stream from the next.
 const VARIANT_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 /// How far apart the shoots of a multi-shoot cluster stand, as a fraction of the cell.
@@ -220,6 +223,8 @@ struct Placement {
     bounds: (i32, i32, i32, i32),
     /// Multiplier on this leaf's colour, so the ones behind the shoot come out darker.
     value: f32,
+    /// Which of the source's alternative leaves this one is drawn from.
+    source: usize,
 }
 
 /// Composites `cols` x `rows` cluster cells out of the matching cells of `src`, once
@@ -235,32 +240,49 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
     let rows = rows.max(1);
     let size = p.cell_size.clamp(16, 4096);
 
+    // Each alternative leaf is a whole `cols` x `rows` grid, stacked down the source.
+    let sources = p.sources.clamp(1, MAX_SOURCES);
+    let src_rows = rows * sources;
+
     // Leaves are rotated here in pixels, so a cell whose pixels are not square in world
     // terms has to be stretched first or every rotated leaf comes out sheared.
-    let cell_h = (src.albedo.height / rows).max(1);
+    let cell_h = (src.albedo.height / src_rows).max(1);
     let square_w = ((cell_h as f32 * p.source_aspect.max(0.05)).round() as u32).max(1);
-    let cells: Vec<(Bitmap, Option<Bitmap>, Option<Bitmap>)> = (0..rows)
-        .flat_map(|r| (0..cols).map(move |c| (c, r)))
-        .map(|(c, r)| {
-            (
-                src.albedo.cell(cols, rows, c, r, square_w),
-                src.normal.map(|m| m.cell(cols, rows, c, r, square_w)),
-                src.roughness.map(|m| m.cell(cols, rows, c, r, square_w)),
-            )
-        })
-        .collect();
+    type Maps = (Bitmap, Option<Bitmap>, Option<Bitmap>);
+    let grid = |k: u32| -> Vec<Maps> {
+        (0..rows)
+            .flat_map(|r| (0..cols).map(move |c| (c, r)))
+            .map(|(c, r)| {
+                let r = k * rows + r;
+                (
+                    src.albedo.cell(cols, src_rows, c, r, square_w),
+                    src.normal.map(|m| m.cell(cols, src_rows, c, r, square_w)),
+                    src.roughness.map(|m| m.cell(cols, src_rows, c, r, square_w)),
+                )
+            })
+            .collect()
+    };
 
     // The leaf hinges on the middle of the base of whatever the alpha test keeps, so
     // the spray pivots where a real leaf meets the shoot rather than on a corner of an
-    // arbitrarily large cell. Cell zero decides it for every cell.
-    let Some(bounds) = cells[0].0.alpha_bounds(BOUNDS_CUTOFF) else {
+    // arbitrarily large cell. Cell zero of each alternative decides it for that
+    // alternative, and one that turns out empty is simply not drawn from.
+    let mut alts: Vec<(Vec<Maps>, (u32, u32, u32, u32))> = Vec::new();
+    for k in 0..sources {
+        let cells = grid(k);
+        if let Some(b) = cells[0].0.alpha_bounds(BOUNDS_CUTOFF) {
+            alts.push((cells, b));
+        }
+    }
+    if alts.is_empty() {
         // Nothing to arrange. Hand back the source untouched rather than a blank sheet.
         return BakedMaps {
             albedo: src.albedo.clone(),
             normal: src.normal.cloned(),
             roughness: src.roughness.cloned(),
         };
-    };
+    }
+    let bounds: Vec<(u32, u32, u32, u32)> = alts.iter().map(|a| a.1).collect();
 
     let variants = p.variants.clamp(1, MAX_VARIANTS);
     let sheet = || Bitmap::new(size * cols, size * rows * variants);
@@ -271,11 +293,15 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
         // Each variant is a shoot in its own right, so it gets its own stream rather
         // than a continuation of the last one: a species stays reproducible even if
         // the count of variants changes under it.
-        let places = lay_out(p, size, bounds, p.seed ^ (v as u64).wrapping_mul(VARIANT_STRIDE));
-        for (i, (a, n, r)) in cells.iter().enumerate() {
+        let places = lay_out(p, size, &bounds, p.seed ^ (v as u64).wrapping_mul(VARIANT_STRIDE));
+        for i in 0..(cols * rows) as usize {
             let ox = (i as u32 % cols) * size;
             let oy = (v * rows + i as u32 / cols) * size;
-            let baked = composite(&places, size, bounds, a, n.as_ref(), r.as_ref());
+            let maps: Vec<(&Bitmap, Option<&Bitmap>, Option<&Bitmap>)> = alts
+                .iter()
+                .map(|(cells, _)| (&cells[i].0, cells[i].1.as_ref(), cells[i].2.as_ref()))
+                .collect();
+            let baked = composite(&places, size, &bounds, &maps);
             blit(&mut albedo, &baked.albedo, ox, oy);
             if let (Some(dst), Some(s)) = (normal.as_mut(), baked.normal.as_ref()) {
                 blit(dst, s, ox, oy);
@@ -318,13 +344,9 @@ fn blit(dst: &mut Bitmap, src: &Bitmap, ox: u32, oy: u32) {
 fn lay_out(
     p: &LeafClusterParams,
     size: u32,
-    src: (u32, u32, u32, u32),
+    sources: &[(u32, u32, u32, u32)],
     seed: u64,
 ) -> Vec<Placement> {
-    let (bx0, by0, bx1, by1) = src;
-    let pivot = ((bx0 + bx1) as f32 * 0.5, by1 as f32);
-    let leaf_px = (by1 - by0 + 1) as f32;
-
     let mut rng = SmallRng::seed_from_u64(seed);
     let cell = size as f32;
     let count = p.count.clamp(1, 512);
@@ -362,6 +384,18 @@ fn lay_out(
     let mut placed: Vec<(f32, Placement)> = Vec::with_capacity(count as usize);
 
     for i in 0..count {
+        // Which alternative this leaf is. Only drawn when there is a choice, so a
+        // single-source species takes exactly the draws it always did.
+        let source = if sources.len() > 1 {
+            rng.random_range(0..sources.len())
+        } else {
+            0
+        };
+        let src = sources[source];
+        let (bx0, by0, bx1, by1) = src;
+        let pivot = ((bx0 + bx1) as f32 * 0.5, by1 as f32);
+        let leaf_px = (by1 - by0 + 1) as f32;
+
         // Leaves are dealt round the shoots rather than filling one and starting the
         // next, so every shoot is finished even when the count does not divide evenly.
         let shoot = (i % shoots) as usize;
@@ -443,6 +477,7 @@ fn lay_out(
             // depth cue a card has left once the arrangement has been flattened into
             // it, and without it a cluster lights as one flat sheet of colour.
             value: 1.0 - p.depth_shade.clamp(0.0, 1.0) * 0.5 * (1.0 - dz),
+            source,
         };
 
         let (lo, hi) = extent(&place, scale_x, scale_y, src);
@@ -528,23 +563,28 @@ fn dest_bounds(
 /// Painter's algorithm in premultiplied alpha. Every map is driven by the albedo's
 /// coverage, so a pixel's normal and roughness always come from whichever leaf owns
 /// the colour there.
+/// One cell's worth of source maps for each alternative leaf.
+type SourceMaps<'a> = (&'a Bitmap, Option<&'a Bitmap>, Option<&'a Bitmap>);
+
 fn composite(
     places: &[Placement],
     size: u32,
-    src_box: (u32, u32, u32, u32),
-    albedo: &Bitmap,
-    normal: Option<&Bitmap>,
-    rough: Option<&Bitmap>,
+    boxes: &[(u32, u32, u32, u32)],
+    sources: &[SourceMaps],
 ) -> BakedMaps {
     let n = (size as usize) * (size as usize);
     let mut acc_rgb = vec![[0.0f32; 3]; n];
     let mut acc_a = vec![0.0f32; n];
     let mut acc_n = vec![[0.0f32; 3]; n];
     let mut acc_r = vec![0.0f32; n];
-    let (lo_x, lo_y) = (src_box.0 as f32 - 1.0, src_box.1 as f32 - 1.0);
-    let (hi_x, hi_y) = (src_box.2 as f32 + 1.0, src_box.3 as f32 + 1.0);
+    // Every alternative has the same set of maps, so the first says which exist.
+    let (normal, rough) = (sources[0].1, sources[0].2);
 
     for p in places {
+        let (albedo, normal, rough) = sources[p.source];
+        let src_box = boxes[p.source];
+        let (lo_x, lo_y) = (src_box.0 as f32 - 1.0, src_box.1 as f32 - 1.0);
+        let (hi_x, hi_y) = (src_box.2 as f32 + 1.0, src_box.3 as f32 + 1.0);
         let (lx, ly, hx, hy) = p.bounds;
         for y in ly..=hy {
             for x in lx..=hx {
@@ -1200,5 +1240,79 @@ mod tests {
             },
         );
         assert_eq!(baked.albedo, src);
+    }
+    #[test]
+    fn a_cluster_draws_its_leaves_from_every_source() {
+        // A photographed set is several different sprays stacked down the sheet, and a
+        // tuft built from one of them repeated reads as that spray stamped round a
+        // point. With `sources` set, every leaf picks one, so both show up; without it
+        // the sheet is one tall cell and only the one leaf is ever drawn.
+        let (a, b) = (leaf(128, 128, 60), leaf(128, 128, 220));
+        let mut src = Bitmap::new(128, 256);
+        for y in 0..128 {
+            for x in 0..128 {
+                src.put(x, y, a.at(x, y));
+                src.put(x, y + 128, b.at(x, y));
+            }
+        }
+        let greens = |p: &LeafClusterParams| {
+            let baked = bake_cluster(
+                p,
+                1,
+                1,
+                LeafMaps {
+                    albedo: &src,
+                    normal: None,
+                    roughness: None,
+                },
+            );
+            let (mut dark, mut light) = (0, 0);
+            for y in 0..baked.albedo.height {
+                for x in 0..baked.albedo.width {
+                    let px = baked.albedo.at(x, y);
+                    // Solid interior only: edges blend the two and would count twice.
+                    if px[3] < 250 {
+                        continue;
+                    }
+                    if px[1] < 100 {
+                        dark += 1;
+                    } else if px[1] > 180 {
+                        light += 1;
+                    }
+                }
+            }
+            (dark, light)
+        };
+
+        let mixed = LeafClusterParams { sources: 2, ..params() };
+        let (dark, light) = greens(&mixed);
+        assert!(dark > 50 && light > 50, "two sources baked {dark} dark and {light} light texels");
+
+        // One source, and the default: the leaf is the whole sheet, both sprays drawn
+        // as one, so the cluster is built of that single leaf shape every time.
+        let single = bake_cluster(
+            &params(),
+            1,
+            1,
+            LeafMaps {
+                albedo: &src,
+                normal: None,
+                roughness: None,
+            },
+        );
+        let again = bake_cluster(
+            &LeafClusterParams { sources: 1, ..params() },
+            1,
+            1,
+            LeafMaps {
+                albedo: &src,
+                normal: None,
+                roughness: None,
+            },
+        );
+        assert_eq!(
+            single.albedo.pixels, again.albedo.pixels,
+            "sources: 1 has to bake exactly what the default always did"
+        );
     }
 }

@@ -592,6 +592,7 @@ pub struct GpuMesh {
     vbo_nrm: glow::Buffer,
     vbo_uv: glow::Buffer,
     vbo_tan: glow::Buffer,
+    vbo_weather: glow::Buffer,
     ibo: glow::Buffer,
     index_count: i32,
     u_view_proj: glow::UniformLocation,
@@ -600,6 +601,8 @@ pub struct GpuMesh {
     u_sun_dir: glow::UniformLocation,
     u_sun_color: glow::UniformLocation,
     u_albedo_color: glow::UniformLocation,
+    u_dead_color: glow::UniformLocation,
+    u_dead_weathering: glow::UniformLocation,
     u_moss_color: glow::UniformLocation,
     u_moss_height: glow::UniformLocation,
     u_moss_amount: glow::UniformLocation,
@@ -619,6 +622,9 @@ pub struct BarkLook {
     pub moss_height: f32,
     pub moss_amount: f32,
     pub darken_low: f32,
+    pub tint: Vec3,
+    pub dead_color: Vec3,
+    pub dead_weathering: f32,
 }
 
 impl BarkLook {
@@ -628,6 +634,9 @@ impl BarkLook {
             moss_height: mp.moss_height,
             moss_amount: mp.moss_amount,
             darken_low: mp.bark_darken_low,
+            tint: Vec3::from(mp.bark_tint),
+            dead_color: Vec3::from(mp.dead_wood_color),
+            dead_weathering: mp.dead_wood_weathering,
         }
     }
 }
@@ -650,12 +659,13 @@ pub struct MeshDrawParams<'a> {
 impl GpuMesh {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::MESH_VS, &shaders::mesh_fs(), &["a_pos", "a_normal", "a_uv", "a_tangent"]);
+            let program = compile_program(gl, shaders::MESH_VS, &shaders::mesh_fs(), &["a_pos", "a_normal", "a_uv", "a_tangent", "a_weathering"]);
             let vao = gl.create_vertex_array().expect("mesh vao");
             let vbo_pos = gl.create_buffer().expect("vbo pos");
             let vbo_nrm = gl.create_buffer().expect("vbo nrm");
             let vbo_uv = gl.create_buffer().expect("vbo uv");
             let vbo_tan = gl.create_buffer().expect("vbo tan");
+            let vbo_weather = gl.create_buffer().expect("vbo weathering");
             let ibo = gl.create_buffer().expect("ibo");
 
             gl.bind_vertex_array(Some(vao));
@@ -671,6 +681,9 @@ impl GpuMesh {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo_tan));
             gl.enable_vertex_attrib_array(3);
             gl.vertex_attrib_pointer_f32(3, 4, glow::FLOAT, false, 16, 0);
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo_weather));
+            gl.enable_vertex_attrib_array(4);
+            gl.vertex_attrib_pointer_f32(4, 1, glow::FLOAT, false, 4, 0);
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
@@ -694,6 +707,7 @@ impl GpuMesh {
                 vbo_nrm,
                 vbo_uv,
                 vbo_tan,
+                vbo_weather,
                 ibo,
                 index_count: 0,
                 u_view_proj: u("u_view_proj"),
@@ -702,6 +716,8 @@ impl GpuMesh {
                 u_sun_dir: u("u_sun_dir"),
                 u_sun_color: u("u_sun_color"),
                 u_albedo_color: u("u_albedo_color"),
+                u_dead_color: u("u_dead_color"),
+                u_dead_weathering: u("u_dead_weathering"),
                 u_moss_color: u("u_moss_color"),
                 u_moss_height: u("u_moss_height"),
                 u_moss_amount: u("u_moss_amount"),
@@ -723,6 +739,7 @@ impl GpuMesh {
                 (self.vbo_nrm, cast_slice(&mesh.normals)),
                 (self.vbo_uv, cast_slice(&mesh.uvs)),
                 (self.vbo_tan, cast_slice(&mesh.tangents)),
+                (self.vbo_weather, cast_slice(&mesh.weathering)),
             ] {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
                 gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STATIC_DRAW);
@@ -769,7 +786,19 @@ impl GpuMesh {
                 p.sun_color.y,
                 p.sun_color.z,
             );
-            gl.uniform_3_f32(Some(&self.u_albedo_color), 1.0, 1.0, 1.0);
+            gl.uniform_3_f32(
+                Some(&self.u_albedo_color),
+                p.bark.tint.x,
+                p.bark.tint.y,
+                p.bark.tint.z,
+            );
+            gl.uniform_3_f32(
+                Some(&self.u_dead_color),
+                p.bark.dead_color.x,
+                p.bark.dead_color.y,
+                p.bark.dead_color.z,
+            );
+            gl.uniform_1_f32(Some(&self.u_dead_weathering), p.bark.dead_weathering);
             gl.uniform_1_f32(Some(&self.u_roughness), 1.0);
             gl.uniform_1_f32(Some(&self.u_metallic), 0.0);
             gl.uniform_3_f32(
@@ -823,6 +852,14 @@ pub struct LeafMaterialParams {
     /// Mip level where soft coverage gives way to the cutoff.
     pub coverage_lod: f32,
     pub translucency: f32,
+    /// How far the cutout edge is sharpened to a pixel rather than left soft.
+    pub edge_sharpness: f32,
+    /// How far the shading normal was leaned toward the outside of the crown, and how
+    /// much of that lean a card seen from behind keeps.
+    pub normal_blend: f32,
+    pub backface_volume: f32,
+    /// How much of the sun a leaf in shadow still loses.
+    pub self_shadow: f32,
 }
 
 impl LeafMaterialParams {
@@ -852,6 +889,10 @@ impl LeafMaterialParams {
             // early costs nothing but the antialiasing on every leaf edge.
             coverage_lod: 9.0,
             translucency,
+            edge_sharpness: lp.edge_sharpness.clamp(0.0, 1.0),
+            normal_blend: lp.normal_blend.clamp(0.0, 1.0),
+            backface_volume: lp.backface_volume.clamp(0.0, 1.0),
+            self_shadow: lp.self_shadow.clamp(0.0, 1.0),
         }
     }
 }
@@ -942,6 +983,10 @@ pub struct GpuLeaves {
     u_alpha_cutoff: glow::UniformLocation,
     u_coverage_lod: glow::UniformLocation,
     u_translucency: glow::UniformLocation,
+    u_edge_sharpness: glow::UniformLocation,
+    u_normal_blend: glow::UniformLocation,
+    u_backface_volume: glow::UniformLocation,
+    u_self_shadow: glow::UniformLocation,
     u_mode: glow::UniformLocation,
     u_normal_bias: glow::UniformLocation,
 }
@@ -1001,6 +1046,10 @@ impl GpuLeaves {
                 u_atlas_back: u("u_atlas_back"),
                 u_alpha_cutoff: u("u_alpha_cutoff"),
                 u_coverage_lod: u("u_coverage_lod"),
+                u_edge_sharpness: u("u_edge_sharpness"),
+                u_normal_blend: u("u_normal_blend"),
+                u_backface_volume: u("u_backface_volume"),
+                u_self_shadow: u("u_self_shadow"),
                 u_translucency: u("u_translucency"),
                 u_mode: u("u_mode"),
                 u_normal_bias: u("u_normal_bias"),
@@ -1082,6 +1131,10 @@ impl GpuLeaves {
             gl.uniform_1_f32(Some(&self.u_alpha_cutoff), m.alpha_cutoff);
             gl.uniform_1_f32(Some(&self.u_coverage_lod), m.coverage_lod);
             gl.uniform_1_f32(Some(&self.u_translucency), m.translucency);
+            gl.uniform_1_f32(Some(&self.u_edge_sharpness), m.edge_sharpness);
+            gl.uniform_1_f32(Some(&self.u_normal_blend), m.normal_blend);
+            gl.uniform_1_f32(Some(&self.u_backface_volume), m.backface_volume);
+            gl.uniform_1_f32(Some(&self.u_self_shadow), m.self_shadow);
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
             gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
             p.sky.bind(gl, self.program);

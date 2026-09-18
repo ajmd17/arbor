@@ -1,13 +1,17 @@
 //! Repacks an irregular photo atlas into the regular grid the renderer samples.
 //!
 //! cargo run --release -p arbor-viewer --example repack_atlas -- \
-//!     <in-name> <out-name> [--rot 0,0,0] [--cell 640x1088] [--keep 3]
+//!     <in-name> <out-name> [--rot 0,0,0] [--cell 640x1088] [--keep 3] [--pick 2,3]
 //!
 //! Scanned foliage atlases come with their sprays dropped wherever they fitted on the
 //! sheet, at whatever angle they were photographed. The renderer indexes cells as a
 //! `cols x rows` grid, so the sprays have to be cut out and stacked one per row first.
 //! Each is found by its alpha, cropped to what it actually covers, turned upright, and
 //! fitted to a cell without stretching, so the shape of a spray survives the move.
+//!
+//! `--pick` keeps only the sprays at those positions in the list printed (sheet order),
+//! for a species that wants some of a sheet's sprays and not others. `--rot` then lines
+//! up with the picked ones.
 
 use image::{imageops, Rgba, RgbaImage};
 
@@ -21,6 +25,11 @@ const DIR: &str = "assets/textures";
 /// Alpha above this counts as foliage. The opacity map arrives as a JPEG, so its edges
 /// carry ringing that a cutoff at 1 would pick up as stray specks.
 const SOLID: u8 = 40;
+/// Alpha above this still belongs to whichever spray it touches: the soft needle edges
+/// and the tips too faint to count as foliage on their own.
+const FAINT: u8 = 6;
+/// A run of foliage smaller than this share of the biggest is a speck, not a spray.
+const MIN_SHARE: f32 = 0.02;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -54,23 +63,38 @@ fn main() {
         .exists()
         .then(|| open(&format!("{DIR}/{src}_roughness.png")));
 
-    let boxes = components(&albedo, keep);
-    println!("found {} sprays in {src}:", boxes.len());
-    for (i, b) in boxes.iter().enumerate() {
+    let (all_boxes, labels) = components(&albedo, keep);
+    // Each kept spray remembers the label it was found under, so picking a subset does
+    // not change which pixels belong to which.
+    let picked: Vec<usize> = match opt("--pick") {
+        Some(list) => list
+            .split(',')
+            .map(|v| v.trim().parse().expect("--pick wants indices"))
+            .collect(),
+        None => (0..all_boxes.len()).collect(),
+    };
+    println!("found {} sprays in {src}:", all_boxes.len());
+    for (i, b) in all_boxes.iter().enumerate() {
+        let slot = picked.iter().position(|&p| p == i);
         println!(
-            "  {i}: {}x{} at ({},{})  aspect {:.2}  rot {}",
+            "  {i}: {}x{} at ({},{})  aspect {:.2}  {}",
             b.2 - b.0,
             b.3 - b.1,
             b.0,
             b.1,
             (b.2 - b.0) as f32 / (b.3 - b.1) as f32,
-            rots.get(i).copied().unwrap_or(0)
+            match slot {
+                Some(k) => format!("rot {}", rots.get(k).copied().unwrap_or(0)),
+                None => "not picked".to_string(),
+            }
         );
     }
+    let boxes: Vec<(u32, (u32, u32, u32, u32))> =
+        picked.iter().map(|&i| (i as u32 + 1, all_boxes[i])).collect();
 
     let pack = |img: &RgbaImage, name: &str, alpha_from: Option<&RgbaImage>| {
         let mut sheet = RgbaImage::new(cw, ch * boxes.len() as u32);
-        for (i, b) in boxes.iter().enumerate() {
+        for (i, &(label, b)) in boxes.iter().enumerate() {
             let mut cell = imageops::crop_imm(img, b.0, b.1, b.2 - b.0, b.3 - b.1).to_image();
             // Maps other than the albedo have no alpha of their own, so the cut has to
             // come from the albedo's or they arrive as opaque rectangles.
@@ -78,6 +102,15 @@ fn main() {
                 let av = imageops::crop_imm(a, b.0, b.1, b.2 - b.0, b.3 - b.1).to_image();
                 for (p, q) in cell.pixels_mut().zip(av.pixels()) {
                     p.0[3] = q.0[3];
+                }
+            }
+            // A box is a rectangle and sprays on a crowded sheet reach into each other's,
+            // so anything in it that belongs to another spray is cut away.
+            let sheet_w = img.width();
+            for (x, y, p) in cell.enumerate_pixels_mut() {
+                let at = ((b.1 + y) * sheet_w + b.0 + x) as usize;
+                if labels[at] != label {
+                    p.0[3] = 0;
                 }
             }
             for _ in 0..(rots.get(i).copied().unwrap_or(0) / 90) % 4 {
@@ -114,47 +147,88 @@ fn main() {
     println!("wrote {out} as 1 x {} cells of {cw}x{ch}", boxes.len());
 }
 
-/// Bounding boxes of the largest connected runs of opaque pixels, biggest first.
-fn components(img: &RgbaImage, keep: usize) -> Vec<(u32, u32, u32, u32)> {
+/// The largest connected runs of opaque pixels, in the order they sit on the sheet, with
+/// a label per pixel saying which of them it belongs to (0 for none, else index + 1).
+///
+/// A spray is found by its solid core and then grown out through everything faint that
+/// touches it, so its soft edges and loose needle tips come with it; whatever is left
+/// over belongs to no spray and is dropped. Runs under `MIN_SHARE` of the biggest are
+/// specks and are not kept however few sprays the sheet holds.
+fn components(img: &RgbaImage, keep: usize) -> (Vec<(u32, u32, u32, u32)>, Vec<u32>) {
     let (w, h) = (img.width() as usize, img.height() as usize);
-    let solid: Vec<bool> = img.pixels().map(|p| p.0[3] > SOLID).collect();
-    let mut seen = vec![false; w * h];
-    let mut found: Vec<(usize, (u32, u32, u32, u32))> = Vec::new();
+    let alpha: Vec<u8> = img.pixels().map(|p| p.0[3]).collect();
+    let mut comp = vec![0u32; w * h];
+    let mut found: Vec<(usize, u32, (usize, usize))> = Vec::new();
+    let neighbours = |i: usize| {
+        let (x, y) = ((i % w) as i64, (i / w) as i64);
+        (-1i64..=1).flat_map(move |dy| (-1i64..=1).map(move |dx| (x + dx, y + dy))).filter_map(
+            move |(nx, ny)| {
+                (nx >= 0 && ny >= 0 && nx < w as i64 && ny < h as i64)
+                    .then(|| ny as usize * w + nx as usize)
+            },
+        )
+    };
+    let mut next = 0u32;
     for start in 0..w * h {
-        if !solid[start] || seen[start] {
+        if alpha[start] <= SOLID || comp[start] != 0 {
             continue;
         }
-        let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (w, h, 0usize, 0usize);
+        next += 1;
         let mut area = 0usize;
         let mut stack = vec![start];
-        seen[start] = true;
+        comp[start] = next;
         while let Some(i) = stack.pop() {
-            let (x, y) = (i % w, i / w);
             area += 1;
-            lo_x = lo_x.min(x);
-            lo_y = lo_y.min(y);
-            hi_x = hi_x.max(x);
-            hi_y = hi_y.max(y);
-            for dy in -1i64..=1 {
-                for dx in -1i64..=1 {
-                    let (nx, ny) = (x as i64 + dx, y as i64 + dy);
-                    if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
-                        continue;
-                    }
-                    let j = ny as usize * w + nx as usize;
-                    if solid[j] && !seen[j] {
-                        seen[j] = true;
-                        stack.push(j);
-                    }
+            for j in neighbours(i) {
+                if alpha[j] > SOLID && comp[j] == 0 {
+                    comp[j] = next;
+                    stack.push(j);
                 }
             }
         }
-        found.push((area, (lo_x as u32, lo_y as u32, hi_x as u32 + 1, hi_y as u32 + 1)));
+        found.push((area, next, (start % w, start / w)));
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
+    let biggest = found.first().map_or(0, |f| f.0);
+    found.retain(|f| f.0 as f32 >= biggest as f32 * MIN_SHARE);
     found.truncate(keep);
     // Back into the order they sat on the sheet, so `--rot` is easy to line up with what
     // the eye sees rather than with an area ranking.
-    found.sort_by_key(|(_, b)| (b.1, b.0));
-    found.into_iter().map(|(_, b)| b).collect()
+    found.sort_by_key(|&(_, _, (x, y))| (y, x));
+
+    // Relabel the kept cores 1..=n and grow them out through the faint pixels together,
+    // a ring at a time, so a pixel between two sprays goes to the nearer one.
+    let mut label = vec![0u32; w * h];
+    let mut frontier = Vec::new();
+    for (n, &(_, id, _)) in found.iter().enumerate() {
+        for i in 0..w * h {
+            if comp[i] == id {
+                label[i] = n as u32 + 1;
+                frontier.push(i);
+            }
+        }
+    }
+    while !frontier.is_empty() {
+        let mut ring = Vec::new();
+        for &i in &frontier {
+            for j in neighbours(i) {
+                if label[j] == 0 && alpha[j] > FAINT {
+                    label[j] = label[i];
+                    ring.push(j);
+                }
+            }
+        }
+        frontier = ring;
+    }
+
+    let mut boxes = vec![(u32::MAX, u32::MAX, 0u32, 0u32); found.len()];
+    for (i, &l) in label.iter().enumerate() {
+        if l == 0 {
+            continue;
+        }
+        let b = &mut boxes[l as usize - 1];
+        let (x, y) = ((i % w) as u32, (i / w) as u32);
+        *b = (b.0.min(x), b.1.min(y), b.2.max(x + 1), b.3.max(y + 1));
+    }
+    (boxes, label)
 }

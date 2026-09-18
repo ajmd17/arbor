@@ -212,11 +212,11 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
         f32::INFINITY,
     );
     resolve_radii(params, &mut skeleton);
-    mark_dieback(params, &mut skeleton);
+    let shade_keep = mark_dieback(params, &mut skeleton);
     // Reads the radii, so it has to follow them, and it is its own pass rather than
     // the tail of the one above: a species that loses no wood to dieback still has
     // wood the crown pruned, and that has to break back too.
-    break_dead_wood(params, &mut skeleton);
+    break_dead_wood(params, &mut skeleton, shade_keep.as_deref());
     skeleton
 }
 
@@ -270,19 +270,89 @@ fn crowding_field(skeleton: &Skeleton) -> Vec<f32> {
     local.iter().map(|&v| (v / hi).clamp(0.0, 1.0)).collect()
 }
 
+/// How far along its own stem every node sits, in metres, and how long each stem
+/// actually grew, indexed by stem id.
+///
+/// Stem ids are the index of a node, so a vector the length of the skeleton holds them
+/// all. Nodes are created parents first, so one forward pass is enough.
+fn stem_arcs(skeleton: &Skeleton) -> (Vec<f32>, Vec<f32>) {
+    let n = skeleton.nodes.len();
+    let mut arc = vec![0.0f32; n];
+    let mut grown = vec![0.0f32; n];
+    for i in 0..n {
+        let node = &skeleton.nodes[i];
+        if let Some(p) = node.parent {
+            let parent = &skeleton.nodes[p as usize];
+            let run = (node.position - parent.position).length();
+            arc[i] = if parent.stem == node.stem { arc[p as usize] + run } else { run };
+        }
+        let s = node.stem as usize;
+        if s < n {
+            grown[s] = grown[s].max(arc[i]);
+        }
+    }
+    (arc, grown)
+}
+
+/// The share of its own length a child shaded out at `t` along its parent keeps: the
+/// parent's `shade_keep` at its base, running up to all of it at the shade line.
+fn shade_keep_share(children: &crate::species::ChildParams, t: f32) -> f32 {
+    let keep = children.shade_keep.clamp(0.0, 1.0);
+    let rise = (t / children.shade_line.max(1e-4)).clamp(0.0, 1.0);
+    keep + (1.0 - keep) * rise
+}
+
+/// The share of children leaving a parent at `t` along it (0 at its base, 1 at its tip)
+/// that its crown has shaded out, from the parent's `shade_line` and `shade_blend`.
+fn shaded_share(children: &crate::species::ChildParams, t: f32) -> f32 {
+    if children.shade_line <= 0.0 {
+        return 0.0;
+    }
+    if children.shade_blend <= 1e-4 {
+        return if t < children.shade_line { 1.0 } else { 0.0 };
+    }
+    ((children.shade_line - t) / children.shade_blend).clamp(0.0, 1.0)
+}
+
 /// Marks the stems the tree has lost.
 ///
 /// A branch dies as a unit and takes everything it carries with it, so this runs as a
 /// pass over the finished skeleton rather than during growth: a stem cannot know
 /// whether it will be shaded out until the neighbours that shade it exist. Nodes are
 /// created parents first, so one forward pass both decides and propagates.
-fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) {
-    let any = stem_params(params, 0).is_some_and(|sp| sp.dieback > 0.0)
-        || params.branch_levels.iter().any(|sp| sp.dieback > 0.0);
-    if !any {
-        return;
+///
+/// Two things kill a stem. `shade_line` on the parent's children is where it sits:
+/// low on its parent, under a crown that has since grown over it. `dieback` on its own
+/// level is what it is: weak, and buried among its neighbours.
+///
+/// Returns, when anything was shaded out, the length in metres each stem keeps before
+/// it breaks off, indexed by stem id: infinite for everything but the shaded, which are
+/// cut back by their parent's `shade_keep`. The breaking itself is left to
+/// `break_dead_wood`, which has to run after the radii are known anyway.
+fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> Option<Vec<f32>> {
+    let levels = std::iter::once(&params.trunk).chain(params.branch_levels.iter());
+    let (any_dieback, any_shade) = levels.fold((false, false), |(d, s), sp| {
+        (d || sp.dieback > 0.0, s || sp.children.shade_line > 0.0)
+    });
+    if !any_dieback && !any_shade {
+        return None;
     }
-    let crowding = crowding_field(skeleton);
+    // Crowding is the expensive part and only dieback reads it.
+    let crowding = if any_dieback {
+        crowding_field(skeleton)
+    } else {
+        vec![0.0; skeleton.nodes.len()]
+    };
+    let (arc, grown) = if any_shade {
+        stem_arcs(skeleton)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut keep = if any_shade {
+        Some(vec![f32::INFINITY; skeleton.nodes.len()])
+    } else {
+        None
+    };
     for (i, &crowd) in crowding.iter().enumerate() {
         let node = &skeleton.nodes[i];
         let (parent, level, stem, path, vigor) =
@@ -297,6 +367,27 @@ fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) {
         if !starts_stem {
             skeleton.nodes[i].dead = skeleton.nodes[parent.unwrap() as usize].dead;
             continue;
+        }
+        // Shaded out where it stands. Only a lateral answers to this: a fork is the
+        // parent carrying on, not a child hanging off it.
+        if any_shade && let Some(p) = parent {
+            let p_node = &skeleton.nodes[p as usize];
+            if level == p_node.level + 1
+                && let Some(parent_sp) = stem_params(params, p_node.level)
+            {
+                let along = arc[p as usize] / grown[p_node.stem as usize].max(1e-4);
+                let share = shaded_share(&parent_sp.children, along);
+                if share > 0.0 && hash_unit(params.seed ^ 0x5AD3_11E5, path) < share {
+                    skeleton.nodes[i].dead = true;
+                    if let Some(keep) = keep.as_mut() {
+                        let s = stem as usize;
+                        if s < keep.len() {
+                            keep[s] = grown[s] * shade_keep_share(&parent_sp.children, along);
+                        }
+                    }
+                    continue;
+                }
+            }
         }
         let Some(sp) = stem_params(params, level) else {
             continue;
@@ -323,6 +414,7 @@ fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) {
             skeleton.nodes[i].dead = true;
         }
     }
+    keep
 }
 
 /// Snaps the thin, exposed ends off the wood the tree has lost.
@@ -331,9 +423,14 @@ fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) {
 /// and more exposed it is, and it goes first. What is left is a stub. A limb thicker
 /// than its level's `snap_radius` keeps its length; below that it breaks back in
 /// proportion, and everything it carried goes with it.
-fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton) {
+///
+/// A stem shaded out low on its parent is cut back further, to the length `shade_keep`
+/// gave it in `keep` (indexed by stem id), since it died long ago and stopped growing
+/// then.
+fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton, keep: Option<&[f32]>) {
     // The radius the stem started at, carried along its run.
     let mut stem_base = vec![0.0f32; skeleton.nodes.len()];
+    let arc = keep.map(|_| stem_arcs(skeleton).0);
     for i in 0..skeleton.nodes.len() {
         let node = &skeleton.nodes[i];
         let (parent, stem, radius, frac, level, dead) = (
@@ -356,6 +453,15 @@ fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton) {
             radius
         };
         if !dead {
+            continue;
+        }
+        // Cut back to what it had when it died. Like the snap below, never the node
+        // the stem starts on: the stub stays.
+        if let (Some(keep), Some(arc)) = (keep, arc.as_ref())
+            && same_stem
+            && arc[i] > keep.get(stem as usize).copied().unwrap_or(f32::INFINITY)
+        {
+            skeleton.nodes[i].broken = true;
             continue;
         }
         let Some(sp) = stem_params(params, level) else {
@@ -1077,7 +1183,7 @@ fn da_vinci_exp(params: &SpeciesParams, level: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON};
+    use crate::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON, SPRUCE_RON};
 
     /// Every stem in the skeleton, as (level, length, children it carries, the
     /// fraction along its parent where it attaches).
@@ -2004,7 +2110,11 @@ mod tests {
         // Conifer branchlets grow in the flat plane of the limb carrying them, and
         // those plates are most of what gives a fir its layered look. Without it the
         // branchlets spiral around the limb and every spray reads as a bottle brush.
-        let params = parse_species(PINE_RON).unwrap();
+        //
+        // The spruce, because its sprays are flat plates. The pine used to be the
+        // fixture here, but a pine's shoots really are bottle brushes and its preset no
+        // longer asks for plates.
+        let params = parse_species(SPRUCE_RON).unwrap();
         assert!(
             params.branch_levels[0].children.planarity > 0.5,
             "this preset should use flat sprays"
@@ -2062,10 +2172,18 @@ mod tests {
         let params = parse_species(PINE_RON).unwrap();
         let stub_len = params.branch_levels[0].dead_stub_length;
         assert!(stub_len > 0.0, "this preset should keep stubs");
-        let crown_base = match params.envelope.volumes.first() {
-            Some(crate::envelope::EnvelopeVolume::Cone { base_y, .. }) => *base_y,
-            other => panic!("expected a cone crown, got {other:?}"),
-        };
+        // The foot of the crown is the lowest any of its volumes reaches, since the
+        // envelope is their union and a preset may build it from several.
+        let crown_base = params
+            .envelope
+            .volumes
+            .iter()
+            .map(|v| match v {
+                crate::envelope::EnvelopeVolume::Cone { base_y, apex_y, .. } => base_y.min(*apex_y),
+                crate::envelope::EnvelopeVolume::Cylinder { base_y, top_y, .. } => base_y.min(*top_y),
+                crate::envelope::EnvelopeVolume::Ellipsoid { center, radii } => center[1] - radii[1],
+            })
+            .fold(f32::INFINITY, f32::min);
 
         let sk = grow(&params);
         let stubs: Vec<&crate::SkeletonNode> = sk
@@ -2153,7 +2271,11 @@ mod tests {
         // A trunk that drifts sideways used to leave its own crown behind: branches
         // near the top were measured against a cone still centred on the world axis,
         // so they were pruned the moment they were born and the leader came out bare.
-        let params = parse_species(PINE_RON).unwrap();
+        //
+        // The spruce, because it leans and its spire pinches in hard enough that a
+        // leaning top falls outside a crown centred on the world axis. The pine it used
+        // to use now stands straight under a broad crown, and would test nothing.
+        let params = parse_species(SPRUCE_RON).unwrap();
         let env = params.envelope.scaled(params.envelope_scale);
         let sk = grow(&params);
 
@@ -2188,5 +2310,126 @@ mod tests {
         for node in &sk.nodes {
             assert!(node.level <= 1, "found level {}", node.level);
         }
+    }
+    #[test]
+    fn a_shade_line_kills_the_limbs_under_it_and_keeps_their_wood() {
+        // A tree overtops its own lowest limbs and they die where they stand: dead,
+        // carrying their twigs, but none of their foliage. Everything under the shade
+        // line is lost and everything over it lives, measured along the length the
+        // trunk actually grew.
+        let mut params = SpeciesParams {
+            max_levels: 3,
+            max_split_depth: 0,
+            branch_levels: vec![StemParams::branch_default(1), StemParams::branch_default(2)],
+            ..Default::default()
+        };
+        params.envelope.volumes = vec![crate::envelope::EnvelopeVolume::Ellipsoid {
+            center: [0.0, 0.0, 0.0],
+            radii: [500.0, 500.0, 500.0],
+        }];
+        params.trunk.split_probability = 0.0;
+        params.trunk.children.pattern = ChildPattern::Whorl { every: 1, count: 3 };
+        params.trunk.children.start_fraction = 0.05;
+        params.trunk.children.shade_line = 0.5;
+        params.trunk.children.shade_blend = 0.0;
+        for level in &mut params.branch_levels {
+            level.split_probability = 0.0;
+            level.dieback = 0.0;
+            level.snap_radius = 0.0;
+        }
+        params.branch_levels[0].children.pattern = ChildPattern::Continuous { density: 2.0 };
+
+        let sk = grow(&params);
+        let height = sk
+            .nodes
+            .iter()
+            .filter(|n| n.level == 0)
+            .map(|n| n.position.y)
+            .fold(0.0f32, f32::max);
+        let (mut below, mut above) = (0, 0);
+        for run in sk.stem_runs() {
+            let head = &sk.nodes[run[0] as usize];
+            if head.level != 1 {
+                continue;
+            }
+            let attach = sk.nodes[head.parent.unwrap() as usize].position.y;
+            // Stay clear of the line itself, where a limb's attachment and the trunk's
+            // arc length can disagree by a segment.
+            if attach < height * 0.42 {
+                below += 1;
+                assert!(head.dead, "a limb at {attach:.1} m of {height:.1} lived under the shade line");
+            } else if attach > height * 0.58 {
+                above += 1;
+                assert!(!head.dead, "a limb at {attach:.1} m of {height:.1} died over the shade line");
+            }
+        }
+        assert!(below > 5 && above > 5, "only {below} limbs below and {above} above");
+        // It keeps what it grew: dead wood with its twigs still on it.
+        let dead_twigs = sk.nodes.iter().filter(|n| n.dead && n.level == 2 && !n.broken).count();
+        assert!(dead_twigs > 20, "the shaded-out limbs carry only {dead_twigs} twig nodes");
+
+        // Shading decides what is dead, not what grew: the same tree without it has
+        // exactly the same wood, and none of it is dead. It is off by default.
+        params.trunk.children.shade_line = 0.0;
+        let unshaded = grow(&params);
+        assert_eq!(unshaded.nodes.len(), sk.nodes.len(), "shading changed how the tree grew");
+        assert!(unshaded.nodes.iter().all(|n| !n.dead));
+    }
+    #[test]
+    fn shade_keep_cuts_the_oldest_dead_limbs_back_hardest() {
+        // A limb shaded out long ago stopped growing then and has lost its end since,
+        // so the lowest dead limbs are the shortest and the ones that only just died
+        // under the crown keep nearly everything. `shade_keep` is the share kept at the
+        // parent's base, rising to all of it at the shade line.
+        let mut params = SpeciesParams {
+            max_levels: 2,
+            max_split_depth: 0,
+            ..Default::default()
+        };
+        params.envelope.volumes = vec![crate::envelope::EnvelopeVolume::Ellipsoid {
+            center: [0.0, 0.0, 0.0],
+            radii: [500.0, 500.0, 500.0],
+        }];
+        params.trunk.split_probability = 0.0;
+        params.trunk.children.pattern = ChildPattern::Whorl { every: 1, count: 3 };
+        params.trunk.children.start_fraction = 0.05;
+        params.trunk.children.scale_variance = 0.0;
+        params.trunk.children.dominance = 0.0;
+        params.trunk.children.shade_line = 0.6;
+        params.trunk.children.shade_blend = 0.0;
+        let limb = &mut params.branch_levels[0];
+        limb.split_probability = 0.0;
+        limb.snap_radius = 0.0;
+        limb.length_variance = 0.0;
+
+        // Total standing length of dead limbs attached in a band of the trunk's height.
+        let dead_length = |params: &SpeciesParams, lo: f32, hi: f32| -> f32 {
+            let sk = grow(params);
+            let height = sk.stats().height;
+            sk.stem_runs()
+                .iter()
+                .filter(|run| {
+                    let head = &sk.nodes[run[0] as usize];
+                    let at = sk.nodes[head.parent.unwrap_or(0) as usize].position.y / height;
+                    head.level == 1 && head.dead && at >= lo && at < hi
+                })
+                .map(|run| stem_length(&sk, run))
+                .sum()
+        };
+
+        params.trunk.children.shade_keep = 1.0;
+        let (low_full, high_full) = (dead_length(&params, 0.0, 0.2), dead_length(&params, 0.45, 0.58));
+        params.trunk.children.shade_keep = 0.3;
+        let (low_cut, high_cut) = (dead_length(&params, 0.0, 0.2), dead_length(&params, 0.45, 0.58));
+
+        assert!(low_full > 1.0 && high_full > 1.0, "no dead limbs to cut: {low_full} {high_full}");
+        assert!(
+            low_cut < low_full * 0.5,
+            "the lowest dead limbs kept {low_cut:.1} m of {low_full:.1} m at a keep of 0.3"
+        );
+        assert!(
+            high_cut > high_full * 0.75,
+            "limbs that only just died kept only {high_cut:.1} m of {high_full:.1} m"
+        );
     }
 }

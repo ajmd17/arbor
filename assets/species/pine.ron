@@ -1,166 +1,198 @@
 (
     name: "Pine",
     seed: 1,
-    max_levels: 5,
+    // Four levels, not five: trunk, limbs, branchlets, shoots. The shoot a pine carries
+    // its needles on is what each foliage card is a photograph of, so growing a level
+    // of twigs below it only buries the cards in wood. The fifth entry below is kept so
+    // `Branch levels` in the viewer has something to grow if it is raised.
+    max_levels: 4,
     max_split_depth: 1,
+    // A mature Scots pine as a forest grows one: a tall straight bole, a band of dead
+    // limbs under the living crown that the crown shaded out as it climbed, and above
+    // that a crown of long sinuous limbs carrying their needles in brush-like tufts at
+    // the ends, with sky and branchwork showing between them.
     trunk: (
-        length: 19.0,
-        length_variance: 0.1,
-        radius: 0.3,
+        length: 28.0,
+        length_variance: 0.06,
+        radius: 0.42,
         radius_ratio: 0.6,
-        taper: 0.1,
+        taper: 0.08,
         da_vinci_exponent: 2.4,
-        segment_length: 0.55,
-        curvature: 0.012,
-        phototropism: 0.035,
-        gravity: 0.004,
+        // A whorl on every segment, so this is the spacing of the tiers.
+        segment_length: 1.1,
+        curvature: 0.004,
+        phototropism: 0.03,
+        gravity: 0.003,
         zigzag_deg: 0.0,
-        vigor_falloff: 0.35,
-        split_probability: 0.02,
+        vigor_falloff: 0.3,
+        split_probability: 0.01,
         split_angle_deg: 10.0,
         // A conifer never gives up its leader: the rare fork stays a side branch and
-        // the spire carries on. This one number is most of what separates it from the
-        // oak, which trades its trunk for a crown of equals partway up.
+        // the spire carries on.
         split_evenness: 0.0,
-        split_start_fraction: 0.7,
+        split_start_fraction: 0.8,
         children: (
-            pattern: Whorl(every: 1, count: 4),
-            start_fraction: 0.06,
+            // Five to a whorl, and only rarely a gap: a forest pine's crown is a dense
+            // mass with the limbs showing through it, not a few tiers standing apart.
+            pattern: Whorl(every: 1, count: 5),
+            start_fraction: 0.12,
             end_fraction: 0.99,
-            crotch_angle_deg: 88.0,
-            crotch_angle_tip_deg: 38.0,
-            crotch_variance_deg: 14.0,
-            roll_variance_deg: 28.0,
+            crotch_angle_deg: 110.0,
+            crotch_angle_tip_deg: 50.0,
+            crotch_variance_deg: 10.0,
+            roll_variance_deg: 30.0,
             phyllotaxis_deg: 137.5,
-            scale: 0.46,
-            scale_variance: 0.5,
-            // A whorl is a cohort of equals, held that way by the leader above it, so
-            // the skewed lottery that builds a broadleaf crown is turned almost off
-            // here. What varies between whorls is age, not rank: the lowest ones have
-            // had the most seasons to extend, which is the negative acrotony.
-            dominance: 0.15,
-            acrotony: -0.35,
-            planarity: 1.0,
-            count_variance: 4,
+            scale: 0.5,
+            scale_variance: 0.4,
+            dominance: 0.3,
+            acrotony: -0.2,
+            planarity: 0.4,
+            count_variance: 2,
+            // The crown has climbed past the lower half of the bole, and what it left
+            // behind stands dead: whole limbs with their twigs, bleached, carrying
+            // nothing. Under the envelope's base they were pruned at birth and are
+            // stubs instead. The blend is kept narrow on purpose — at 0.2 living limbs
+            // were scattered down through the dead band and it stopped reading as a
+            // band at all. `pine_carries_its_dead_limbs_under_a_living_crown` holds it.
+            shade_line: 0.58,
+            shade_blend: 0.08,
+            // The dead limbs stopped growing when they died and have lost their ends
+            // since, so the oldest, lowest ones keep only this much of their length,
+            // rising to all of it for the ones that have only just died under the
+            // crown. It is what tapers the dead band in toward the ground.
+            shade_keep: 0.4,
         ),
     ),
     branch_levels: [
         (
-            length: 6.5,
-            length_variance: 0.3,
-            radius: 0.075,
-            radius_ratio: 0.5,
-            taper: 0.14,
+            // The limbs. Long, and sinuous rather than straight: a pine limb is laid
+            // down a season at a time and each season's shoot sets off at its own
+            // angle, which is what the zigzag and the curvature stand for.
+            length: 8.0,
+            length_variance: 0.25,
+            radius: 0.11,
+            radius_ratio: 0.45,
+            taper: 0.12,
             da_vinci_exponent: 2.3,
-            segment_length: 0.35,
-            curvature: 0.05,
-            phototropism: 0.006,
+            segment_length: 0.4,
+            curvature: 0.12,
+            phototropism: 0.03,
             gravity: 0.03,
-            zigzag_deg: 1.5,
-            vigor_falloff: 0.55,
-            dieback: 0.05,
-            split_probability: 0.06,
-            split_angle_deg: 20.0,
+            droop: 1.2,
+            zigzag_deg: 7.0,
+            vigor_falloff: 0.5,
+            dieback: 0.04,
+            snap_radius: 0.02,
+            split_probability: 0.05,
+            split_angle_deg: 25.0,
             split_evenness: 0.0,
-            dead_stub_length: 0.78,
+            dead_stub_length: 0.9,
             split_start_fraction: 0.35,
             children: (
-                pattern: Continuous(density: 3.6),
-                start_fraction: 0.12,
-                end_fraction: 0.98,
-                crotch_angle_deg: 62.0,
-                crotch_angle_tip_deg: 34.0,
-                crotch_variance_deg: 14.0,
-                roll_variance_deg: 10.0,
-                phyllotaxis_deg: 180.0,
+                pattern: Continuous(density: 4.0),
+                start_fraction: 0.2,
+                end_fraction: 0.97,
+                crotch_angle_deg: 55.0,
+                crotch_angle_tip_deg: 35.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 25.0,
+                phyllotaxis_deg: 137.5,
                 scale: 0.5,
                 scale_variance: 0.4,
                 dominance: 0.3,
-                acrotony: 0.2,
-                planarity: 0.92,
+                acrotony: 0.5,
+                planarity: 0.5,
                 count_variance: 0,
+                // The inside of a living limb is bare: its own outer growth shades
+                // it, and the twigs there are dead ones.
+                shade_line: 0.2,
+                shade_blend: 0.15,
             ),
         ),
         (
-            length: 2.6,
-            length_variance: 0.35,
-            radius: 0.045,
+            length: 2.2,
+            length_variance: 0.2,
+            radius: 0.035,
             radius_ratio: 0.45,
             taper: 0.16,
             da_vinci_exponent: 2.3,
-            segment_length: 0.28,
-            zigzag_deg: 3.0,
-            dieback: 0.07,
-            curvature: 0.04,
-            phototropism: 0.012,
-            gravity: -0.002,
+            segment_length: 0.25,
+            zigzag_deg: 8.0,
+            dieback: 0.04,
+            snap_radius: 0.008,
+            curvature: 0.05,
+            phototropism: 0.09,
+            gravity: 0.02,
             vigor_falloff: 0.6,
-            split_probability: 0.05,
+            split_probability: 0.04,
             split_angle_deg: 22.0,
             split_start_fraction: 0.35,
             children: (
-                pattern: Continuous(density: 4.6),
+                pattern: Continuous(density: 6.0),
                 start_fraction: 0.15,
-                end_fraction: 0.98,
-                crotch_angle_deg: 54.0,
+                end_fraction: 0.95,
+                crotch_angle_deg: 45.0,
                 crotch_angle_tip_deg: 30.0,
-                crotch_variance_deg: 14.0,
-                roll_variance_deg: 12.0,
-                phyllotaxis_deg: 180.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 25.0,
+                phyllotaxis_deg: 137.5,
                 scale: 0.55,
                 scale_variance: 0.4,
                 dominance: 0.35,
                 acrotony: 0.3,
-                planarity: 0.88,
+                planarity: 0.2,
                 count_variance: 0,
+                shade_line: 0.15,
+                shade_blend: 0.2,
             ),
         ),
         (
-            length: 1.0,
-            length_variance: 0.4,
-            radius: 0.022,
-            radius_ratio: 0.4,
+            length: 0.6,
+            length_variance: 0.2,
+            radius: 0.016,
+            radius_ratio: 0.42,
             taper: 0.2,
             da_vinci_exponent: 2.2,
-            segment_length: 0.18,
-            zigzag_deg: 6.0,
-            dieback: 0.09,
+            segment_length: 0.15,
+            zigzag_deg: 10.0,
+            dieback: 0.04,
+            snap_radius: 0.004,
             curvature: 0.05,
-            phototropism: 0.008,
-            gravity: 0.02,
+            phototropism: 0.09,
+            gravity: 0.015,
             vigor_falloff: 0.6,
             split_probability: 0.0,
             split_angle_deg: 18.0,
             split_start_fraction: 0.4,
             children: (
-                pattern: Continuous(density: 6.0),
+                pattern: Continuous(density: 5.0),
                 start_fraction: 0.2,
-                end_fraction: 0.98,
-                crotch_angle_deg: 44.0,
-                crotch_variance_deg: 14.0,
-                roll_variance_deg: 14.0,
-                phyllotaxis_deg: 180.0,
+                end_fraction: 0.95,
+                crotch_angle_deg: 40.0,
+                crotch_variance_deg: 15.0,
+                roll_variance_deg: 25.0,
+                phyllotaxis_deg: 137.5,
                 scale: 0.55,
                 scale_variance: 0.35,
                 dominance: 0.35,
                 acrotony: 0.3,
-                planarity: 0.85,
+                planarity: 0.1,
                 count_variance: 0,
             ),
         ),
         (
-            length: 0.42,
-            length_variance: 0.4,
-            radius: 0.01,
+            length: 0.35,
+            length_variance: 0.2,
+            radius: 0.008,
             radius_ratio: 0.45,
             taper: 0.25,
             da_vinci_exponent: 2.2,
             segment_length: 0.1,
             zigzag_deg: 10.0,
-            dieback: 0.10,
+            dieback: 0.04,
             curvature: 0.06,
-            phototropism: 0.006,
-            gravity: 0.024,
+            phototropism: 0.06,
+            gravity: 0.015,
             vigor_falloff: 0.65,
             split_probability: 0.0,
             split_angle_deg: 16.0,
@@ -183,59 +215,74 @@
     leaves: (
         enabled: true,
         min_level: 2,
-        max_twig_radius: 0.045,
-        // One card carries four fascicle sprays rather than one, on a card 1.6 times
-        // the side. The needles keep the size they had; what changes is that a canopy
-        // needs a third of the cards to hold the same foliage. The needle art is sparse
-        // — 16% of its own cell is opaque, against 38% for the oak's leaf cluster — so
-        // a pine card was mostly empty quad, and enlarging it is nearly free.
-        density: 4.1,
-        cluster_size: 1,
-        cluster_spread_deg: 26.0,
-        card_length: 0.72,
-        card_width: 0.72,
-        size_variance: 0.35,
-        crotch_angle_deg: 38.0,
-        crotch_variance_deg: 16.0,
-        phyllotaxis_deg: 99.5,
-        droop_deg: 8.0,
-        twist_deg: 60.0,
-        normal_blend: 0.65,
+        max_twig_radius: 0.03,
+        density: 4.3,
+        spacing_variance: 0.8,
+        // Pine carries its needles on the last few seasons of each shoot, so the
+        // foliage is a brush over the end of every twig with bare wood behind it.
+        leafy_length: 0.7,
+        // How the tuft is built, and the one thing here that decides whether the crown
+        // reads as a pine at all. A needle brush is round: the needles leave the shoot
+        // on every side. One flat card of it seen face on is a feather, and a fan of
+        // them round a point is a palmate leaf — both were tried, and the tree came out
+        // as an acacia and then as an oak. What reads as a pine is several cards on
+        // nearly the same axis as the shoot (the small crotch angle), each rolled to a
+        // random angle about it (the full twist), so from any side some are seen edge
+        // on and some face on and together they make a bottle brush. The negative
+        // droop turns them up off the twig, which is how a pine's shoot tips stand.
+        cluster_size: 6,
+        cluster_spread_deg: 20.0,
+        // Density and card size are held together by the leaf budget: this pine sits
+        // at about 146k of the 150k leaf triangles `leaf_budget_is_respected` allows,
+        // so a denser crown from here wants bigger cards, not more of them.
+        // One photographed Scots pine shoot per card. The cell is 640 by 1088 and the
+        // card carries the same proportion, so the needles are not stretched. Small
+        // cards and many of them: at 0.6 m each tuft read as one lobed leaf at a
+        // distance, and the fine grain of a pine crown is many small brushes.
+        card_length: 0.46,
+        card_width: 0.27,
+        size_variance: 0.3,
+        crotch_angle_deg: 10.0,
+        crotch_variance_deg: 8.0,
+        phyllotaxis_deg: 137.5,
+        droop_deg: -15.0,
+        twist_deg: 90.0,
+        // High, because a tuft is a volume rather than a blade, and a crown of them
+        // should light as one mass with a sunny side and a shaded side.
+        normal_blend: 0.8,
         curvature: 0.3,
-        tint: (1.0, 1.02, 0.92),
-        hue_variance: 0.07,
+        tint: (0.72, 0.82, 0.95),
+        hue_variance: 0.08,
         interior_shade: 0.45,
-        // The art is a spray of fascicles rather than a single needle, so the
-        // generator is assembling shoots out of shoots here. `leaf_length` is set so a
-        // spray comes out the size it was on the old smaller card: this buys cards, not
-        // bigger needles. The angles are shallow and the curve pronounced, because what
-        // is being built is one branchlet leaning off a twig, not a rosette.
-        cluster: Some((
-            count: 4,
-            leaf_length: 0.45,
-            base_angle_deg: 52.0,
-            tip_angle_deg: 24.0,
-            tip_scale: 0.9,
-            angle_variance_deg: 26.0,
-            roll_deg: 137.5,
-            roll_variance_deg: 45.0,
-            depth: 0.65,
-            blade_twist_deg: 55.0,
-            depth_shade: 0.35,
-            size_variance: 0.28,
-            spacing_variance: 0.7,
-            shoot_curve: 0.40,
-            variants: 4,
-            shoot_base: 0.86,
-            shoot_tip: 0.24,
-            source_aspect: 1.0,
-            cell_size: 512,
-        )),
+        // Needles a couple of texels wide smear into the air around them a few mips
+        // down; this keeps them resolving as strands at any distance.
+        edge_sharpness: 0.4,
+        // A tuft of needles is a volume with no front or back, so a card seen from
+        // behind keeps the crown's outward shading rather than going dark.
+        backface_volume: 1.0,
+        // Light comes through a needle crown in a thousand gaps; the shaded side of it
+        // is darker blue-green, not black.
+        self_shadow: 0.55,
+        cluster: None,
+        // Two sprays stacked down the atlas, and every card picks one. They are the two
+        // straight needle brushes off Raw Catalog's Atlas-813-A; the branched sprays on
+        // the same sheet were left out because their outline is palmate and reads as a
+        // leaf at any distance. The scan is an olive Scots pine and is recoloured to a
+        // glaucous blue-green, twigs left brown. To rebuild it from the source sheet:
+        //
+        //   import_textures needle_pine_scan_sheet --albedo Atlas-813-A_BaseColor.jpg
+        //       --alpha Atlas-813-A_Opacity.jpg --normal Atlas-813-A_NormalOpenGL.jpg
+        //       --rough Atlas-813-A_Roughness.jpg --size 4096
+        //   repack_atlas needle_pine_scan_sheet needle_pine_brush --keep 6
+        //       --cell 640x1088 --pick 2,3 --rot 0,90
+        //   recolor needle_pine_brush --band 48,140 --hue 88 --sat 0.6 --val 0.95
+        //
+        // after which the sheet can be deleted.
         atlas_cols: 1,
-        atlas_rows: 1,
+        atlas_rows: 2,
         atlas_front: 0,
         atlas_back: 0,
-        texture: "needle_pine",
+        texture: "needle_pine_brush",
     ),
     wind: (
         strength: 0.35,
@@ -244,32 +291,40 @@
         flexibility: (0.05, 0.15, 0.35, 0.8),
     ),
     mesh: (
-        // The same forest budget as the oak. A conifer carries its branchlets buried in
-        // needles, so meshing them down to six millimetres of radius was paying for wood
-        // that is not visible from any angle: 1875 stems became 158 and 25k triangles
-        // became 4k, with no change at all to the tree in needle.
         uv_scale: 1.2,
         silhouette_tolerance: 0.018,
         min_radial: 4,
-        min_bark_radius: 0.016,
+        min_bark_radius: 0.012,
         max_radial: 32,
-        root_flare: 0.9,
-        flare_height: 1.4,
+        root_flare: 0.7,
+        flare_height: 1.2,
         root_taper: 2.0,
         root_sharpness: 1.4,
         root_count: 3,
         tip_length: 0.06,
         socket_flare: 0.35,
-        bark_texture: "bark_pine",
+        // The pale grey, finely scaled bark of an old pine's lower bole — the white
+        // spruce set from the FreePBR pack, warmed a little. The red-brown pine bark
+        // the preset used before is the young bark of the upper crown.
+        bark_texture: "bark_spruce",
+        bark_tint: (1.0, 0.95, 0.86),
+        // Dead wood bleaches silver-grey. Dark enough that the band still reads as
+        // wood in full sun: at twice this it went white and looked like frost.
+        dead_wood_color: (0.26, 0.255, 0.24),
+        dead_wood_weathering: 0.85,
+        // The living twigs are culled at `min_bark_radius` because needles hide them;
+        // the dead ones carry nothing, and their fine twigs are most of what the dead
+        // band is, so they are meshed down to the finest there are.
+        dead_bark_radius: 0.004,
         irregularity: (
-            flute_depth: 0.115,
-            flute_waves: 4.0,
-            flute_twist: 0.07,
-            swell_depth: 0.085,
-            swell_period: 3.2,
-            burl_density: 0.4,
-            burl_depth: 0.46,
-            burl_size: 0.42,
+            flute_depth: 0.06,
+            flute_waves: 5.0,
+            flute_twist: 0.03,
+            swell_depth: 0.04,
+            swell_period: 4.0,
+            burl_density: 0.1,
+            burl_depth: 0.3,
+            burl_size: 0.35,
             collar_depth: 0.55,
             min_radius: 0.045,
             rings_per_meter: 14.0,
@@ -277,11 +332,26 @@
         ),
     ),
     envelope: (
+        // A tall rounded crown over a narrow band for the dead limbs. The crown is an
+        // ellipsoid rather than a cone because a mature pine's crown is nearly as wide
+        // near the top as at its foot; a cone narrowed the limbs so fast they averaged
+        // 2.6 m and the crown came out a column.
+        //
+        // The band is kept well inside the crown's width, because the dead limbs are
+        // the crown the tree had when it was younger and smaller. Grown as wide as the
+        // living crown they reached four and five metres from the trunk and carried two
+        // kilometres of dead twig between them — a thicket where a forest pine has a
+        // sparse band. It widens upward, so the oldest limbs at its foot are the
+        // shortest. `pine_carries_its_dead_limbs_under_a_living_crown` holds its reach
+        // and how much twig it carries, both ways.
         volumes: [
-            Cone(base_y: 6.5, apex_y: 20.0, base_radius: 4.2, apex_radius: 0.55),
+            Ellipsoid(center: (0.0, 23.0, 0.0), radii: (7.2, 8.0, 7.2)),
+            Cone(base_y: 4.5, apex_y: 17.5, base_radius: 2.0, apex_radius: 3.6),
         ],
-        falloff: 0.25,
+        falloff: 0.18,
         kill_threshold: 0.03,
-        pull_strength: 0.6,
+        // Low, so a limb reaching the edge of the narrow band stops there rather than
+        // being turned to run along it: at 0.6 the dead limbs bent back into hooks.
+        pull_strength: 0.25,
     ),
 )

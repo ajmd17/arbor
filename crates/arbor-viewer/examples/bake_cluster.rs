@@ -67,6 +67,7 @@ fn main() {
         shoot_base: num("--rachis-base", d.shoot_base),
         shoot_tip: num("--rachis-tip", d.shoot_tip),
         source_aspect: num("--aspect", d.source_aspect),
+        sources: num("--sources", d.sources as f32) as u32,
         cell_size: num("--size", d.cell_size as f32) as u32,
         seed: num("--seed", d.seed as f32) as u64,
     };
