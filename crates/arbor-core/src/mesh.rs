@@ -1426,7 +1426,13 @@ mod tests {
     #[test]
     fn a_trunk_swells_and_waists_along_its_length() {
         // Taper alone is monotonic: a real bole also thickens and thins as it goes.
-        let params = parse_species(PINE_RON).unwrap();
+        //
+        // The pine is only the fixture here, and its preset trades the swelling away
+        // for triangles by thinning its rings coarsely. What is under test is whether
+        // the mesher can draw it, so the rings are held at the default the swelling was
+        // built against.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.mesh.irregularity.ring_tolerance = BarkIrregularity::default().ring_tolerance;
         let sk = crate::grow(&params);
         let path = trunk_path(&params, &sk);
         let phase = seed_phases(params.seed);
@@ -1491,7 +1497,12 @@ mod tests {
         // A limb grows out of its parent, so the parent swells to meet it. Without the
         // collar the two tubes meet at a seam, which is the giveaway that a tree was
         // assembled out of pipes.
-        let params = parse_species(PINE_RON).unwrap();
+        //
+        // Held at the default ring spacing for the same reason as the swelling test: the
+        // pine preset thins its rings past where the collars land, and it is the mesher,
+        // not the preset's budget, under test.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.mesh.irregularity.ring_tolerance = BarkIrregularity::default().ring_tolerance;
         let sk = crate::grow(&params);
         let children = child_index(&sk);
         let run = sk
