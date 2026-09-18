@@ -106,13 +106,21 @@ fn catmull_f32(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
 
 
 /// Extra rings along a smooth curve through the ones a stem already has.
-fn subdivide(points: &[Vec3], radii: &[f32], per_meter: f32) -> (Vec<Vec3>, Vec<f32>) {
+/// Also returns where each new point came from: the span of the input it lies on, and
+/// how far along that span, 0 at its start. The last point is the end of the last span.
+#[allow(clippy::type_complexity)]
+fn subdivide(
+    points: &[Vec3],
+    radii: &[f32],
+    per_meter: f32,
+) -> (Vec<Vec3>, Vec<f32>, Vec<(usize, f32)>) {
     let n = points.len();
     if n < 2 {
-        return (points.to_vec(), radii.to_vec());
+        return (points.to_vec(), radii.to_vec(), (0..n).map(|i| (i, 0.0)).collect());
     }
     let mut out_p = Vec::with_capacity(n * 4);
     let mut out_r = Vec::with_capacity(n * 4);
+    let mut from = Vec::with_capacity(n * 4);
     for i in 0..n - 1 {
         let (a, b) = (i.saturating_sub(1), (i + 2).min(n - 1));
         let steps = (((points[i + 1] - points[i]).length() * per_meter).ceil() as usize).max(1);
@@ -128,11 +136,13 @@ fn subdivide(points: &[Vec3], radii: &[f32], per_meter: f32) -> (Vec<Vec3>, Vec<
                     .clamp(lo, hi)
                     .max(1e-4),
             );
+            from.push((i, t));
         }
     }
     out_p.push(points[n - 1]);
     out_r.push(radii[n - 1]);
-    (out_p, out_r)
+    from.push((n - 1, 0.0));
+    (out_p, out_r, from)
 }
 
 /// A swelling where a branch leaves its parent.
@@ -563,10 +573,11 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
         let prev = *keep.last().unwrap();
         let fine = path.is_trunk && path.arc[i] < flare_top;
         let limit = if fine { flare_tol } else { tol };
-        // Two things keep a ring: the surface moving more than the budget without it,
-        // and the stem turning more than a span may across it.
+        // Three things keep a ring: a branch leaving from it, the surface moving more
+        // than the budget without it, and the stem turning more than a span may
+        // across it.
         let turns = path.dirs[prev].angle_between(path.dirs[i + 1]) > MAX_SPAN_TURN;
-        if !turns && ring_error(path, mp, phase, prev, i, i + 1) < limit {
+        if !path.pinned[i] && !turns && ring_error(path, mp, phase, prev, i, i + 1) < limit {
             // Dropped. The next ring is measured against the same neighbour, so a long
             // smooth run collapses rather than losing every other ring.
             i += 1;
@@ -598,6 +609,18 @@ struct StemPath {
     under: Vec3,
     /// Distance travelled along the stem, used for the V coordinate.
     arc: Vec<f32>,
+    /// Distance along the skeleton from where the stem leaves its parent, at each
+    /// ring: what its sway is read off. Not `arc`, which follows the smoothed curve the
+    /// bark is swept along and so runs a little long of the skeleton on a bent stem.
+    /// Read by that, the ring a branch leaves from swings a little further than the
+    /// branch's own foot does, and the two part in the wind.
+    sway_arc: Vec<f32>,
+    /// Rings thinning may not drop: the ones a branch leaves from. The wind bends
+    /// wood between rings but the renderer only moves the rings themselves, joining
+    /// them with straight spans; a branch whose parent has no ring where it leaves
+    /// rides the curve while the parent's surface there cuts the chord, and in a gust
+    /// the two come apart by more than the parent is thick.
+    pinned: Vec<bool>,
     /// True for the stem that starts at the root node, which gets the buttress flare
     /// and the ground cap.
     is_trunk: bool,
@@ -648,6 +671,10 @@ impl StemPath {
 
         let mut points: Vec<Vec3> = Vec::with_capacity(stem.len() + 1);
         let mut radii: Vec<f32> = Vec::with_capacity(stem.len() + 1);
+        let mut pinned: Vec<bool> = Vec::with_capacity(stem.len() + 1);
+        // Only a branch sways about where it is attached; the trunk bends by height
+        // alone, which is smooth across any ring spacing, so it pins nothing.
+        let sways = sk.nodes[first].level > 0;
         // How wide the socket may get before it stops being swallowed by the parent.
         let mut socket_ceiling = f32::INFINITY;
         if let Some(p) = sk.nodes[first].parent {
@@ -656,24 +683,38 @@ impl StemPath {
             if (anchor - sk.nodes[first].position).length() > 1e-5 {
                 points.push(anchor);
                 radii.push(sk.nodes[first].radius);
+                pinned.push(false);
             }
             socket_ceiling = sk.nodes[p as usize].radius;
         }
         for &i in stem {
             let node = &sk.nodes[i as usize];
+            // A branch too thin to be swept has nothing to come apart from, and pinning
+            // a ring for every twig would keep nearly all of them on a fine stem.
+            let carries = sways
+                && children
+                    .get(i as usize)
+                    .is_some_and(|c| c.iter().any(|&k| gets_bark(sk, k as usize, mp)));
             // Skip duplicate positions: a zero-length segment gives no usable axis.
             if points
                 .last()
                 .is_some_and(|p: &Vec3| (*p - node.position).length() < 1e-5)
             {
+                if let Some(pin) = pinned.last_mut() {
+                    *pin |= carries;
+                }
                 continue;
             }
             points.push(node.position);
             radii.push(node.radius);
+            pinned.push(carries);
         }
         if points.len() < 2 {
             return None;
         }
+        // Measured before the trunk grows its root below, and before the bark is
+        // smoothed: this is the skeleton's own length, which is what the sway is.
+        let mut sway_arc = arcs_for(&points);
 
         // The trunk starts below the ground, so the ground plane hides its cap and the
         // roots are seen entering the soil rather than cut off flush with it.
@@ -682,6 +723,8 @@ impl StemPath {
             let below = if down == Vec3::ZERO { Vec3::NEG_Y } else { down };
             points.insert(0, points[0] + below * mp.root_depth);
             radii.insert(0, radii[0]);
+            sway_arc.insert(0, 0.0);
+            pinned.insert(0, false);
         }
 
         // A skeleton is segmented for growing, which is far coarser than the bark needs:
@@ -690,9 +733,26 @@ impl StemPath {
         let r_max = radii.iter().copied().fold(0.0f32, f32::max);
         let ir = &mp.irregularity;
         if r_max >= ir.min_radius && ir.rings_per_meter > 0.0 {
-            let (p, r) = subdivide(&points, &radii, ir.rings_per_meter);
+            let (p, r, from) = subdivide(&points, &radii, ir.rings_per_meter);
+            // Every original point comes through at a whole step, so the pins land on
+            // exactly the rings they were set on; the rings between run along the
+            // skeleton's span as the bark runs along its curve.
+            let last = sway_arc.len() - 1;
+            let (arcs, pins) = from
+                .iter()
+                .map(|&(i, t)| {
+                    let arc = if i < last {
+                        sway_arc[i] + (sway_arc[i + 1] - sway_arc[i]) * t
+                    } else {
+                        sway_arc[last]
+                    };
+                    (arc, t == 0.0 && pinned[i])
+                })
+                .unzip();
             points = p;
             radii = r;
+            sway_arc = arcs;
+            pinned = pins;
         }
 
         let dirs = dirs_for(&points);
@@ -773,6 +833,8 @@ impl StemPath {
             socket_max,
             under,
             arc,
+            sway_arc,
+            pinned,
             is_trunk,
             is_dead: sk.nodes[first].dead,
             is_bare: hangs_from_trunk_by_dead_wood(sk, first),
@@ -799,6 +861,8 @@ impl StemPath {
         // Arc comes from the dense polyline, so thinning cannot slide the bark along
         // the stem and move the burls.
         let arc: Vec<f32> = keep.iter().map(|&i| self.arc[i]).collect();
+        let sway_arc: Vec<f32> = keep.iter().map(|&i| self.sway_arc[i]).collect();
+        let pinned: Vec<bool> = keep.iter().map(|&i| self.pinned[i]).collect();
         // Each kept ring keeps the aim it had on the dense stem rather than being
         // re-aimed at its new neighbours. Those can be metres off once a coarse budget
         // has thinned a smooth run — the ring after a socket, say, whose next kept ring
@@ -815,6 +879,8 @@ impl StemPath {
             socket_max: self.socket_max,
             under: self.under,
             arc,
+            sway_arc,
+            pinned,
             is_trunk: self.is_trunk,
             is_dead: self.is_dead,
             is_bare: self.is_bare,
@@ -937,16 +1003,32 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
 /// twigs inside the living crown are hidden exactly as well as the living ones, so
 /// they take the living cutoff.
 fn too_thin_for_bark(path: &StemPath, mp: &MeshParams) -> bool {
+    bark_cutoff(path.level, path.is_bare, mp)
+        .is_some_and(|cutoff| path.radii.iter().copied().fold(0.0f32, f32::max) < cutoff)
+}
+
+/// The thinnest a stem may be and still be swept, or `None` for one that always is.
+fn bark_cutoff(level: u8, is_bare: bool, mp: &MeshParams) -> Option<f32> {
     // Structure is always swept; only twigs are culled.
-    if u32::from(path.level) < mp.cull_from_level {
-        return false;
+    if u32::from(level) < mp.cull_from_level {
+        return None;
     }
-    let cutoff = if path.is_bare && mp.dead_bark_radius > 0.0 {
+    Some(if is_bare && mp.dead_bark_radius > 0.0 {
         mp.dead_bark_radius
     } else {
         mp.min_bark_radius
-    };
-    path.radii.iter().copied().fold(0.0f32, f32::max) < cutoff
+    })
+}
+
+/// Whether the stem starting at node `first` will be swept, told from the skeleton
+/// alone, so a parent can know before its own path is built which of its branches it
+/// has to keep a ring for. The same answer `too_thin_for_bark` gives on the built path:
+/// a stem is never thicker anywhere than where it starts, since every node is widened
+/// to carry the one after it, and that first radius is the anchor ring's.
+fn gets_bark(sk: &Skeleton, first: usize, mp: &MeshParams) -> bool {
+    let node = &sk.nodes[first];
+    bark_cutoff(node.level, hangs_from_trunk_by_dead_wood(sk, first), mp)
+        .is_none_or(|cutoff| node.radius >= cutoff)
 }
 
 /// One cone: the anchor ring of a stem drawn straight to its tip.
@@ -976,13 +1058,19 @@ fn emit_spike(
             j as f32 / radial as f32 * path.radii[0] * TAU / mp.uv_scale.max(1e-4),
             0.0,
         ];
-        sink.push_vertex(path.points[0] + e_r * r, normal, e_a, uv, path.arc[0]);
+        sink.push_vertex(path.points[0] + e_r * r, normal, e_a, uv, path.sway_arc[0]);
     }
 
     let reach = mp.tip_length.max(path.radii[1] * 1.2);
     let tip = path.points[1] + path.dirs[1] * reach;
     let apex = sink.vertex_offset();
-    sink.push_vertex(tip, path.dirs[1], ortho_of(path.dirs[1]), [0.0, arc], arc + reach);
+    sink.push_vertex(
+        tip,
+        path.dirs[1],
+        ortho_of(path.dirs[1]),
+        [0.0, arc],
+        path.sway_arc[1] + reach,
+    );
     for j in 0..radial {
         sink.mesh
             .indices
@@ -1286,7 +1374,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
                 j as f32 / radial as f32 * path.radii[i] * TAU / mp.uv_scale.max(1e-4),
                 path.arc[i] / mp.uv_scale.max(1e-4),
             ];
-            sink.push_vertex(path.points[i] + e_r * r, normal, e_a, uv, path.arc[i]);
+            sink.push_vertex(path.points[i] + e_r * r, normal, e_a, uv, path.sway_arc[i]);
         }
         ring_bases.push(base);
     }
@@ -1306,10 +1394,10 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
             let a = j as f32 / rim_sides as f32 * TAU;
             let e_r = n0 * a.cos() + b0 * a.sin();
             let pos = path.points[0] + e_r * path.radius_at(0, a, mp, phase);
-            sink.push_vertex(pos, cap_n, ortho_of(cap_n), [0.0, 0.0], path.arc[0]);
+            sink.push_vertex(pos, cap_n, ortho_of(cap_n), [0.0, 0.0], path.sway_arc[0]);
         }
         let center = sink.vertex_offset();
-        sink.push_vertex(path.points[0], cap_n, ortho_of(cap_n), [0.0, 0.0], path.arc[0]);
+        sink.push_vertex(path.points[0], cap_n, ortho_of(cap_n), [0.0, 0.0], path.sway_arc[0]);
         for j in 0..rim_sides {
             sink.mesh
                 .indices
@@ -1330,7 +1418,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         end_dir,
         ortho_of(end_dir),
         [0.0, path.arc[last]],
-        path.arc[last] + reach,
+        path.sway_arc[last] + reach,
     );
     let base = ring_bases[swept - 1];
     for j in 0..sides[swept - 1] {
@@ -1344,6 +1432,92 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
 mod tests {
     use super::*;
     use crate::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON};
+
+    #[test]
+    fn every_branch_leaves_from_a_ring_that_sways_as_its_foot_does() {
+        // The wind moves rings, and the renderer joins them with straight spans. A
+        // branch whose parent had no ring where it leaves rode the true bend while the
+        // parent's surface there cut across the chord, and in a gust the birch's
+        // branches came away from their limbs by more than the limbs are thick. So a
+        // swept branch needs a ring of its parent at its very foot, reading the same
+        // sway the foot does; then whatever the shader does to one it does to the other.
+        for (name, src) in crate::species::builtin_presets() {
+            let params = parse_species(src).unwrap();
+            let sk = crate::grow(&params);
+            let children = child_index(&sk);
+            let field = crate::wind::SwayField::new(&sk);
+            let mut swept: std::collections::HashMap<u32, (StemPath, crate::wind::StemSway)> =
+                std::collections::HashMap::new();
+            for run in sk.stem_runs() {
+                let Some(path) = StemPath::build(&sk, &run, &params.mesh, params.seed, &children)
+                else {
+                    continue;
+                };
+                if !too_thin_for_bark(&path, &params.mesh) {
+                    let first = run[0] as usize;
+                    swept.insert(sk.nodes[first].stem, (path, field.stem(&sk, first)));
+                }
+            }
+            let mut checked = 0;
+            for (&stem, (_, sway)) in &swept {
+                let first = stem as usize;
+                let Some(p) = sk.nodes[first].parent else { continue };
+                let parent = &sk.nodes[p as usize];
+                // The trunk bends by height alone and has no sway of its own to match.
+                if parent.level == 0 {
+                    continue;
+                }
+                let (ppath, psway) = swept
+                    .get(&parent.stem)
+                    .unwrap_or_else(|| panic!("{name}: a swept branch hangs off unswept wood"));
+                let ring = ppath
+                    .points
+                    .iter()
+                    .position(|q| (*q - parent.position).length() < 1e-4)
+                    .unwrap_or_else(|| {
+                        panic!("{name}: a level {} branch leaves its parent between rings", sk.nodes[first].level)
+                    });
+                let (foot, there) = (sway.at(0.0), psway.at(ppath.sway_arc[ring]));
+                for o in 0..crate::wind::SWAY_ORDERS {
+                    assert!(
+                        (foot[o][3] - there[o][3]).abs() < 1e-4,
+                        "{name}: order {o} swings the foot {} and the ring it leaves {}",
+                        foot[o][3],
+                        there[o][3]
+                    );
+                    if foot[o][3] > 0.0 {
+                        let pivot = |w: [f32; 4]| Vec3::new(w[0], w[1], w[2]);
+                        assert!((pivot(foot[o]) - pivot(there[o])).length() < 1e-4);
+                    }
+                }
+                checked += 1;
+            }
+            assert!(checked > 50, "{name}: only {checked} junctions");
+        }
+    }
+
+    #[test]
+    fn whether_a_stem_gets_bark_is_known_before_its_path_is_built() {
+        // A parent keeps a ring for each branch that will be swept, and has to know
+        // which those are before their own paths exist.
+        for (name, src) in crate::species::builtin_presets() {
+            let params = parse_species(src).unwrap();
+            let sk = crate::grow(&params);
+            let children = child_index(&sk);
+            for run in sk.stem_runs() {
+                let Some(path) = StemPath::build(&sk, &run, &params.mesh, params.seed, &children)
+                else {
+                    continue;
+                };
+                assert_eq!(
+                    gets_bark(&sk, run[0] as usize, &params.mesh),
+                    !too_thin_for_bark(&path, &params.mesh),
+                    "{name}: the skeleton and the built path disagree about stem {}",
+                    run[0]
+                );
+            }
+        }
+    }
 
 
     #[test]
@@ -1391,13 +1565,14 @@ mod tests {
         for src in [OAK_RON, PINE_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
             let sk = crate::grow(&params);
+            let children = child_index(&sk);
             let mut checked = 0;
             for run in sk.stem_runs() {
                 let first = run[0] as usize;
                 let Some(p) = sk.nodes[first].parent else {
                     continue;
                 };
-                let path = StemPath::build(&sk, &run, &params.mesh, params.seed, &child_index(&sk)).expect("stem builds");
+                let path = StemPath::build(&sk, &run, &params.mesh, params.seed, &children).expect("stem builds");
                 let anchor = sk.nodes[p as usize].position;
                 assert!(
                     (path.points[0] - anchor).length() < 1e-4,
@@ -1418,13 +1593,14 @@ mod tests {
         // stays thinner than what it hangs off.
         let params = parse_species(OAK_RON).unwrap();
         let sk = crate::grow(&params);
+        let children = child_index(&sk);
         for run in sk.stem_runs() {
             let first = run[0] as usize;
             let Some(p) = sk.nodes[first].parent else {
                 continue;
             };
             let parent_radius = sk.nodes[p as usize].radius;
-            let path = StemPath::build(&sk, &run, &params.mesh, params.seed, &child_index(&sk)).expect("stem builds");
+            let path = StemPath::build(&sk, &run, &params.mesh, params.seed, &children).expect("stem builds");
             let base = path.radius_at(0, 0.0, &params.mesh, (0.0, 0.0));
             assert!(
                 base <= parent_radius + 1e-4,

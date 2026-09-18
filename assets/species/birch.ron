@@ -71,7 +71,10 @@
             split_evenness: 0.35,
             split_start_fraction: 0.32,
             children: (
-                pattern: Continuous(density: 2.6),
+                // Raised when `tip_reach` began holding every branch to the one ahead of it:
+                // shorter branches carry fewer twigs, so it takes more to the metre to keep the
+                // crown as full.
+                pattern: Continuous(density: 3.4),
                 start_fraction: 0.18,
                 end_fraction: 0.97,
                 crotch_angle_deg: 44.0,
@@ -116,7 +119,7 @@
             split_evenness: 0.2,
             split_start_fraction: 0.35,
             children: (
-                pattern: Continuous(density: 3.2),
+                pattern: Continuous(density: 5.2),
                 start_fraction: 0.2,
                 end_fraction: 0.98,
                 crotch_angle_deg: 34.0,
@@ -159,7 +162,7 @@
             split_evenness: 0.0,
             split_start_fraction: 0.4,
             children: (
-                pattern: Continuous(density: 2.6),
+                pattern: Continuous(density: 4.8),
                 start_fraction: 0.2,
                 end_fraction: 0.98,
                 crotch_angle_deg: 30.0,
@@ -195,7 +198,7 @@
             split_evenness: 0.0,
             split_start_fraction: 0.4,
             children: (
-                pattern: Continuous(density: 3.0),
+                pattern: Continuous(density: 5.4),
                 start_fraction: 0.15,
                 end_fraction: 0.98,
                 crotch_angle_deg: 28.0,

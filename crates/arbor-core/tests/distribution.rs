@@ -276,20 +276,27 @@ fn open_grown_douglas_fir_is_a_sparse_spire_that_still_hangs() {
     // envelope rather than across it. Both show up here, as the spread between the
     // longest stem at a level and the ordinary one, so this catches the next cause too
     // without having to know what it is.
+    //
+    // The ordinary one is the long end of the level, its 90th percentile, and not its
+    // median. A child is held to the branch still ahead of it, so a level's lengths now
+    // spread with where each stem sits on its parent — long near the base, short near
+    // the tip — and the median is mostly those short tip shoots, which say nothing
+    // about whether the longest is a whisker. A whisker is one or a few stems, far too
+    // few to move the 90th percentile, and it still stands well clear of it.
     for level in 1..=4u8 {
         let mut lens = grown_lengths(&sk, level);
         if lens.len() < 8 {
             continue;
         }
         lens.sort_by(|a, b| a.partial_cmp(b).expect("lengths are finite"));
-        let median = lens[lens.len() / 2].max(1e-3);
+        let long = lens[lens.len() * 9 / 10].max(1e-3);
         let longest = lens[lens.len() - 1];
         assert!(
-            longest / median < 3.5,
-            "open-grown fir level {level}: the longest stem is {longest:.2} m against a \
-             median of {median:.2}, which is {:.1} times it — that is a whisker, not a \
-             branch",
-            longest / median
+            longest / long < 2.2,
+            "open-grown fir level {level}: the longest stem is {longest:.2} m against \
+             {long:.2} for the long end of the level, which is {:.1} times it — that is a \
+             whisker, not a branch",
+            longest / long
         );
     }
 

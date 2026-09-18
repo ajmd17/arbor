@@ -1,7 +1,12 @@
 # Arbor
 
-Procedural tree model generator in Rust.
+Procedural tree model generator in Rust. Aim is to generate ~7k-20k tri models.
+
 ![screenshot](docs/screenshot.png)
+
+Note, this application is almost entirely vibe-coded.
+
+I didn't want to pay for SpeedTree.
 
 ## Layout
 
@@ -29,12 +34,11 @@ directory, so run it from the repository root.
 cargo run --release -p arbor-viewer
 ```
 
-It takes optional startup flags, which are also what a scripted capture uses:
-
 ```bash
-cargo run --release -p arbor-viewer -- --species oak --seed 7 --time 17.2 --screenshot out.png
+cargo run --release -p arbor-viewer
 ```
 
+### Options:
 `--species`, `--seed`, `--no-leaves`, `--wireframe`, `--no-shadows`,
 `--translucency`, `--time`, `--sun-elevation`, `--sun-azimuth`,
 `--sun-intensity`, `--yaw`, `--pitch`, `--distance`, `--target-y`,
@@ -55,46 +59,6 @@ The OBJ comes out as triangles in two groups, `bark` and `leaves`, with leaf UVs
 baked into their atlas cell (the viewer's shader picks a cell per card, an
 exported mesh has no such shader).
 
-## The pipeline
-
-1. **Growth** (`growth.rs`) walks stems segment by segment, each one nudged by
-   phototropism, gravity, droop and a correlated random bend, and steered by a
-   crown **envelope** (`envelope.rs`) that prunes anything growing outside the
-   species' silhouette. Vigor decays with depth and decides who splits, who
-   branches and who dies back. Output is a `Skeleton` of nodes carrying position,
-   radius, level, vigor, and flags for dead and broken wood.
-2. **Meshing** (`mesh.rs`) sweeps a tube along each run of segments. Side count
-   comes from a silhouette tolerance in metres rather than a fixed number, so
-   thick stems earn more sides and twigs earn fewer. The radius is a smooth
-   function of angle and height — flutes, swelling, burls, knotholes, branch bark
-   ridges, buttress roots at the foot — and normals are taken by finite
-   difference of that function, so the detail shades correctly instead of
-   faceting.
-3. **Foliage** (`leaves.rs`) anchors alpha-tested quads along the last stretch of
-   each twig. Card normals are blended toward the crown's outward direction,
-   curved across the card and darkened toward the interior, which is what keeps a
-   canopy from reading as a heap of flat planes.
-4. **Cluster baking** (`cluster.rs`) composites a whole shoot of leaves into one
-   atlas cell, so one card stands in for dozens of leaves at the same real-world
-   leaf size. Fewer cards, better alpha coverage per quad. It runs in core, at
-   load time, from the single-leaf art.
-
-Rendering (`arbor-viewer`) adds a shadow pass, a physically-motivated sky whose
-ambient is the dome projected into spherical harmonics, wrapped diffuse with
-backlit transmission through leaves, and coverage-preserving mips so the canopy
-does not thin out with distance.
-
-**Wind** (`wind.rs` in core, `WIND_GLSL` in the viewer) is hierarchical vertex
-sway in the SpeedTree manner. Every bark vertex and leaf card records, for the
-limb, the branch and the twigs it belongs to, where that stem is attached and how
-far a point there swings (a cantilever curve over the stem's reach). The vertex
-shader bends each order about its own attachment, finest first, then the whole tree
-about its foot by height, and flutters each leaf card rigidly about the point it
-hangs from. Every pass — colour, both shadow passes and the wireframe — runs the
-same code, so the shadow moves with the tree. The species says how it gives
-(`wind.flexibility` per order, `flutter`, `frequency`); the scene says how hard,
-how gustily and from where it blows (the panel's *Wind* section).
-
 ## Tools
 
 ```bash
@@ -107,14 +71,6 @@ cargo run --release -p arbor-viewer --example import_textures -- leaf_oak --albe
 cargo run --release -p arbor-viewer --example alpha_coverage_report -- assets/textures/leaf_oak_albedo.png
 ```
 
-`preview` is a small software rasteriser mirroring the viewer's shading, for
-checking a tree from a script without a window.
-
 ```bash
 cargo test
 ```
-
-## Status
-
-The OBJ export and the offline `preview` are of the tree in still air; wind is
-applied only in the viewer's shaders.

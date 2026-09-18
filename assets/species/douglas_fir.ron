@@ -118,7 +118,7 @@
             dead_stub_length: 1.5,
             split_start_fraction: 0.35,
             children: (
-                // Fractionally over the spruce's 3.0, and worth stating plainly because
+                // Fractionally over the spruce's 3.6, and worth stating plainly because
                 // the comment here used to claim a third of it: the see-through crown
                 // does not come from this number and never did. It comes from the
                 // whorls standing three metres apart on a trunk whose segments are two
@@ -127,7 +127,10 @@
                 // crown against its 1.27. The branchlet rate has to run a shade ahead
                 // of the spruce's just to keep the sprays from being strung out thinly
                 // along limbs that are already half as many.
-                pattern: Continuous(density: 3.2),
+                // Raised when `tip_reach` began holding every branch to the one ahead of it:
+                // shorter branches carry fewer twigs, so it takes more to the metre to keep the
+                // crown as full.
+                pattern: Continuous(density: 3.8),
                 start_fraction: 0.12,
                 end_fraction: 0.92,
                 crotch_angle_deg: 70.0,
@@ -170,7 +173,7 @@
             split_angle_deg: 19.0,
             split_start_fraction: 0.35,
             children: (
-                pattern: Continuous(density: 5.0),
+                pattern: Continuous(density: 6.8),
                 start_fraction: 0.14,
                 end_fraction: 0.92,
                 crotch_angle_deg: 58.0,
@@ -206,7 +209,7 @@
             split_angle_deg: 16.0,
             split_start_fraction: 0.4,
             children: (
-                pattern: Continuous(density: 6.0),
+                pattern: Continuous(density: 8.2),
                 start_fraction: 0.15,
                 end_fraction: 0.92,
                 crotch_angle_deg: 48.0,

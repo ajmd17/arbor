@@ -1605,6 +1605,166 @@ mod tests {
         }
     }
 
+    /// How long every stem grew and how far along its own stem every node sits, both in
+    /// metres and counting the wood that later broke off, since what is being checked
+    /// is what growth did.
+    fn grown_lengths(sk: &Skeleton) -> (Vec<f32>, Vec<f32>) {
+        let n = sk.nodes.len();
+        let mut arc = vec![0.0f32; n];
+        let mut length = vec![0.0f32; n];
+        for (i, node) in sk.nodes.iter().enumerate() {
+            if let Some(p) = node.parent {
+                let run = (node.position - sk.nodes[p as usize].position).length();
+                let same = sk.nodes[p as usize].stem == node.stem;
+                arc[i] = if same { arc[p as usize] + run } else { run };
+            }
+            let s = node.stem as usize;
+            length[s] = length[s].max(arc[i]);
+        }
+        (arc, length)
+    }
+
+    #[test]
+    fn no_stem_puts_out_a_branch_from_its_own_tip() {
+        // A stem's last season has no side shoots yet, so every stem ends in a bare
+        // stretch. `end_fraction` was measured against the length a stem set out to
+        // grow, so one the crown pruned or that ran out of vigor kept every child it
+        // had settled on up to the node it stopped at, and sprouted branches — whole
+        // co-dominant forks on the oak — straight out of its own end.
+        for (name, src) in crate::species::builtin_presets() {
+            let params = parse_species(src).unwrap();
+            let sk = grow(&params);
+            let (arc, length) = grown_lengths(&sk);
+            // The node a stem carries on to past `i`, if it does.
+            let next = |i: u32| {
+                let stem = sk.nodes[i as usize].stem;
+                sk.nodes[i as usize]
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|&c| sk.nodes[c as usize].stem == stem)
+            };
+            let mut checked = 0;
+            for node in &sk.nodes {
+                let Some(p) = node.parent else { continue };
+                let parent = &sk.nodes[p as usize];
+                if parent.stem == node.stem {
+                    continue;
+                }
+                // A stub the crown refused at birth is not a branch.
+                if node.children.is_empty() && node.dead && node.stem_fraction >= 1.0 {
+                    continue;
+                }
+                let fork = parent.level == node.level;
+                let past = next(p);
+                assert!(
+                    past.is_some(),
+                    "{name}: a level {} {} leaves the very tip of a level {} stem",
+                    node.level,
+                    if fork { "fork" } else { "lateral" },
+                    parent.level
+                );
+                if fork {
+                    assert!(
+                        past.and_then(next).is_some(),
+                        "{name}: a fork leaves within one segment of its parent's tip"
+                    );
+                }
+                let Some(sp) = stem_params(&params, parent.level) else { continue };
+                if !fork {
+                    let along = arc[p as usize] / length[parent.stem as usize].max(1e-4);
+                    assert!(
+                        along <= sp.children.end_fraction + 1e-3,
+                        "{name}: a lateral leaves {along:.3} along a stem whose children end \
+                         at {:.3} of what it grew",
+                        sp.children.end_fraction
+                    );
+                }
+                checked += 1;
+            }
+            assert!(checked > 100, "{name}: only {checked} children to check");
+        }
+    }
+
+    #[test]
+    fn nothing_off_a_branch_outgrows_the_branch_ahead_of_it() {
+        // A side shoot is no older than the length its parent went on to grow past it,
+        // and out towards the tip there is less and less branch to carry its weight. A
+        // long limb hanging off the last metre of a branch reads as one the branch could
+        // never have held up.
+        let offenders = |params: &SpeciesParams| {
+            let sk = grow(params);
+            let (arc, length) = grown_lengths(&sk);
+            let (mut checked, mut over) = (0, Vec::new());
+            for node in &sk.nodes {
+                let Some(p) = node.parent else { continue };
+                let parent = &sk.nodes[p as usize];
+                if parent.stem == node.stem || parent.level == 0 {
+                    continue;
+                }
+                let ahead = length[parent.stem as usize] - arc[p as usize];
+                let reach = stem_params(params, parent.level)
+                    .and_then(|sp| tip_reach(sp, parent.level))
+                    .expect("a branch always has a reach");
+                let mine = length[node.stem as usize];
+                checked += 1;
+                if mine > ahead * reach + 1e-3 {
+                    over.push((node.level, mine, ahead));
+                }
+            }
+            (checked, over)
+        };
+        for (name, src) in crate::species::builtin_presets() {
+            let params = parse_species(src).unwrap();
+            let (checked, over) = offenders(&params);
+            assert!(checked > 100, "{name}: only {checked} children to check");
+            assert!(
+                over.is_empty(),
+                "{name}: {} children outgrew the branch ahead of them, e.g. (level, length, \
+                 ahead) {:?}",
+                over.len(),
+                &over[..over.len().min(5)]
+            );
+        }
+
+        // And it is the knob doing it, not something else holding them in anyway: let
+        // children run to four times what is ahead of them and plenty pass it once.
+        let mut loose = parse_species(OAK_RON).unwrap();
+        for level in &mut loose.branch_levels {
+            level.children.tip_reach = 4.0;
+        }
+        let sk = grow(&loose);
+        let (arc, length) = grown_lengths(&sk);
+        let (mut children, mut past) = (0, 0);
+        for node in &sk.nodes {
+            let Some(p) = node.parent else { continue };
+            let parent = &sk.nodes[p as usize];
+            if parent.stem == node.stem || parent.level == 0 {
+                continue;
+            }
+            children += 1;
+            if length[node.stem as usize] > length[parent.stem as usize] - arc[p as usize] + 1e-3
+            {
+                past += 1;
+            }
+        }
+        assert!(
+            past * 5 > children,
+            "at a tip reach of 4 only {past} of {children} children passed the branch ahead"
+        );
+    }
+
+    #[test]
+    fn a_subordinate_fork_off_the_trunk_is_held_to_what_the_leader_has_left() {
+        // The trunk's allowance is infinite, and infinity times a zero evenness is NaN,
+        // which `min` discarded: every subordinate fork off a conifer's leader was let
+        // grow as though it were co-dominant.
+        assert_eq!(fork_cap(3.0, f32::INFINITY, 0.0), 3.0);
+        assert_eq!(fork_cap(3.0, f32::INFINITY, 0.5), f32::INFINITY);
+        assert_eq!(fork_cap(3.0, 5.0, 0.5), 4.0);
+        assert_eq!(fork_cap(8.0, 5.0, 0.0), 5.0);
+    }
+
     #[test]
     fn a_tighter_turn_bank_stops_a_limb_coming_round_on_itself() {
         // A limb long against the crown it grows in has to be bent back to stay inside,
@@ -1634,6 +1794,8 @@ mod tests {
             }
             worst
         };
+        // Loose enough that some limb is long enough to spend it: a lateral is held to
+        // the branch still ahead of it, so few birch limbs have the run they once had.
         let loose = worst_turn(0.60);
         let tight = worst_turn(0.08);
         assert!(

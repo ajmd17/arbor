@@ -41,7 +41,10 @@
     ),
     branch_levels: [
         (
-            length: 8.0,
+            // Longer than it was, because the forks at the ends of these limbs used to
+            // carry the crown out past them, and a fork is now held to the limb still
+            // ahead of it.
+            length: 10.4,
             length_variance: 0.25,
             radius: 0.5,
             radius_ratio: 0.72,
@@ -61,7 +64,10 @@
             split_evenness: 0.45,
             split_start_fraction: 0.3,
             children: (
-                pattern: Continuous(density: 2.0),
+                // Raised when `tip_reach` began holding every branch to the one ahead of it:
+                // shorter branches carry fewer twigs, so it takes more to the metre to keep the
+                // crown as full.
+                pattern: Continuous(density: 2.8),
                 start_fraction: 0.2,
                 end_fraction: 0.96,
                 crotch_angle_deg: 52.0,
@@ -95,7 +101,7 @@
             split_evenness: 0.3,
             split_start_fraction: 0.3,
             children: (
-                pattern: Continuous(density: 2.2),
+                pattern: Continuous(density: 4.5),
                 start_fraction: 0.22,
                 end_fraction: 0.98,
                 crotch_angle_deg: 40.0,
@@ -129,7 +135,7 @@
             split_evenness: 0.0,
             split_start_fraction: 0.4,
             children: (
-                pattern: Continuous(density: 1.7),
+                pattern: Continuous(density: 5.0),
                 start_fraction: 0.25,
                 end_fraction: 0.98,
                 crotch_angle_deg: 46.0,
@@ -163,7 +169,7 @@
             split_evenness: 0.0,
             split_start_fraction: 0.4,
             children: (
-                pattern: Continuous(density: 1.5),
+                pattern: Continuous(density: 5.0),
                 start_fraction: 0.2,
                 end_fraction: 0.98,
                 crotch_angle_deg: 42.0,

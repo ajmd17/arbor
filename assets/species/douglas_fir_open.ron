@@ -180,7 +180,10 @@
                 // actually reads at: trunk and branch tips visible through the crown,
                 // sky between the sprays, and a silhouette that is all spikes rather
                 // than a mass.
-                pattern: Continuous(density: 2.0),
+                // Raised when `tip_reach` began holding every branch to the one ahead of it:
+                // shorter branches carry fewer twigs, so it takes more to the metre to keep the
+                // crown as full.
+                pattern: Continuous(density: 2.4),
                 start_fraction: 0.12,
                 end_fraction: 0.92,
                 crotch_angle_deg: 70.0,
@@ -232,7 +235,7 @@
                 // thinning from landing all on one level — cutting only the limbs'
                 // children leaves the few sprays that survive as dense as ever, and the
                 // crown reads as clumps rather than as an open canopy.
-                pattern: Continuous(density: 3.8),
+                pattern: Continuous(density: 4.9),
                 start_fraction: 0.14,
                 end_fraction: 0.92,
                 crotch_angle_deg: 58.0,
@@ -268,7 +271,7 @@
             split_angle_deg: 16.0,
             split_start_fraction: 0.4,
             children: (
-                pattern: Continuous(density: 5.2),
+                pattern: Continuous(density: 6.8),
                 start_fraction: 0.15,
                 end_fraction: 0.92,
                 crotch_angle_deg: 48.0,
