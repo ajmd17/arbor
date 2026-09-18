@@ -219,6 +219,14 @@ fn place_on_stem(
             // spray of evenly spaced leaves.
             azimuth += lp.phyllotaxis_deg.to_radians();
             let base_azimuth = azimuth;
+            // The turn of the whole cluster about its axis when its cards are rolled
+            // evenly. Only drawn when asked for, so every species that does not ask
+            // takes exactly the draws it always did.
+            let cluster_roll = if lp.even_roll > 0.0 {
+                range_f32(&mut rng, 0.0, std::f32::consts::PI)
+            } else {
+                0.0
+            };
             for k in 0..lp.cluster_size.max(1) {
                 if out.len() >= MAX_LEAVES {
                     return;
@@ -234,6 +242,8 @@ fn place_on_stem(
                 // Cards in one tuft take different arrangements, so even a tuft seen
                 // close up is not the same shoot drawn twice.
                 let variant = range_f32(&mut rng, 0.0, variants as f32) as u32;
+                let even = cluster_roll
+                    + k as f32 * std::f32::consts::PI / lp.cluster_size.max(1) as f32;
                 out.push(make_card(
                     lp,
                     &mut rng,
@@ -241,6 +251,7 @@ fn place_on_stem(
                     dir,
                     frame,
                     radius,
+                    even,
                     base_azimuth + fan,
                     variant.min(variants - 1) as f32 / variants as f32,
                 ));
@@ -259,6 +270,8 @@ fn make_card(
     twig_dir: Vec3,
     frame: Vec3,
     twig_radius: f32,
+    // The roll this card takes about its own length when a cluster is rolled evenly.
+    even_roll: f32,
     azimuth: f32,
     atlas_v: f32,
 ) -> Card {
@@ -286,7 +299,9 @@ fn make_card(
     } else {
         ortho_unit(radial, axis)
     };
-    let twist = range_f32(rng, -lp.twist_deg, lp.twist_deg).to_radians();
+    let random = range_f32(rng, -lp.twist_deg, lp.twist_deg).to_radians();
+    let blend = lp.even_roll.clamp(0.0, 1.0);
+    let twist = random + (even_roll - random) * blend;
     if twist.abs() > 1e-4 {
         let perp = axis.cross(side);
         side = (side * twist.cos() + perp * twist.sin()).normalize_or(side);
@@ -543,5 +558,42 @@ mod tests {
                 "leaf buried in the trunk at {p:?}"
             );
         }
+    }
+    #[test]
+    fn an_evenly_rolled_pair_of_cards_is_a_cross() {
+        // Two cards rolled at random about nearly the same axis line up often enough
+        // that the tuft goes thin seen from one side. Rolled evenly, a pair is always a
+        // cross: the width of one card runs square to the width of the other.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.leaves.cluster_size = 2;
+        params.leaves.crotch_angle_deg = 0.0;
+        params.leaves.crotch_variance_deg = 0.0;
+        params.leaves.cluster_spread_deg = 0.0;
+        params.leaves.droop_deg = 0.0;
+        params.leaves.twist_deg = 90.0;
+        let sk = crate::grow(&params);
+
+        // Median |cos| between the widths of the two cards of each tuft.
+        let median_alignment = |params: &SpeciesParams| {
+            let mesh = build_leaves(&sk, params);
+            let width = |card: usize| {
+                let a = Vec3::from(mesh.positions[card * 4]);
+                let b = Vec3::from(mesh.positions[card * 4 + 1]);
+                (b - a).normalize_or_zero()
+            };
+            let mut dots: Vec<f32> = (0..mesh.positions.len() / 8)
+                .map(|t| width(2 * t).dot(width(2 * t + 1)).abs())
+                .collect();
+            assert!(dots.len() > 100, "only {} tufts", dots.len());
+            dots.sort_by(f32::total_cmp);
+            dots[dots.len() / 2]
+        };
+
+        params.leaves.even_roll = 0.0;
+        let random = median_alignment(&params);
+        params.leaves.even_roll = 1.0;
+        let even = median_alignment(&params);
+        assert!(even < 0.05, "evenly rolled pairs are {even:.2} aligned, not crossed");
+        assert!(random > 0.3, "random rolls came out crossed anyway ({random:.2}), so this tests nothing");
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! cargo run --release -p arbor-viewer --example repack_atlas -- \
 //!     <in-name> <out-name> [--rot 0,0,0] [--cell 640x1088] [--keep 3] [--pick 2,3]
+//!     [--trim-stalk 0.05]
 //!
 //! Scanned foliage atlases come with their sprays dropped wherever they fitted on the
 //! sheet, at whatever angle they were photographed. The renderer indexes cells as a
@@ -12,6 +13,12 @@
 //! `--pick` keeps only the sprays at those positions in the list printed (sheet order),
 //! for a species that wants some of a sheet's sprays and not others. `--rot` then lines
 //! up with the picked ones.
+//!
+//! `--trim-stalk` cuts the bare stalk off the foot of each spray, leaving that share of
+//! the spray's height as a stub. A spray photographed on a long stalk spends a third of
+//! its card on bare wood; used as the source of a cluster bake that stalk is what every
+//! leaf hinges on, so the shoots meet at the end of their stalks and the foliage is
+//! pushed up to the top of the cell with crossed sticks underneath.
 
 use image::{imageops, Rgba, RgbaImage};
 
@@ -51,6 +58,7 @@ fn main() {
         let (a, b) = c.split_once('x').expect("--cell wants WxH");
         (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap())
     };
+    let trim: Option<f32> = opt("--trim-stalk").map(|s| s.parse().expect("--trim-stalk wants a share"));
     let rots: Vec<u32> = opt("--rot")
         .map(|s| s.split(',').map(|v| v.trim().parse().unwrap()).collect())
         .unwrap_or_else(|| vec![0; keep]);
@@ -115,6 +123,9 @@ fn main() {
             }
             for _ in 0..(rots.get(i).copied().unwrap_or(0) / 90) % 4 {
                 cell = imageops::rotate90(&cell);
+            }
+            if let Some(stub) = trim {
+                cell = trim_stalk(cell, stub);
             }
             // Fit without stretching: a spray that is squeezed to a cell's aspect stops
             // looking like the thing that was photographed.
@@ -231,4 +242,28 @@ fn components(img: &RgbaImage, keep: usize) -> (Vec<(u32, u32, u32, u32)>, Vec<u
         *b = (b.0.min(x), b.1.min(y), b.2.max(x + 1), b.3.max(y + 1));
     }
     (boxes, label)
+}
+
+/// The spray with its bare stalk cut back to a stub of `stub` of its height.
+///
+/// A stalk is a thin line, so the rows it runs through carry far less foliage than the
+/// rows of the spray itself. Walking up from the foot, the first row as wide as a
+/// quarter of the widest is where the needles begin; everything below that but the
+/// stub goes. A seventh was too little for an airy spray on a slanting stalk, which
+/// crosses enough of each row to pass for foliage. Every map of the set is cut from its own copy of the albedo's alpha, so
+/// they all lose the same rows.
+fn trim_stalk(cell: RgbaImage, stub: f32) -> RgbaImage {
+    let (w, h) = (cell.width(), cell.height());
+    let counts: Vec<u32> = (0..h)
+        .map(|y| (0..w).filter(|&x| cell.get_pixel(x, y).0[3] > SOLID).count() as u32)
+        .collect();
+    let widest = counts.iter().copied().max().unwrap_or(0);
+    if widest == 0 {
+        return cell;
+    }
+    let Some(foliage_foot) = (0..h).rev().find(|&y| counts[y as usize] * 4 >= widest) else {
+        return cell;
+    };
+    let bottom = (foliage_foot + (stub.max(0.0) * h as f32) as u32 + 1).min(h);
+    imageops::crop_imm(&cell, 0, 0, w, bottom).to_image()
 }

@@ -225,66 +225,99 @@
         // reads as a pine at all. A needle brush is round: the needles leave the shoot
         // on every side. One flat card of it seen face on is a feather, and a fan of
         // them round a point is a palmate leaf — both were tried, and the tree came out
-        // as an acacia and then as an oak. What reads as a pine is several cards on
-        // nearly the same axis as the shoot (the small crotch angle), each rolled to a
-        // random angle about it (the full twist), so from any side some are seen edge
-        // on and some face on and together they make a bottle brush. The negative
-        // droop turns them up off the twig, which is how a pine's shoot tips stand.
-        cluster_size: 4,
+        // as an acacia and then as an oak. What reads as a pine is cards on nearly the
+        // same axis as the shoot (the small crotch angle), rolled about it so that from
+        // any side some are seen edge on and some face on. The negative droop turns
+        // them up off the twig, which is how a pine's shoot tips stand.
+        //
+        // Two cards to a tuft, rolled evenly into a cross, each carrying a baked bundle
+        // of five shoots (the `cluster` block below). This was six cards of a single
+        // shoot, then four, and the bundle is what made two enough: the leaves went
+        // 146k triangles to 97k to 49k with the crown holding its density.
+        cluster_size: 2,
         cluster_spread_deg: 20.0,
-        // Four cards to a tuft rather than six, each 0.56 m rather than 0.46: the same
-        // card area per tuft for two thirds of the cards, which took the leaves from
-        // 146k triangles to 97k with the brushes still reading as brushes. Much past
-        // this size a card starts to read as one lobed leaf again (0.6 m did), so the
-        // next saving has to come from fewer tufts, not bigger ones.
-        // One photographed Scots pine shoot per card. The cell is 640 by 1088 and the
-        // card carries the same proportion, so the needles are not stretched. Kept
-        // under 0.6 m: at that size each tuft read as one lobed leaf at a distance,
-        // and the fine grain of a pine crown is many small brushes.
-        card_length: 0.56,
-        card_width: 0.33,
+        // Square, because a baked cell is. Sized so a tuft of two carries the same
+        // needle as the four single-shoot cards it replaced. Kept under 0.6 m: at that
+        // size a tuft reads as one lobed leaf at a distance.
+        card_length: 0.47,
+        card_width: 0.47,
         size_variance: 0.3,
         crotch_angle_deg: 10.0,
         crotch_variance_deg: 8.0,
         phyllotaxis_deg: 137.5,
         droop_deg: -15.0,
         twist_deg: 90.0,
+        // Rolled evenly, so the two cards of a tuft are always a cross. At random they
+        // line up often enough that a tuft of two goes thin from one side.
+        even_roll: 1.0,
         // High, because a tuft is a volume rather than a blade, and a crown of them
         // should light as one mass with a sunny side and a shaded side.
         normal_blend: 0.8,
         curvature: 0.3,
-        tint: (0.72, 0.82, 0.95),
+        tint: (0.78, 0.88, 1.0),
         hue_variance: 0.08,
         interior_shade: 0.45,
-        // Needles a couple of texels wide smear into the air around them a few mips
-        // down; this keeps them resolving as strands at any distance.
-        edge_sharpness: 0.4,
+        // Soft. Sharpening kept the single airy shoots resolving as strands, but a
+        // bundle's interior is dense enough to close up a few mips down, and a sharp
+        // cutoff there draws each card as one jagged leaf; left soft it frays into
+        // needles at the edges instead.
+        edge_sharpness: 0.0,
         // A tuft of needles is a volume with no front or back, so a card seen from
         // behind keeps the crown's outward shading rather than going dark.
         backface_volume: 1.0,
         // Light comes through a needle crown in a thousand gaps; the shaded side of it
         // is darker blue-green, not black.
         self_shadow: 0.55,
-        cluster: None,
-        // Two sprays stacked down the atlas, and every card picks one. They are the two
+        // Five shoots baked into each card, fanned a little from one base: the cluster
+        // of shoots at the end of a pine twig. The shoots come from the two straight
+        // needle brushes of the source, each leaf picking one (`sources`), with their
+        // bare stalks trimmed off in the atlas so they meet at a compact base rather
+        // than on crossed sticks — the stalks were half the cell and held coverage to
+        // 20%; trimmed, the bundle bakes at 27%. `depth_shade` is kept low because
+        // the bake stacks shoots deep enough that shading the back ones darkened the
+        // whole crown.
+        cluster: Some((
+            count: 5,
+            leaf_length: 0.85,
+            base_angle_deg: 26.0,
+            tip_angle_deg: 6.0,
+            tip_scale: 0.85,
+            angle_variance_deg: 7.0,
+            roll_deg: 137.5,
+            roll_variance_deg: 30.0,
+            depth: 0.4,
+            blade_twist_deg: 20.0,
+            depth_shade: 0.15,
+            size_variance: 0.15,
+            spacing_variance: 0.3,
+            shoot_curve: 0.04,
+            variants: 4,
+            shoot_base: 0.97,
+            shoot_tip: 0.8,
+            source_aspect: 0.588,
+            sources: 2,
+            cell_size: 1024,
+        )),
+        // The bake's source: two sprays stacked down the atlas. They are the two
         // straight needle brushes off Raw Catalog's Atlas-813-A; the branched sprays on
         // the same sheet were left out because their outline is palmate and reads as a
         // leaf at any distance. The scan is an olive Scots pine and is recoloured to a
-        // glaucous blue-green, twigs left brown. To rebuild it from the source sheet:
+        // glaucous blue-green, twigs left brown, and each spray's bare stalk is cut back
+        // to a stub. To rebuild it from the source sheet:
         //
         //   import_textures needle_pine_scan_sheet --albedo Atlas-813-A_BaseColor.jpg
         //       --alpha Atlas-813-A_Opacity.jpg --normal Atlas-813-A_NormalOpenGL.jpg
         //       --rough Atlas-813-A_Roughness.jpg --size 4096
-        //   repack_atlas needle_pine_scan_sheet needle_pine_brush --keep 6
-        //       --cell 640x1088 --pick 2,3 --rot 0,90
-        //   recolor needle_pine_brush --band 48,140 --hue 88 --sat 0.6 --val 0.95
+        //   repack_atlas needle_pine_scan_sheet needle_pine_shoot --keep 6
+        //       --cell 640x1088 --pick 2,3 --rot 0,90 --trim-stalk 0.06
+        //   recolor needle_pine_shoot --band 48,140 --hue 88 --sat 0.6 --val 0.95
         //
         // after which the sheet can be deleted.
         atlas_cols: 1,
-        atlas_rows: 2,
+        atlas_rows: 1,
         atlas_front: 0,
         atlas_back: 0,
-        texture: "needle_pine_brush",
+        texture: "needle_pine_shoot",
     ),
     wind: (
         strength: 0.35,

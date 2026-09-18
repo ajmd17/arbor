@@ -227,6 +227,7 @@ pub static FOLIAGE_MORE: &[Group<LeafParams>] = &[
             knob("Crotch variance", (0.0, 60.0), "Random spread on that angle.", |l| &mut l.crotch_variance_deg),
             knob("Phyllotaxis", (0.0, 360.0), "Roll around the twig between one card and the next, in degrees. 180 keeps a flat spray flat.", |l| &mut l.phyllotaxis_deg),
             knob("Twist", (0.0, 180.0), "Random roll of a card about its own length, in degrees.", |l| &mut l.twist_deg),
+            knob("Even roll", (0.0, 1.0), "How evenly a cluster's cards are rolled round their axis. 1 spreads them 180 degrees over the cluster: two cards make a cross, three a star, and no tuft goes thin from one side.", |l| &mut l.even_roll),
         ],
         counts: &[],
     },

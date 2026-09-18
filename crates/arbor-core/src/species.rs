@@ -708,6 +708,14 @@ pub struct LeafParams {
     pub droop_deg: f32,
     /// Random roll of the blade about its own length.
     pub twist_deg: f32,
+    /// How evenly the cards of one cluster are rolled about their own length, 0 to 1.
+    ///
+    /// At 0 each card takes its own random roll within `twist_deg`. At 1 they are
+    /// spread evenly round instead, 180 degrees over the cluster, with the whole cluster
+    /// turned to a random angle: two cards make a cross, three a star. It is what lets a
+    /// tuft of needles be two cards rather than four — two rolled at random line up
+    /// often enough that the tuft goes thin seen from one side.
+    pub even_roll: f32,
     /// How far the shading normal leans from the flat card toward the outward
     /// direction of the crown. This is what makes a pile of quads light like a
     /// canopy; at 0 every leaf shades as the flat plane it really is.
@@ -784,6 +792,7 @@ impl Default for LeafParams {
             phyllotaxis_deg: 137.5,
             droop_deg: 22.0,
             twist_deg: 35.0,
+            even_roll: 0.0,
             normal_blend: 0.55,
             curvature: 0.35,
             tint: [1.0, 1.0, 1.0],
