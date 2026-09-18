@@ -77,6 +77,37 @@ impl EnvelopeVolume {
         }
     }
 
+    /// The volume stretched along the trunk by `y`, its widths untouched.
+    fn stretched(&self, y: f32) -> Self {
+        let y = y.max(1e-3);
+        match self {
+            EnvelopeVolume::Ellipsoid { center, radii } => EnvelopeVolume::Ellipsoid {
+                center: [center[0], center[1] * y, center[2]],
+                radii: [radii[0], radii[1] * y, radii[2]],
+            },
+            EnvelopeVolume::Cone {
+                base_y,
+                apex_y,
+                base_radius,
+                apex_radius,
+            } => EnvelopeVolume::Cone {
+                base_y: base_y * y,
+                apex_y: apex_y * y,
+                base_radius: *base_radius,
+                apex_radius: *apex_radius,
+            },
+            EnvelopeVolume::Cylinder {
+                base_y,
+                top_y,
+                radius,
+            } => EnvelopeVolume::Cylinder {
+                base_y: base_y * y,
+                top_y: top_y * y,
+                radius: *radius,
+            },
+        }
+    }
+
     fn scaled(&self, s: f32) -> Self {
         let s = s.max(1e-3);
         match self {
@@ -126,6 +157,17 @@ pub struct EnvelopeParams {
     /// acting once the stem has come back round is a fixed force toward a fixed
     /// point, which curls the stem into a loop rather than settling it.
     pub pull_strength: f32,
+    /// The trunk length the volumes were drawn for, in metres. Zero means they are
+    /// absolute and stay where they are whatever the trunk does.
+    ///
+    /// The volumes are authored in metres around a trunk of one particular length.
+    /// Declared longer, the trunk climbs straight out of the top of them and every
+    /// branch born up there is pruned at birth, so a tree made taller in the viewer
+    /// came out as its old crown with a bare spike on top. With this set, the volumes
+    /// stretch along the trunk by the ratio of the two lengths and the crown keeps its
+    /// place on the tree. Only the heights stretch — a taller tree is not, by that
+    /// alone, a wider one — so the width stays with `envelope_scale`.
+    pub for_trunk_length: f32,
 }
 
 impl Default for EnvelopeParams {
@@ -138,6 +180,7 @@ impl Default for EnvelopeParams {
             falloff: 0.25,
             kill_threshold: 0.03,
             pull_strength: 0.6,
+            for_trunk_length: 0.0,
         }
     }
 }
@@ -174,9 +217,15 @@ impl EnvelopeParams {
     pub fn scaled(&self, s: f32) -> Self {
         Self {
             volumes: self.volumes.iter().map(|v| v.scaled(s)).collect(),
-            falloff: self.falloff,
-            kill_threshold: self.kill_threshold,
-            pull_strength: self.pull_strength,
+            ..self.clone()
+        }
+    }
+
+    /// The envelope stretched along the trunk by `y`, its widths untouched.
+    pub fn stretched(&self, y: f32) -> Self {
+        Self {
+            volumes: self.volumes.iter().map(|v| v.stretched(y)).collect(),
+            ..self.clone()
         }
     }
 }
@@ -196,6 +245,7 @@ mod tests {
             falloff: 0.2,
             kill_threshold: 0.05,
             pull_strength: 0.6,
+            for_trunk_length: 0.0,
         }
     }
 

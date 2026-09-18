@@ -364,6 +364,9 @@
         ),
     ),
     envelope: (
+        // The volumes below are metres around a trunk this long; declared longer or
+        // shorter, they stretch along it so the crown keeps its place on the tree.
+        for_trunk_length: 20.0,
         volumes: [
             // Tall and narrow: a birch of twenty metres spreads seven or eight, where
             // the oak spreads more than its own height. The lobes lean the crown a

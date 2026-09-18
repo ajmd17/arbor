@@ -189,7 +189,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
     let levels_total = levels_total(params);
     let nominal = nominal_vigor(params);
     let ctx = GrowCtx {
-        env: params.envelope.scaled(params.envelope_scale),
+        env: params.grown_envelope(),
         levels_total,
         params,
         leader: RefCell::new(Vec::new()),
@@ -2008,7 +2008,7 @@ mod tests {
         // is only known up to the height reached so far.
         for src in [PINE_RON, OAK_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
-            let env = params.envelope.scaled(params.envelope_scale);
+            let env = params.grown_envelope();
             let sk = grow(&params);
             let trunk_stem = sk.nodes[0].stem;
             // In the order the trunk grew, not sorted by height. A trunk that leans
@@ -2276,7 +2276,7 @@ mod tests {
         // leaning top falls outside a crown centred on the world axis. The pine it used
         // to use now stands straight under a broad crown, and would test nothing.
         let params = parse_species(SPRUCE_RON).unwrap();
-        let env = params.envelope.scaled(params.envelope_scale);
+        let env = params.grown_envelope();
         let sk = grow(&params);
 
         let trunk_stem = sk.nodes[0].stem;
@@ -2430,6 +2430,48 @@ mod tests {
         assert!(
             high_cut > high_full * 0.75,
             "limbs that only just died kept only {high_cut:.1} m of {high_full:.1} m"
+        );
+    }
+    #[test]
+    fn the_crown_stretches_with_the_trunk() {
+        // The envelope is drawn in metres for one trunk length. Declared longer, the
+        // trunk used to climb out of the top of it and come out as a bare spike over
+        // the old crown; with `for_trunk_length` set the crown stretches to follow.
+        let bare_tip = |params: &SpeciesParams| -> f32 {
+            let sk = grow(params);
+            let height = sk.stats().height;
+            let top = sk
+                .nodes
+                .iter()
+                .filter(|n| n.level > 0 && !n.dead)
+                .map(|n| n.position.y)
+                .fold(0.0f32, f32::max);
+            (height - top) / height
+        };
+        let mut params = parse_species(PINE_RON).unwrap();
+        assert!(
+            params.envelope.for_trunk_length > 0.0,
+            "the fixture has to say what its envelope was drawn for"
+        );
+        let at_preset = bare_tip(&params);
+        params.trunk.length *= 1.6;
+        let taller = bare_tip(&params);
+        assert!(
+            taller < at_preset + 0.05,
+            "a trunk half again as long left {:.0}% of the tree bare at the top against \
+             {:.0}% at the preset's length",
+            taller * 100.0,
+            at_preset * 100.0
+        );
+        // And the reference is what does it: absolute volumes leave the spike.
+        params.envelope.for_trunk_length = 0.0;
+        let absolute = bare_tip(&params);
+        assert!(
+            absolute > taller + 0.15,
+            "with absolute volumes the crown should have stayed put and the leader come \
+             out bare, but the bare tip is {:.0}% against {:.0}% stretched",
+            absolute * 100.0,
+            taller * 100.0
         );
     }
 }

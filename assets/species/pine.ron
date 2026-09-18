@@ -409,6 +409,9 @@
         ),
     ),
     envelope: (
+        // The volumes below are metres around a trunk this long; declared longer or
+        // shorter, they stretch along it so the crown keeps its place on the tree.
+        for_trunk_length: 28.0,
         // A tall rounded crown over a narrow band for the dead limbs. The crown is an
         // ellipsoid rather than a cone because a mature pine's crown is nearly as wide
         // near the top as at its foot; a cone narrowed the limbs so fast they averaged

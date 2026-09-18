@@ -347,6 +347,9 @@
         ),
     ),
     envelope: (
+        // The volumes below are metres around a trunk this long; declared longer or
+        // shorter, they stretch along it so the crown keeps its place on the tree.
+        for_trunk_length: 27.0,
         volumes: [
             // Two cones, because one cannot do both jobs. The foliage fills whatever
             // envelope it is given, so this is the silhouette, and the reference has a

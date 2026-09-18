@@ -353,6 +353,9 @@
         ),
     ),
     envelope: (
+        // The volumes below are metres around a trunk this long; declared longer or
+        // shorter, they stretch along it so the crown keeps its place on the tree.
+        for_trunk_length: 15.0,
         volumes: [
             // A mature oak crown is several masses that grew into each other, not one
             // dome. Overlapping lobes give the silhouette its lumps and let the gaps

@@ -63,6 +63,20 @@ impl Default for SpeciesParams {
     }
 }
 
+impl SpeciesParams {
+    /// The crown envelope as the tree is grown against it: scaled by `envelope_scale`,
+    /// and stretched along the trunk to follow it when the volumes were drawn for a
+    /// trunk of a different length.
+    pub fn grown_envelope(&self) -> EnvelopeParams {
+        let env = self.envelope.scaled(self.envelope_scale);
+        if self.envelope.for_trunk_length > 0.0 {
+            env.stretched(self.trunk.length / self.envelope.for_trunk_length)
+        } else {
+            env
+        }
+    }
+}
+
 /// What stops a trunk from being a cylinder.
 ///
 /// Real boles are fluted rather than round, swell and waist along their length, and

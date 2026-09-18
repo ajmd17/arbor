@@ -66,7 +66,7 @@ const fn log_knob<T>(
 /// Crown shape and the multipliers that act on every level at once. These are the
 /// quick controls, shown open at the top of the panel.
 pub static SHAPE: &[Knob<SpeciesParams>] = &[
-    knob("Trunk length", (2.0, 60.0), "Declared length of the trunk, in metres. The crown envelope does not follow it, so a big change here wants Envelope scale moved with it.", |p| &mut p.trunk.length),
+    knob("Trunk length", (2.0, 60.0), "Declared length of the trunk, in metres. The crown envelope stretches along it, so the crown stays on the tree; it does not get wider, which is what Envelope scale is for.", |p| &mut p.trunk.length),
     knob("Envelope scale", (0.4, 2.5), "Scales the crown envelope that steers and prunes every branch.", |p| &mut p.envelope_scale),
     knob("Gravity", (0.0, 4.0), "Multiplies every level's gravity at once.", |p| &mut p.gravity_multiplier),
     knob("Phototropism", (0.0, 4.0), "Multiplies every level's pull toward the light at once.", |p| &mut p.phototropism_multiplier),
@@ -87,6 +87,7 @@ pub static ENVELOPE: Group<EnvelopeParams> = Group {
         log_knob("Falloff", (0.01, 1.0), "How soft the envelope's edge is. Small is a hard wall; large lets branches thin out gradually toward it.", |e| &mut e.falloff),
         knob("Kill threshold", (0.0, 0.5), "Envelope density below which a growing stem is pruned. Higher prunes earlier, inside the edge.", |e| &mut e.kill_threshold),
         knob("Pull strength", (0.0, 5.0), "How hard the crown turns a stem heading out of it, in radians per metre grown.", |e| &mut e.pull_strength),
+        knob("Drawn for trunk", (0.0, 80.0), "The trunk length the envelope's volumes were drawn for, in metres. The volumes stretch along the trunk by the ratio when the trunk is declared longer or shorter. Zero holds them absolute.", |e| &mut e.for_trunk_length),
     ],
     counts: &[],
 };
