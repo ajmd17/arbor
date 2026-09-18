@@ -151,13 +151,21 @@ impl SpeciesParams {
         self.map("", &mut |_, v| Ranged::Fixed(v))
     }
 
-    /// The crown envelope as the tree is grown against it: scaled by `envelope_scale`,
-    /// and stretched along the trunk to follow it when the volumes were drawn for a
-    /// trunk of a different length.
-    pub fn grown_envelope(&self) -> EnvelopeParams {
+    /// The crown envelope as the tree is grown against it, around a leader that grew
+    /// `leader_length` metres: scaled by `envelope_scale`, and stretched along the trunk
+    /// to follow it when the volumes were drawn for a trunk of a different length.
+    ///
+    /// The leader's length rather than the declared one, because the leader draws its
+    /// own `length_variance` and the crown has to hear about it. Stretched by the
+    /// declared length, a leader that drew long climbed out of the top of its crown: the
+    /// spruce, whose volumes close the spire just under its declared height, came out
+    /// bare for up to four metres at the top on nearly half its seeds, with nothing up
+    /// there but the dead stubs of limbs the crown pruned at birth.
+    /// `Skeleton::leader_length` gives this for a tree already grown.
+    pub fn grown_envelope(&self, leader_length: f32) -> EnvelopeParams {
         let env = self.envelope.scaled(self.envelope_scale);
         if self.envelope.for_trunk_length > 0.0 {
-            env.stretched(self.trunk.length / self.envelope.for_trunk_length)
+            env.stretched(leader_length / self.envelope.for_trunk_length)
         } else {
             env
         }

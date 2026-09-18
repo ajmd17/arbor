@@ -92,7 +92,7 @@ pub static ENVELOPE: Group<EnvelopeParams<Ranged>> = Group {
         log_knob("Falloff", (0.01, 1.0), "How soft the envelope's edge is. Small is a hard wall; large lets branches thin out gradually toward it.", |e| &mut e.falloff),
         knob("Kill threshold", (0.0, 0.5), "Envelope density below which a growing stem is pruned. Higher prunes earlier, inside the edge.", |e| &mut e.kill_threshold),
         knob("Pull strength", (0.0, 5.0), "How hard the crown turns a stem heading out of it, in radians per metre grown.", |e| &mut e.pull_strength),
-        knob("Drawn for trunk", (0.0, 80.0), "The trunk length the envelope's volumes were drawn for, in metres. The volumes stretch along the trunk by the ratio when the trunk is declared longer or shorter. Zero holds them absolute.", |e| &mut e.for_trunk_length),
+        knob("Drawn for trunk", (0.0, 80.0), "The trunk length the envelope's volumes were drawn for, in metres. The volumes stretch along the trunk by the ratio to the length the leader actually grew, variance included, so the crown follows a taller or shorter trunk. Zero holds them absolute.", |e| &mut e.for_trunk_length),
     ],
     counts: &[],
 };

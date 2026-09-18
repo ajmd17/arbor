@@ -95,6 +95,21 @@ impl Skeleton {
         runs
     }
 
+    /// How far the leader grew, measured along it from the ground. The trunk shares a
+    /// stem with the root node, so this is that stem's polyline.
+    pub fn leader_length(&self) -> f32 {
+        let Some(root) = self.nodes.first() else {
+            return 0.0;
+        };
+        let mut length = 0.0;
+        let mut prev = root.position;
+        for node in self.nodes.iter().skip(1).filter(|n| n.stem == root.stem) {
+            length += (node.position - prev).length();
+            prev = node.position;
+        }
+        length
+    }
+
     pub fn stats(&self) -> SkeletonStats {
         let mut stats = SkeletonStats {
             node_count: self.nodes.len(),

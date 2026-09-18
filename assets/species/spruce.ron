@@ -361,8 +361,13 @@
             // again; a single cone through the spire loses a third of the width at
             // mid-height. Carried nearly to the ground, so the lowest whorls live and
             // the crown ends in a skirt rather than on a bare pole.
+            //
+            // The spire closes six tenths of a metre over the leader, not under it. The
+            // top whorls need that much crown around them to grow limbs long enough to
+            // carry a twig; closed at the leader's own height, the spruce stood half a
+            // metre to a metre and a half of bare leader over its needles.
             Cone(base_y: 2.4, apex_y: 21.5, base_radius: 7.3, apex_radius: 2.75),
-            Cone(base_y: 20.0, apex_y: 26.8, base_radius: 3.2, apex_radius: 0.25),
+            Cone(base_y: 20.0, apex_y: 27.6, base_radius: 3.2, apex_radius: 0.25),
         ],
         // Tighter than the default quarter. Drive fades from `1 - falloff` of the way
         // out, so at 0.25 a limb is already being starved from three quarters of the

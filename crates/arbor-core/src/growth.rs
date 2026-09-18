@@ -152,7 +152,11 @@ struct PendingFork {
 
 struct GrowCtx<'a> {
     params: &'a SpeciesParams,
-    env: EnvelopeParams,
+    /// The crown, stretched to the declared trunk until the leader has finished and
+    /// then to the length it actually grew. Nothing reads it in between: the leader is
+    /// the one stem the crown does not shape, and everything it carries is held back
+    /// until it stops.
+    env: RefCell<EnvelopeParams>,
     levels_total: u8,
     /// The leader centreline, appended to as the trunk climbs. The crown envelope is
     /// described around a vertical axis, so a trunk that leans would grow out of its
@@ -211,7 +215,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
     let levels_total = levels_total(params);
     let nominal = nominal_vigor(params);
     let ctx = GrowCtx {
-        env: params.grown_envelope(),
+        env: RefCell::new(params.grown_envelope(params.trunk.length)),
         levels_total,
         params,
         leader: RefCell::new(Vec::new()),
@@ -696,7 +700,8 @@ fn grow_stem(
         // Anything the envelope steers, it also prunes. Steering a stem that can
         // never be cut just leaves it circling the crown boundary forever.
         if shaped_by_envelope
-            && ctx.env.density(pos - ctx.crown_offset(pos.y)) < ctx.params.envelope.kill_threshold
+            && ctx.env.borrow().density(pos - ctx.crown_offset(pos.y))
+                < ctx.params.envelope.kill_threshold
         {
             // Pruned before it grew at all means this stem was born outside the
             // crown. On the bare lower trunk of a conifer those are the dead stubs,
@@ -823,6 +828,15 @@ fn grow_stem(
         if v < MIN_VIGOR * nominal {
             break;
         }
+    }
+
+    // The crown goes where the leader went. Its volumes were drawn for the declared
+    // trunk, and the leader draws its own `length_variance` on top: stretched to the
+    // declaration, a leader that drew long stood out of its own crown, and every limb
+    // born up there was pruned at birth. Nothing has grown against the crown yet, since
+    // everything the leader carries is still pending.
+    if is_leader {
+        *ctx.env.borrow_mut() = ctx.params.grown_envelope(grown_len);
     }
 
     // Now the stem has stopped, so its children can be measured against what it
@@ -1098,9 +1112,10 @@ fn steer(
         // space and the answer brought back to where the crown actually sits.
         let crown_offset = ctx.crown_offset(pos.y);
         let local = pos - crown_offset;
-        let dens = ctx.env.density(local);
+        let env = ctx.env.borrow();
+        let dens = env.density(local);
         if dens < 1.0 {
-            let target = ctx.env.steer_target(local) + crown_offset;
+            let target = env.steer_target(local) + crown_offset;
             let inward = horizontal(target - pos);
             let error = inward.length();
             if error > 1e-4 {
@@ -1116,7 +1131,7 @@ fn steer(
                 // Measured per metre grown rather than per segment, so a level with
                 // short segments is not steered several times harder than one with
                 // long segments for the same setting.
-                let turn = ctx.env.pull_strength * (1.0 - dens) * leaving * seg_len;
+                let turn = env.pull_strength * (1.0 - dens) * leaving * seg_len;
                 d = turn_toward(d, inward, turn);
             }
         }
@@ -2334,8 +2349,8 @@ mod tests {
         // is only known up to the height reached so far.
         for src in [PINE_RON, OAK_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
-            let env = params.grown_envelope();
             let sk = grow(&params);
+            let env = params.grown_envelope(sk.leader_length());
             let trunk_stem = sk.nodes[0].stem;
             // In the order the trunk grew, not sorted by height. A trunk that leans
             // hard enough to dip has a polyline whose sorted form is a different shape
@@ -2604,8 +2619,8 @@ mod tests {
         // leaning top falls outside a crown centred on the world axis. The pine it used
         // to use now stands straight under a broad crown, and would test nothing.
         let params = parse_species(SPRUCE_RON).unwrap();
-        let env = params.grown_envelope();
         let sk = grow(&params);
+        let env = params.grown_envelope(sk.leader_length());
 
         let trunk_stem = sk.nodes[0].stem;
         let top = sk
@@ -2808,12 +2823,53 @@ mod tests {
     }
 
     #[test]
+    fn the_crown_keeps_up_with_a_leader_that_draws_long() {
+        // The leader draws its own `length_variance`, and the crown has to follow the
+        // length it drew rather than the one declared. Stretched to the declaration, a
+        // leader that drew long stood out of the top of its crown with nothing on it but
+        // the dead stubs of limbs pruned at birth: the spruce did it on nearly half its
+        // seeds, up to four metres bare.
+        //
+        // The spruce, because its spire closes tight over the leader, with its spread
+        // widened so the seeds draw well clear of the declared length on both sides.
+        let mut species = parse_template(SPRUCE_RON).unwrap();
+        let declared = species.trunk.length.lo();
+        species.trunk.length_variance = Ranged::Fixed(0.2);
+        let mut longest = 0.0f32;
+        for seed in 1..=8 {
+            species.seed = seed;
+            let tree = species.instance();
+            let sk = grow(&tree);
+            let height = sk.stats().height;
+            let top = sk
+                .nodes
+                .iter()
+                .filter(|n| n.level > 0 && !n.dead)
+                .map(|n| n.position.y)
+                .fold(0.0f32, f32::max);
+            assert!(
+                height - top < 1.0,
+                "seed {seed} drew a {:.1} m leader and stands {:.1} m over its highest \
+                 living branch",
+                sk.leader_length(),
+                height - top
+            );
+            longest = longest.max(sk.leader_length());
+        }
+        assert!(
+            longest > declared * 1.1,
+            "no seed drew a leader much past the declared {declared:.1} m (longest \
+             {longest:.1} m), so this tested nothing"
+        );
+    }
+
+    #[test]
     fn a_trunk_given_a_range_grows_each_tree_its_own_height_under_its_own_crown() {
         // What a range is for: one species, trees of different heights. Each seed lands
         // its own trunk length, and the crown climbs with it, because the envelope is
-        // stretched by the length the tree landed on. That is the difference from
-        // `length_variance`, which the leader draws for itself as it grows and the crown
-        // never hears about.
+        // stretched by the length the leader grew. `length_variance` is held at zero so
+        // the spread here is the range's alone; the leader's own draw has a test of its
+        // own above.
         let mut species = parse_template(PINE_RON).unwrap();
         let declared = species.trunk.length.lo();
         let at_preset = bare_tip(&species.instance());

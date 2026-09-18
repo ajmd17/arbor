@@ -563,7 +563,10 @@
             // grow and the leader comes out of the foliage as a bare spike. So this one
             // stops just under the leader's own tip and still holds 1.6 m of radius
             // there. The leader is the one part of a fir you should not be able to see.
-            Cone(base_y: 22.5, apex_y: 30.2, base_radius: 3.0, apex_radius: 1.6),
+            // Just under the tip of a leader grown to the declared 31 m, that is: the
+            // crown stretches with the length the leader actually drew, so a spire
+            // closed at 30.2 left most of a metre of leader out of the top.
+            Cone(base_y: 22.5, apex_y: 30.9, base_radius: 3.0, apex_radius: 1.6),
             // The underside. A cone has a flat bottom, and a flat bottom is wrong for
             // any conifer: the lowest limbs leave the trunk pointing down and sweep
             // down further, so they fell straight out through it and died, and the

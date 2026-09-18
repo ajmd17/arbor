@@ -169,9 +169,10 @@ pub struct EnvelopeParams<V = f32> {
     /// Declared longer, the trunk climbs straight out of the top of them and every
     /// branch born up there is pruned at birth, so a tree made taller in the viewer
     /// came out as its old crown with a bare spike on top. With this set, the volumes
-    /// stretch along the trunk by the ratio of the two lengths and the crown keeps its
-    /// place on the tree. Only the heights stretch — a taller tree is not, by that
-    /// alone, a wider one — so the width stays with `envelope_scale`.
+    /// stretch along the trunk by the ratio of the length the leader actually grew —
+    /// its own `length_variance` included — to this one, and the crown keeps its place
+    /// on the tree. Only the heights stretch — a taller tree is not, by that alone, a
+    /// wider one — so the width stays with `envelope_scale`.
     pub for_trunk_length: V,
 }
 
