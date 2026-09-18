@@ -195,13 +195,13 @@ impl SkyParams {
 
 const PI: f32 = std::f32::consts::PI;
 
-fn luminance(c: Vec3) -> f32 {
+pub fn luminance(c: Vec3) -> f32 {
     c.dot(Vec3::new(0.2126, 0.7152, 0.0722))
 }
 
 /// The nine real spherical harmonics up to second order, in the order the irradiance
 /// evaluation below expects.
-fn sh_basis(d: Vec3) -> [f32; 9] {
+pub fn sh_basis(d: Vec3) -> [f32; 9] {
     [
         0.282095,
         0.488603 * d.y,
@@ -275,16 +275,55 @@ impl SkyIrradiance {
     }
 }
 
-/// Shadow transform, plus the world size of one shadow texel.
+/// Shadow transform, plus the world size of one shadow texel, in the depth convention
+/// the offline preview rasterises with. The viewer uses [shadow_frustum].
 ///
 /// The frustum is fitted to the tree together with where its shadow lands on the
 /// ground. A low sun throws a shadow several times the height of the tree, and a box
 /// sized to the tree alone simply cuts it off partway along.
+#[allow(dead_code)]
 pub fn light_view_proj(
     aabb: ([f32; 3], [f32; 3]),
     sun_dir: Vec3,
     shadow_size: i32,
 ) -> (Mat4, f32) {
+    let fit = fit_shadow(aabb, sun_dir, shadow_size);
+    let proj = Mat4::orthographic_rh(fit.lo.x, fit.hi.x, fit.lo.y, fit.hi.y, fit.near, fit.far);
+    (proj * fit.view, fit.texel)
+}
+
+/// The sun's shadow map as the viewer draws it: fitted like [light_view_proj], but in
+/// GL's own depth convention so the stored depth spans the whole frustum, and with the
+/// measurements the soft-shadow filter needs to work in metres.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowFrustum {
+    pub view_proj: Mat4,
+    /// World size of one shadow texel.
+    pub texel: f32,
+    /// Metres from the near plane to the far one: what one unit of stored depth spans.
+    pub depth_range: f32,
+}
+
+pub fn shadow_frustum(aabb: ([f32; 3], [f32; 3]), sun_dir: Vec3, shadow_size: i32) -> ShadowFrustum {
+    let fit = fit_shadow(aabb, sun_dir, shadow_size);
+    let proj = Mat4::orthographic_rh_gl(fit.lo.x, fit.hi.x, fit.lo.y, fit.hi.y, fit.near, fit.far);
+    ShadowFrustum {
+        view_proj: proj * fit.view,
+        texel: fit.texel,
+        depth_range: fit.far - fit.near,
+    }
+}
+
+struct ShadowFit {
+    view: Mat4,
+    lo: Vec3,
+    hi: Vec3,
+    near: f32,
+    far: f32,
+    texel: f32,
+}
+
+fn fit_shadow(aabb: ([f32; 3], [f32; 3]), sun_dir: Vec3, shadow_size: i32) -> ShadowFit {
     let min = Vec3::from(aabb.0);
     let max = Vec3::from(aabb.1);
     let sun = sun_dir.normalize_or(Vec3::Y);
@@ -319,16 +358,15 @@ pub fn light_view_proj(
         lo = lo.min(q);
         hi = hi.max(q);
     }
-    let proj = Mat4::orthographic_rh(
-        lo.x,
-        hi.x,
-        lo.y,
-        hi.y,
-        (-hi.z - 1.0).max(0.01),
-        -lo.z + 1.0,
-    );
     let texel = (hi.x - lo.x).max(hi.y - lo.y) / shadow_size.max(1) as f32;
-    (proj * view, texel)
+    ShadowFit {
+        view,
+        lo,
+        hi,
+        near: (-hi.z - 1.0).max(0.01),
+        far: -lo.z + 1.0,
+        texel,
+    }
 }
 
 #[cfg(test)]

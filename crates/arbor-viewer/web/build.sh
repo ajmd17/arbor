@@ -44,4 +44,8 @@ for name in $names; do
     done
 done
 
+# The photographed environments the viewer offers. Only the one picked is fetched.
+mkdir -p "$out/assets/hdri"
+cp -u assets/hdri/*.hdr "$out/assets/hdri/"
+
 echo "built $out ($(du -sh "$out" | cut -f1))"

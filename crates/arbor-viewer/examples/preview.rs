@@ -24,7 +24,9 @@
 //! from. `--plain-mips` swaps the coverage-preserving chain for a plain box-filtered
 //! one, which is what the disappearing-canopy bug looked like.
 
+// Shared with the viewer, which uses parts of it this does not.
 #[path = "../src/lighting.rs"]
+#[allow(dead_code)]
 mod lighting;
 #[path = "../src/mipmap.rs"]
 mod mipmap;

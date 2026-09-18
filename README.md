@@ -67,13 +67,60 @@ cargo run --release -p arbor-viewer
 ### Options:
 `--species`, `--seed`, `--no-leaves`, `--wireframe`, `--no-shadows`,
 `--translucency`, `--time`, `--sun-elevation`, `--sun-azimuth`,
-`--sun-intensity`, `--yaw`, `--pitch`, `--distance`, `--target-y`,
-`--coverage-lod`, `--wind <strength>`, `--gustiness`, `--wind-dir <degrees>`,
-`--wind-time <seconds>`, and `--screenshot <path> [--settle N]`.
+`--sun-intensity`, `--sun-size <degrees>`, `--yaw`, `--pitch`, `--distance`,
+`--target-y`, `--coverage-lod`, `--wind <strength>`, `--gustiness`,
+`--wind-dir <degrees>`, `--wind-time <seconds>`, `--hdri <name|sky>`,
+`--env-rotation <degrees>`, `--env-intensity`, `--ground <photo|plain|none>`,
+`--blur <0..1>`, `--exposure <stops>`, `--tonemap <aces|agx|punchy|neutral>`,
+`--bloom`, `--no-ao`, `--ao-radius <metres>`, `--softness`, `--msaa <samples>`,
+`--view <uv|normals|ao>`, and `--screenshot <path> [--settle N]`.
 
 A screenshot is taken in still air unless `--wind` asks otherwise, and then on a
 stopped clock (`--wind-time`, default 0), so the same command always gives the same
-frame.
+frame. Setting the sun by hand (`--time`, `--sun-elevation`, `--sun-azimuth`) picks
+the procedural sky unless `--hdri` names a photograph as well.
+
+### Lighting
+
+The tree is lit by an environment, either a photographed one (an HDRI) or a sky
+built from the time of day, and drawn the way an offline renderer would draw it:
+
+- **Surfaces** use Filament's standard model: GGX, height-correlated Smith and
+  Schlick for the specular, Lambert for the diffuse, with Filament's multiscatter
+  DFG table putting back the energy single-scattering GGX loses on rough bark.
+  Leaves are thin sheets that scatter light out of both faces, lit through from
+  behind as well as from the front.
+- **The environment** lights through a GGX-prefiltered cube map for reflections
+  and spherical harmonics for everything else. A photograph's sun is found and
+  lifted out of it, then put back as a light of the same energy, so it casts
+  shadows and lights leaves from behind. Windows and lamps are told apart from a
+  sun by whether they outshine the sky as a whole.
+- **Shadows** soften with distance from what casts them (PCSS), by the sun's own
+  size: crisp at the foot of the trunk, loose under the edge of the crown.
+- **Occlusion** comes from the screen (GTAO) for forks, crevices and the inside
+  of the crown, and from the crown seen from above for the sky a tree takes from
+  the ground beneath it and from its own trunk.
+- **The frame** is drawn in half-float with MSAA, bloomed, and tonemapped once at
+  the end: ACES by default, or AgX (Blender's default), AgX Punchy, or Khronos
+  PBR Neutral.
+
+A photograph's ground is laid under the tree on a dome with a flat floor, as
+three.js's grounded skybox does, so the tree stands on the ground in the picture,
+catches its shadow there, and has what is far off standing up around it rather
+than smeared flat. **Shot from** and **Surroundings at** set how high the
+photograph was taken and how far off its surroundings stand; each bundled one
+comes with its own. The **Occlusion** view shows the occlusion alone.
+
+The photographs live in `assets/hdri`, and any `.hdr` put there is offered on the
+desktop. The bundled ones are from [Poly Haven](https://polyhaven.com/hdris)
+(CC0), brought in at 2048 wide with the import tool:
+
+```bash
+cargo run --release -p arbor-viewer --example import_hdri -- path/to/sky_4k.hdr --preview check.png
+```
+
+It reports the sun it finds, and `--preview` marks where, which is the quickest
+way to see that a sun came from the sun and not a window.
 
 Headless, from the CLI:
 
@@ -94,8 +141,9 @@ bash crates/arbor-viewer/web/build.sh
 python -m http.server 8080 -d docs
 ```
 
-Then open http://localhost:8080. `docs/` is the whole site: the page, the wasm, and
-the texture maps the built-in species use (about 55 MB, most of it the spruce bark).
+Then open http://localhost:8080. `docs/` is the whole site: the page, the wasm, the
+texture maps the built-in species use (about 55 MB, most of it the spruce bark), and
+the bundled environments (about 23 MB).
 GitHub Pages serves it from the branch (**Settings → Pages → Deploy from a branch**,
 folder `/docs`), and it works on any other static host.
 
@@ -112,6 +160,8 @@ On the web:
 
 - Textures are fetched when a species is picked. Switching species holds the page
   for a moment while its leaf atlas is baked.
+- Environments are fetched when picked too, 5–7 MB each. The procedural sky
+  needs nothing fetched.
 - **Download GLB** exports the tree on screen as a download. Batches, glTF and
   saving presets need the desktop viewer; **Copy as RON** works in both.
 - There's no wireframe, because WebGL can't draw one.
@@ -205,6 +255,7 @@ cargo run --release -p arbor-core   --example levers     -- oak   # what each sa
 cargo run --release -p arbor-viewer --example preview    -- oak out.png
 cargo run --release -p arbor-viewer --example bake_cluster -- leaf_oak
 cargo run --release -p arbor-viewer --example import_textures -- leaf_oak --albedo src.png --alpha mask.png
+cargo run --release -p arbor-viewer --example import_hdri    -- sky_4k.hdr --preview check.png
 cargo run --release -p arbor-viewer --example alpha_coverage_report -- assets/textures/leaf_oak_albedo.png
 ```
 

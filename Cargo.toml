@@ -14,7 +14,7 @@ ron = "0.9"
 # Seeded draws only: nothing asks the OS for randomness, which the web cannot give.
 rand = { version = "0.9", default-features = false, features = ["std", "small_rng"] }
 bytemuck = "1"
-image = { version = "0.25", default-features = false, features = ["png", "tga", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "tga", "jpeg", "hdr"] }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.32"
 egui_glow = "0.32"

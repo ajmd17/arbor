@@ -3,10 +3,13 @@
 mod assets;
 mod export;
 mod gpu;
+mod hdri;
+mod ibl;
 mod knobs;
 mod lighting;
 mod mipmap;
 mod presets;
+mod render;
 mod shaders;
 
 use std::path::Path;
@@ -23,12 +26,14 @@ use arbor_core::{
     build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams, SpeciesTemplate,
 };
 
+use arbor_core::textures::MapSource as _;
 use gpu::{
-    ColorPass, DepthPass, GpuGround, GpuLeaves, GpuLines, GpuMesh, GpuSky, GroundDrawParams,
-    LeafDepthPass, LeafDrawParams, LeafMaterialParams, MaterialTextures, MeshDrawParams,
-    ShadowTarget, WindUniforms,
+    ColorPass, DepthPass, GpuBackdrop, GpuGround, GpuLeaves, GpuLines, GpuMesh, GroundDrawParams,
+    GroundMode, LeafDepthPass, LeafDrawParams, LeafMaterialParams, MaterialTextures,
+    MeshDrawParams, ShadowTarget, WindUniforms,
 };
-use lighting::{light_view_proj, SkyParams};
+use lighting::{sh9_cached, shadow_frustum, SkyParams};
+use render::{Lighting, PostSettings, Renderer, Tonemap};
 
 const TEXTURE_DIR: &str = arbor_core::textures::TEXTURE_DIR;
 
@@ -37,6 +42,8 @@ enum RenderMode {
     Shaded,
     UvChecker,
     Normals,
+    /// The ambient occlusion the scene is being drawn with, alone.
+    Occlusion,
 }
 
 /// Asks the viewer to save what it drew and quit, so a capture comes from the real
@@ -73,6 +80,59 @@ struct Startup {
     gustiness: Option<f32>,
     wind_direction: Option<f32>,
     wind_time: Option<f32>,
+    view: Option<RenderMode>,
+    /// `Some(None)` asks for the procedural sky, `Some(Some(name))` for a photograph.
+    environment: Option<Option<String>>,
+    env_rotation: Option<f32>,
+    env_intensity: Option<f32>,
+    exposure: Option<f32>,
+    tonemap: Option<Tonemap>,
+    bloom: Option<f32>,
+    ao: Option<bool>,
+    ao_radius: Option<f32>,
+    background_blur: Option<f32>,
+    ground: Option<Ground>,
+    msaa: Option<i32>,
+    sun_size: Option<f32>,
+    shadow_softness: Option<f32>,
+}
+
+/// What stands under the tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ground {
+    /// A plain ground of its own.
+    Plain,
+    /// The ground in the photograph, when there is one; the plain ground otherwise.
+    Photo,
+    None,
+}
+
+impl Ground {
+    // The command line's, and the web has none.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "plain" => Some(Self::Plain),
+            "photo" | "projected" => Some(Self::Photo),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+/// What the environment on the GPU was last built from, so it is rebuilt only when
+/// that changes.
+#[derive(Clone, PartialEq)]
+enum Built {
+    Nothing,
+    Sky(SkyParams),
+    Photo(String),
+}
+
+/// What was learned from a photograph when it was loaded.
+struct Photo {
+    sun: Option<hdri::Sun>,
+    sh: [Vec3; 9],
 }
 
 /// The hour the viewer opens at: the low, warm light of just after sunrise.
@@ -129,15 +189,35 @@ fn main() -> eframe::Result<()> {
         gustiness: num("--gustiness"),
         wind_direction: num("--wind-dir"),
         wind_time: num("--wind-time"),
+        view: flag("--view").and_then(|v| match v.as_str() {
+            "uv" => Some(RenderMode::UvChecker),
+            "normals" => Some(RenderMode::Normals),
+            "ao" | "occlusion" => Some(RenderMode::Occlusion),
+            _ => None,
+        }),
+        environment: flag("--hdri").map(|h| (h != "sky" && h != "none").then(|| h.clone())),
+        env_rotation: num("--env-rotation"),
+        env_intensity: num("--env-intensity"),
+        exposure: num("--exposure"),
+        tonemap: flag("--tonemap").and_then(|t| Tonemap::parse(t)),
+        bloom: num("--bloom"),
+        ao: args.iter().any(|a| a == "--no-ao").then_some(false),
+        ao_radius: num("--ao-radius"),
+        background_blur: num("--blur"),
+        ground: flag("--ground").and_then(|g| Ground::parse(g)),
+        msaa: flag("--msaa").and_then(|s| s.parse().ok()),
+        sun_size: num("--sun-size"),
+        shadow_softness: num("--softness"),
     };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1600.0, 950.0])
             .with_title("Arbor"),
-        depth_buffer: 24,
-        // Foliage is all alpha-tested edges, and they crawl badly without it.
-        multisampling: 4,
+        // The scene is drawn into targets of its own, multisampled there, so the window
+        // itself needs neither depth nor samples.
+        depth_buffer: 0,
+        multisampling: 0,
         ..Default::default()
     };
     eframe::run_native(
@@ -258,12 +338,17 @@ impl OrbitCamera {
         self.right().cross(self.forward()).normalize_or(Vec3::Y)
     }
 
+    fn proj(&self) -> Mat4 {
+        Mat4::perspective_rh(self.fov_y, self.aspect.max(0.05), 0.05, 600.0)
+    }
+
     fn view_proj(&self) -> Mat4 {
-        let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Y);
-        let proj = Mat4::perspective_rh(self.fov_y, self.aspect.max(0.05), 0.05, 600.0);
-        proj * view
+        self.proj() * Mat4::look_at_rh(self.eye(), self.target, Vec3::Y)
     }
 }
+
+/// Reflectance of the plain ground: leaf litter and bare soil.
+const GROUND_ALBEDO: Vec3 = Vec3::new(0.14, 0.12, 0.085);
 
 const LEVEL_COLORS: [[f32; 3]; 8] = [
     [0.95, 0.75, 0.35],
@@ -285,8 +370,42 @@ struct App {
     depth_pass: Arc<DepthPass>,
     leaf_depth_pass: Arc<LeafDepthPass>,
     color_pass: Arc<ColorPass>,
-    sky_pass: Arc<GpuSky>,
+    backdrop: Arc<GpuBackdrop>,
     ground_pass: Arc<GpuGround>,
+    /// The targets and the passes around the scene, and the environment maps.
+    renderer: Arc<Mutex<Renderer>>,
+    /// Where photographed environments come from.
+    hdri_maps: assets::Maps,
+    /// The photographs on offer.
+    hdris: Vec<String>,
+    /// The photograph asked for, or `None` for the procedural sky.
+    environment: Option<String>,
+    built: Built,
+    photo: Option<Photo>,
+    /// Why the photograph asked for is not on screen, when it is not.
+    env_status: Option<(String, bool)>,
+    /// Degrees the photograph is turned about the vertical.
+    env_rotation: f32,
+    env_intensity: f32,
+    /// How bright the sun lifted out of a photograph is put back, against how bright it was.
+    photo_sun: f32,
+    background_blur: f32,
+    ground: Ground,
+    /// Metres above the ground the photograph is taken to have been shot from, and the
+    /// radius of the dome it is laid onto.
+    ground_height: f32,
+    ground_radius: f32,
+    /// Angular diameter of the procedural sun, in degrees.
+    sun_size: f32,
+    shadow_softness: f32,
+    /// Stops of exposure on top of the automatic.
+    exposure_ev: f32,
+    tonemap: Tonemap,
+    bloom: f32,
+    ao: bool,
+    ao_radius: f32,
+    ao_strength: f32,
+    msaa: i32,
     /// Where the texture maps come from: off disk, or fetched on the web.
     maps: assets::Maps,
     bark_material: MaterialTextures,
@@ -316,6 +435,8 @@ struct App {
     mesh_stats: (usize, usize),
     leaf_stats: (usize, usize),
     aabb: ([f32; 3], [f32; 3]),
+    /// The leaves' bounding box: where the crown is, for the shade it casts on the sky.
+    crown: (Vec3, Vec3),
     camera: OrbitCamera,
     dirty: bool,
     gen_ms: f32,
@@ -323,7 +444,6 @@ struct App {
     wireframe: bool,
     shadows: bool,
     show_skeleton: bool,
-    show_ground: bool,
     sun_intensity: f32,
     show_leaves: bool,
     leaf_translucency: f32,
@@ -383,18 +503,22 @@ impl App {
 
         let leaves = build_leaves(&skeleton, &grown);
         let leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
+        let crown = crown_bounds(&leaves);
 
         let mut mesh_gpu = GpuMesh::new(&gl);
         mesh_gpu.upload(&gl, &mesh);
         let mut leaves_gpu = GpuLeaves::new(&gl);
         leaves_gpu.upload(&gl, &leaves);
         let lines = GpuLines::new(&gl);
-        let shadow = ShadowTarget::new(&gl, 2048);
+        // Big enough that the edge of a leaf's shadow is not a staircase. The web
+        // makes do with less memory.
+        let shadow = ShadowTarget::new(&gl, if cfg!(target_arch = "wasm32") { 2048 } else { 4096 });
         let depth_pass = DepthPass::new(&gl);
         let leaf_depth_pass = LeafDepthPass::new(&gl);
         let color_pass = ColorPass::new(&gl);
-        let sky_pass = GpuSky::new(&gl);
+        let backdrop = GpuBackdrop::new(&gl);
         let ground_pass = GpuGround::new(&gl);
+        let renderer = Renderer::new(&gl);
         // The real maps are put in by `sync_materials` below, at once on the desktop and
         // once they have been fetched on the web.
         let bark_material = unsafe { gpu::placeholder_material(&gl) };
@@ -408,8 +532,33 @@ impl App {
             depth_pass: Arc::new(depth_pass),
             leaf_depth_pass: Arc::new(leaf_depth_pass),
             color_pass: Arc::new(color_pass),
-            sky_pass: Arc::new(sky_pass),
+            backdrop: Arc::new(backdrop),
             ground_pass: Arc::new(ground_pass),
+            renderer: Arc::new(Mutex::new(renderer)),
+            hdri_maps: assets::Maps::new(hdri::HDRI_DIR),
+            hdris: hdri::available(),
+            // A photograph by default: it is what shows a tree best. The procedural
+            // sky is a click away, with the time of day it brings.
+            environment: Some(hdri::BUNDLED[0].to_string()),
+            built: Built::Nothing,
+            photo: None,
+            env_status: None,
+            env_rotation: 0.0,
+            env_intensity: 1.0,
+            photo_sun: 1.0,
+            background_blur: 0.0,
+            ground: Ground::Photo,
+            ground_height: hdri::staging(hdri::BUNDLED[0]).shot_from,
+            ground_radius: hdri::staging(hdri::BUNDLED[0]).radius,
+            sun_size: 0.53,
+            shadow_softness: 1.0,
+            exposure_ev: 0.0,
+            tonemap: Tonemap::Aces,
+            bloom: 0.04,
+            ao: true,
+            ao_radius: 1.2,
+            ao_strength: 1.0,
+            msaa: 4,
             maps: assets::Maps::default(),
             bark_material,
             leaf_material: None,
@@ -428,6 +577,7 @@ impl App {
             mesh_stats,
             leaf_stats,
             aabb,
+            crown,
             camera: OrbitCamera {
                 target: Vec3::new(0.0, 6.0, 0.0),
                 distance: 26.0,
@@ -442,7 +592,6 @@ impl App {
             wireframe: false,
             shadows: true,
             show_skeleton: false,
-            show_ground: true,
             sun_intensity: 1.0,
             show_leaves: true,
             leaf_translucency: 0.9,
@@ -527,8 +676,61 @@ impl App {
         if let Some(v) = startup.coverage_lod {
             app.coverage_lod = v;
         }
+        // Setting the sun by hand means the procedural sky, unless a photograph was
+        // asked for as well.
+        if startup.environment.is_none()
+            && (startup.time_of_day.is_some() || startup.sun_elevation.is_some() || startup.sun_azimuth.is_some())
+        {
+            app.environment = None;
+        }
+        if let Some(env) = startup.environment {
+            if let Some(name) = &env {
+                app.stage(name);
+            }
+            app.environment = env;
+        }
+        if let Some(v) = startup.env_rotation {
+            app.env_rotation = v;
+        }
+        if let Some(v) = startup.env_intensity {
+            app.env_intensity = v;
+        }
+        if let Some(v) = startup.exposure {
+            app.exposure_ev = v;
+        }
+        if let Some(v) = startup.tonemap {
+            app.tonemap = v;
+        }
+        if let Some(v) = startup.bloom {
+            app.bloom = v;
+        }
+        if let Some(v) = startup.ao {
+            app.ao = v;
+        }
+        if let Some(v) = startup.ao_radius {
+            app.ao_radius = v;
+        }
+        if let Some(v) = startup.background_blur {
+            app.background_blur = v;
+        }
+        if let Some(v) = startup.ground {
+            app.ground = v;
+        }
+        if let Some(v) = startup.view {
+            app.render_mode = v;
+        }
+        if let Some(v) = startup.msaa {
+            app.msaa = v;
+        }
+        if let Some(v) = startup.sun_size {
+            app.sun_size = v;
+        }
+        if let Some(v) = startup.shadow_softness {
+            app.shadow_softness = v;
+        }
         app.stats = app.skeleton.stats();
         app.sync_materials();
+        app.sync_environment();
         app.rebuild_overlay();
         app
     }
@@ -543,6 +745,7 @@ impl App {
         self.mesh_gpu.lock().unwrap().upload(&self.gl, &mesh);
         let leaves = build_leaves(&self.skeleton, &self.grown);
         self.leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
+        self.crown = crown_bounds(&leaves);
         self.leaves_gpu.lock().unwrap().upload(&self.gl, &leaves);
         self.sync_materials();
         self.gen_ms = t.elapsed().as_secs_f32() * 1000.0;
@@ -576,6 +779,136 @@ impl App {
             self.loaded_leaf = (leaves.texture.clone(), leaves.cluster.clone());
             self.leaf_material =
                 unsafe { gpu::load_leaf_material(&self.gl, &self.maps, &self.grown.leaves) };
+        }
+    }
+
+    /// Sets the ground up the way the photograph `name` wants it, when it is picked.
+    /// A tree left standing on nothing stays that way.
+    fn stage(&mut self, name: &str) {
+        let staging = hdri::staging(name);
+        (self.ground_height, self.ground_radius) = (staging.shot_from, staging.radius);
+        if self.ground != Ground::None {
+            self.ground = if staging.has_ground { Ground::Photo } else { Ground::Plain };
+        }
+    }
+
+    /// The procedural sky for where the sun is now.
+    fn procedural_sky(&self) -> SkyParams {
+        let mut sky = SkyParams::for_sun(self.sun_dir());
+        sky.sun_color *= self.sun_intensity;
+        sky
+    }
+
+    /// Builds the environment maps from whatever is asked for, when that has changed:
+    /// the procedural sky whenever the sun moves, a photograph once it is in.
+    fn sync_environment(&mut self) {
+        let Some(name) = self.environment.clone() else {
+            let sky = self.procedural_sky();
+            if self.built != Built::Sky(sky) {
+                self.renderer.lock().unwrap().env.load_sky(&self.gl, &sky);
+                self.built = Built::Sky(sky);
+                self.photo = None;
+                self.env_status = None;
+            }
+            return;
+        };
+        if self.built == Built::Photo(name.clone()) {
+            return;
+        }
+        let file = format!("{name}.hdr");
+        if !self.hdri_maps.ready(std::slice::from_ref(&file)) {
+            self.env_status = Some((format!("fetching {name}…"), false));
+            return;
+        }
+        let started = web_time::Instant::now();
+        let decoded = self
+            .hdri_maps
+            .read(&file)
+            .ok_or_else(|| format!("no {file} in {}", hdri::HDRI_DIR))
+            .and_then(|bytes| hdri::Equirect::decode(&bytes));
+        match decoded {
+            Ok(shown) => {
+                let analysed = shown.clone().analyse();
+                self.renderer
+                    .lock()
+                    .unwrap()
+                    .env
+                    .load_photo(&self.gl, &analysed.image, &shown);
+                println!(
+                    "environment {name}: {}x{}, sun {} ({:.0} ms)",
+                    shown.width,
+                    shown.height,
+                    analysed.sun.map_or("none".to_string(), |s| format!(
+                        "{:.1} deg up",
+                        s.dir.y.asin().to_degrees()
+                    )),
+                    started.elapsed().as_secs_f32() * 1000.0
+                );
+                self.photo = Some(Photo { sun: analysed.sun, sh: analysed.sh });
+                self.built = Built::Photo(name);
+                self.env_status = None;
+            }
+            Err(e) => {
+                // Back to the procedural sky, rather than a tree lit by nothing.
+                self.env_status = Some((format!("{name}: {e}"), true));
+                self.environment = None;
+            }
+        }
+    }
+
+    /// Everything about the light for this frame except what depends on the viewport
+    /// and the shadow map, which the paint callback fills in.
+    fn lighting(&self) -> Lighting {
+        let procedural = self.procedural_sky();
+        let ev = 2f32.powf(self.exposure_ev);
+        let base = Lighting {
+            sky: procedural,
+            photo: false,
+            sh: sh9_cached(&procedural),
+            env_rotation: 0.0,
+            env_intensity: 1.0,
+            sun_dir: procedural.sun_dir,
+            sun_color: procedural.sun_color,
+            sun_radius: (self.sun_size * 0.5).to_radians(),
+            shadow_softness: self.shadow_softness,
+            exposure: procedural.exposure() * ev,
+            cam_pos: self.camera.eye(),
+            ground_projection: None,
+            background_blur: 0.0,
+            shadow: shadow_frustum(self.aabb, procedural.sun_dir, 1),
+            shadow_size: 1,
+            normal_bias: 0.0,
+            ao_texel: [0.0, 0.0],
+            canopy: render::CanopyPlacement::default(),
+        };
+        let (Some(photo), Built::Photo(name)) = (&self.photo, &self.built) else {
+            return base;
+        };
+        let rotation = self.env_rotation.to_radians();
+        let (sun_dir, sun_color, sun_radius) = match photo.sun {
+            Some(sun) => (
+                hdri::from_env(sun.dir, rotation),
+                sun.irradiance * (self.env_intensity * self.photo_sun),
+                sun.angular_radius.clamp(0.0046, 0.03),
+            ),
+            None => (Vec3::Y, Vec3::ZERO, 0.0046),
+        };
+        Lighting {
+            photo: true,
+            sh: photo.sh,
+            env_rotation: rotation,
+            env_intensity: self.env_intensity,
+            sun_dir,
+            sun_color,
+            sun_radius,
+            // A photograph comes already exposed: published HDRIs are saved so that
+            // they look right shown as they are, which is also what Blender shows by
+            // default. Metering the light on the tree instead blows a bright sky out.
+            exposure: ev * 2f32.powf(hdri::staging(name).exposure),
+            ground_projection: (self.ground == Ground::Photo)
+                .then_some((self.ground_height, self.ground_radius)),
+            background_blur: self.background_blur,
+            ..base
         }
     }
 
@@ -835,11 +1168,13 @@ impl App {
                 RenderMode::Shaded => "Shaded",
                 RenderMode::UvChecker => "UV checker",
                 RenderMode::Normals => "Normals",
+                RenderMode::Occlusion => "Occlusion",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.render_mode, RenderMode::Shaded, "Shaded");
                 ui.selectable_value(&mut self.render_mode, RenderMode::UvChecker, "UV checker");
                 ui.selectable_value(&mut self.render_mode, RenderMode::Normals, "Normals");
+                ui.selectable_value(&mut self.render_mode, RenderMode::Occlusion, "Occlusion");
             });
         ui.checkbox(&mut self.show_leaves, "Leaves");
         if self.leaf_material.is_none() {
@@ -870,24 +1205,7 @@ impl App {
         if ui.checkbox(&mut self.show_skeleton, "Skeleton").changed() {
             self.rebuild_overlay();
         }
-        if ui
-            .add(
-                egui::Slider::new(&mut self.time_of_day, 3.5..=20.5)
-                    .text("Time of day")
-                    .custom_formatter(|h, _| {
-                        format!("{:02}:{:02}", h as i32, ((h % 1.0) * 60.0) as i32)
-                    }),
-            )
-            .changed()
-        {
-            let (el, az) = sun_at_hour(self.time_of_day);
-            self.sun_elevation = el;
-            self.sun_azimuth = az;
-        }
-        ui.add(egui::Slider::new(&mut self.sun_azimuth, 0.0..=360.0).text("Sun azimuth"));
-        ui.add(egui::Slider::new(&mut self.sun_elevation, -8.0..=85.0).text("Sun elevation"));
-        ui.add(egui::Slider::new(&mut self.sun_intensity, 0.1..=3.0).text("Sun intensity"));
-        ui.checkbox(&mut self.show_ground, "Ground");
+        self.lighting_ui(ui);
 
         ui.separator();
         ui.label("Wind");
@@ -966,6 +1284,8 @@ impl App {
         ui.monospace(format!("leaves: {}", self.leaf_stats.0));
         ui.monospace(format!("l.tris: {}", self.leaf_stats.1));
         ui.monospace(format!("gen:    {:.2} ms", self.gen_ms));
+        ui.monospace(format!("frame:  {:.1} ms", ctx.input(|i| i.stable_dt) * 1000.0))
+            .on_hover_text("Time between frames, smoothed. Held to the display's refresh rate while the GPU keeps up.");
 
         if ui.button("Frame tree").clicked() {
             self.frame_camera();
@@ -973,6 +1293,148 @@ impl App {
 
         ui.separator();
         ui.label("Camera: LMB orbit, RMB/MMB pan, wheel zoom");
+    }
+
+    /// Where the light comes from, and what stands under the tree.
+    fn lighting_ui(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label("Lighting");
+        let mut picked = None;
+        egui::ComboBox::from_label("Environment")
+            .selected_text(self.environment.as_deref().unwrap_or("Procedural sky"))
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(self.environment.is_none(), "Procedural sky").clicked() {
+                    picked = Some(None);
+                }
+                for name in &self.hdris {
+                    let on = self.environment.as_deref() == Some(name.as_str());
+                    if ui.selectable_label(on, name).clicked() {
+                        picked = Some(Some(name.clone()));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(format!(
+                "What lights the tree and stands behind it: a sky built from the time of day, or a photographed environment from {}. Any .hdr put there is offered.",
+                hdri::HDRI_DIR
+            ));
+        if let Some(env) = picked {
+            if let Some(name) = &env {
+                self.stage(name);
+            }
+            self.environment = env;
+            self.env_status = None;
+        }
+        if let Some((message, failed)) = &self.env_status {
+            if *failed {
+                ui.colored_label(egui::Color32::LIGHT_RED, message);
+            } else {
+                ui.weak(message);
+            }
+        }
+
+        if self.environment.is_none() {
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.time_of_day, 3.5..=20.5)
+                        .text("Time of day")
+                        .custom_formatter(|h, _| {
+                            format!("{:02}:{:02}", h as i32, ((h % 1.0) * 60.0) as i32)
+                        }),
+                )
+                .changed()
+            {
+                let (el, az) = sun_at_hour(self.time_of_day);
+                self.sun_elevation = el;
+                self.sun_azimuth = az;
+            }
+            ui.add(egui::Slider::new(&mut self.sun_azimuth, 0.0..=360.0).text("Sun azimuth"));
+            ui.add(egui::Slider::new(&mut self.sun_elevation, -8.0..=85.0).text("Sun elevation"));
+            ui.add(egui::Slider::new(&mut self.sun_intensity, 0.1..=3.0).text("Sun intensity"));
+            ui.add(egui::Slider::new(&mut self.sun_size, 0.1..=6.0).text("Sun size"))
+                .on_hover_text("Angular diameter of the sun, in degrees. The real one is about half a degree; a bigger sun softens every shadow.");
+        } else {
+            ui.add(egui::Slider::new(&mut self.env_rotation, -180.0..=180.0).text("Rotation"))
+                .on_hover_text("Turn the photograph, and the sun in it, about the vertical.");
+            ui.add(
+                egui::Slider::new(&mut self.env_intensity, 0.1..=4.0)
+                    .logarithmic(true)
+                    .text("Intensity"),
+            )
+            .on_hover_text("Brightness of the whole environment, sun included. Exposure follows it, so this mostly moves the tree against its background.");
+            if self.photo.as_ref().is_some_and(|p| p.sun.is_some()) {
+                ui.add(egui::Slider::new(&mut self.photo_sun, 0.0..=3.0).text("Sun strength"))
+                    .on_hover_text("The sun is lifted out of the photograph and put back as a light that casts shadows. 1 puts it back as bright as it was.");
+            } else if matches!(self.built, Built::Photo(_)) {
+                ui.weak("No sun stands out in this one: the sky lights it alone.");
+            }
+            ui.add(egui::Slider::new(&mut self.background_blur, 0.0..=1.0).text("Background blur"));
+        }
+
+        let photo = self.environment.is_some();
+        egui::ComboBox::from_label("Ground")
+            .selected_text(match self.ground {
+                Ground::Photo if photo => "Photographed",
+                Ground::None => "None",
+                _ => "Plain",
+            })
+            .show_ui(ui, |ui| {
+                if photo {
+                    ui.selectable_value(&mut self.ground, Ground::Photo, "Photographed")
+                        .on_hover_text("The ground in the photograph, laid flat under the tree and taking its shadow.");
+                }
+                ui.selectable_value(&mut self.ground, Ground::Plain, "Plain");
+                ui.selectable_value(&mut self.ground, Ground::None, "None");
+            });
+        if photo && self.ground == Ground::Photo {
+            ui.add(
+                egui::Slider::new(&mut self.ground_height, 0.5..=30.0)
+                    .logarithmic(true)
+                    .text("Shot from"),
+            )
+            .on_hover_text("How many metres above the ground the photograph was taken. Higher spreads the photographed ground wider under the tree.");
+            ui.add(
+                egui::Slider::new(&mut self.ground_radius, 5.0..=1000.0)
+                    .logarithmic(true)
+                    .text("Surroundings at"),
+            )
+            .on_hover_text("How many metres off the photograph's surroundings stand. The ground runs out to here and what is further stands up around it, rather than lying flat.");
+        }
+        ui.add(egui::Slider::new(&mut self.shadow_softness, 0.0..=6.0).text("Shadow softness"))
+            .on_hover_text("How far a shadow softens with distance from what casts it, against what the sun's own size gives. 0 is a pin-sharp shadow.");
+
+        ui.separator();
+        ui.label("Camera");
+        ui.add(egui::Slider::new(&mut self.exposure_ev, -4.0..=4.0).text("Exposure (EV)"))
+            .on_hover_text("Stops brighter or darker than the automatic exposure.");
+        egui::ComboBox::from_label("Tonemapping")
+            .selected_text(self.tonemap.label())
+            .show_ui(ui, |ui| {
+                for t in Tonemap::ALL {
+                    ui.selectable_value(&mut self.tonemap, t, t.label());
+                }
+            });
+        ui.add(egui::Slider::new(&mut self.bloom, 0.0..=0.2).text("Bloom"));
+        ui.checkbox(&mut self.ao, "Ambient occlusion")
+            .on_hover_text("Darken the light from the sky where the tree crowds it out: inside the crown, in the forks, and on the ground at its foot.");
+        if self.ao {
+            ui.add(egui::Slider::new(&mut self.ao_radius, 0.2..=5.0).text("AO radius"))
+                .on_hover_text("How far, in metres, the occlusion looks for what crowds a point.");
+            ui.add(egui::Slider::new(&mut self.ao_strength, 0.3..=3.0).text("AO strength"));
+        }
+        egui::ComboBox::from_label("Anti-aliasing")
+            .selected_text(match self.msaa {
+                0 | 1 => "Off".to_string(),
+                n => format!("{n}x MSAA"),
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.msaa, 0, "Off");
+                for n in [2, 4, 8] {
+                    ui.selectable_value(&mut self.msaa, n, format!("{n}x MSAA"));
+                }
+            })
+            .response
+            .on_hover_text("Samples per pixel. Leaf edges are resolved from them too, so fewer samples draw a coarser canopy.");
     }
 
     fn camera_input(&mut self, resp: &egui::Response, ctx: &egui::Context) {
@@ -997,6 +1459,14 @@ impl App {
             }
         }
     }
+}
+
+/// The bounding box of a canopy's cards, empty (min above max) for none.
+fn crown_bounds(leaves: &arbor_core::LeafMesh) -> (Vec3, Vec3) {
+    leaves.positions.iter().fold(
+        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+        |(lo, hi), p| (lo.min(Vec3::from(*p)), hi.max(Vec3::from(*p))),
+    )
 }
 
 fn push_grid(verts: &mut Vec<f32>) {
@@ -1062,15 +1532,13 @@ impl eframe::App for App {
             }
         }
 
-        let screen = ctx.screen_rect();
-        self.camera.aspect = screen.width() / screen.height().max(1.0);
-
         if self.dirty {
             self.regenerate();
             self.dirty = false;
         }
         // Maps being fetched are put in on the frame they arrive.
         self.sync_materials();
+        self.sync_environment();
         self.exports.poll(frame, &mut self.status, &self.maps);
 
         if self.wind_on && !self.wind_paused {
@@ -1097,6 +1565,9 @@ impl eframe::App for App {
                     self.camera_input(&resp, ctx);
                 }
 
+                // The scene fills the panel, so the camera takes the panel's shape.
+                self.camera.aspect = rect.width() / rect.height().max(1.0);
+
                 let mesh_gpu = Arc::clone(&self.mesh_gpu);
                 let leaves_gpu = Arc::clone(&self.leaves_gpu);
                 let lines = Arc::clone(&self.lines);
@@ -1104,13 +1575,17 @@ impl eframe::App for App {
                 let depth_pass = Arc::clone(&self.depth_pass);
                 let leaf_depth_pass = Arc::clone(&self.leaf_depth_pass);
                 let color_pass = Arc::clone(&self.color_pass);
-                let sky_pass = Arc::clone(&self.sky_pass);
+                let backdrop = Arc::clone(&self.backdrop);
                 let ground_pass = Arc::clone(&self.ground_pass);
-                // Dome, ambient and exposure all come out of where the sun is, so
-                // moving it moves the whole sky rather than just the shading.
-                let mut sky = SkyParams::for_sun(self.sun_dir());
-                sky.sun_color *= self.sun_intensity;
-                let show_ground = self.show_ground;
+                let renderer = Arc::clone(&self.renderer);
+                // Sun, ambient and exposure all come out of the environment, so moving
+                // the sun or turning the photograph moves the whole of the light.
+                let base_lighting = self.lighting();
+                let ground = match self.ground {
+                    Ground::None => None,
+                    Ground::Photo if base_lighting.photo => Some(GroundMode::Photo),
+                    _ => Some(GroundMode::Plain),
+                };
                 let tree_height = self.stats.height.max(1.0);
                 let wind = if self.wind_on {
                     WindUniforms::new(
@@ -1132,6 +1607,7 @@ impl eframe::App for App {
                 leaf_params.coverage_lod = self.coverage_lod;
                 let draw_leaves = self.show_leaves && leaf_material.is_some();
                 let cam = self.camera;
+                let crown = self.crown;
                 // The shadow is fitted to the tree, so it has to be fitted to where the
                 // wind can take it, or a swaying crown runs off the edge of its own map.
                 let aabb = {
@@ -1139,8 +1615,18 @@ impl eframe::App for App {
                     let r = wind.reach();
                     ([lo[0] - r, lo[1], lo[2] - r], [hi[0] + r, hi[1] + r, hi[2] + r])
                 };
-                let sun_dir = self.sun_dir();
-                let shadows = self.shadows;
+                // A photograph with no sun to speak of, or a sun gone down, casts nothing.
+                let shadows = self.shadows
+                    && base_lighting.sun_color.max_element() > 0.0
+                    && base_lighting.sun_dir.y > -0.1;
+                let post = PostSettings {
+                    tonemap: self.tonemap,
+                    bloom: self.bloom,
+                    ao: self.ao,
+                    ao_radius: self.ao_radius,
+                    ao_power: self.ao_strength,
+                    samples: self.msaa,
+                };
                 let wire = self.wireframe && !cfg!(target_arch = "wasm32");
                 let overlay = self.show_skeleton || self.show_grid;
                 let use_normal_map = self.use_normal_map;
@@ -1148,6 +1634,7 @@ impl eframe::App for App {
                     RenderMode::Shaded => 0,
                     RenderMode::UvChecker => 1,
                     RenderMode::Normals => 2,
+                    RenderMode::Occlusion => 3,
                 };
                 let clip_rect = rect;
 
@@ -1158,12 +1645,11 @@ impl eframe::App for App {
                         let mesh_gpu = mesh_gpu.lock().unwrap();
                         let leaves_gpu = leaves_gpu.lock().unwrap();
                         let lines = lines.lock().unwrap();
+                        let mut renderer = renderer.lock().unwrap();
                         let view_proj = cam.view_proj();
                         let mvp = view_proj.to_cols_array();
                         let ppp = info.pixels_per_point;
-                        let size_px = info.screen_size_px;
-                        let sw = size_px[0] as i32;
-                        let sh = size_px[1] as i32;
+                        let sh = info.screen_size_px[1] as i32;
                         let x0 = clip_rect.min.x * ppp;
                         let y0_top = clip_rect.min.y * ppp;
                         let w = (clip_rect.width() * ppp).ceil() as i32;
@@ -1171,11 +1657,29 @@ impl eframe::App for App {
                         let y0_gl = (sh as f32 - y0_top - h as f32).floor() as i32;
                         let clip = [x0.floor() as i32, y0_gl, w.max(1), h.max(1)];
 
-                        let (lvp, texel) =
-                            light_view_proj(aabb, sun_dir, shadow.size);
-                        // Enough to clear one shadow texel at a grazing angle, which
-                        // is where a low sun puts everything.
-                        let normal_bias = texel * 1.6;
+                        renderer.prepare(gl, clip[2], clip[3], post.samples);
+                        let frustum = shadow_frustum(aabb, base_lighting.sun_dir, shadow.size);
+                        // The crown's shade on the sky belongs with the occlusion,
+                        // and goes when it does.
+                        let canopy = match (draw_leaves && post.ao, leaf_material) {
+                            (true, Some(leaf_mat)) => unsafe {
+                                renderer.canopy(gl, &leaves_gpu, &leaf_mat, leaf_params, &wind, crown)
+                            },
+                            _ => render::CanopyPlacement::default(),
+                        };
+                        let lighting = Lighting {
+                            canopy,
+                            shadow: frustum,
+                            shadow_size: shadow.size,
+                            // Enough to clear one shadow texel at a grazing angle, which
+                            // is where a low sun puts everything.
+                            normal_bias: frustum.texel * 1.6,
+                            ao_texel: renderer.ao_texel(),
+                            ..base_lighting
+                        };
+                        // Far enough out that the plane always meets the horizon,
+                        // whatever the camera does.
+                        let extent = (cam.distance + tree_height) * 12.0;
 
                         unsafe {
                             {
@@ -1193,6 +1697,7 @@ impl eframe::App for App {
                                 // depth reads as shadow, which is the hard-edged slab
                                 // and the long straight bands lying across the ground.
                                 gl.disable(glow::SCISSOR_TEST);
+                                gl.disable(glow::BLEND);
                                 gl.depth_mask(true);
                                 gl.enable(glow::DEPTH_TEST);
                                 gl.depth_func(glow::LEQUAL);
@@ -1204,7 +1709,7 @@ impl eframe::App for App {
                                 gl.uniform_matrix_4_f32_slice(
                                     Some(&depth_pass.u_light_view_proj),
                                     false,
-                                    &lvp.to_cols_array(),
+                                    &frustum.view_proj.to_cols_array(),
                                 );
                                 wind.bind(gl, depth_pass.program);
                                 mesh_gpu.bind_and_draw(gl);
@@ -1215,77 +1720,94 @@ impl eframe::App for App {
                                     leaf_depth_pass.draw(
                                         gl,
                                         &leaves_gpu,
-                                        lvp,
+                                        frustum.view_proj,
                                         &leaf_mat,
                                         leaf_params,
                                         &wind,
                                     );
                                 }
                             }
-                            // Back to the screen whether or not casters were drawn,
-                            // or the whole frame lands in the shadow map.
-                            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
-                            gl.viewport(0, 0, sw.max(1), sh.max(1));
-                            gl.enable(glow::SCISSOR_TEST);
-                            gl.scissor(clip[0], clip[1], clip[2], clip[3]);
-                            gl.clear_color(0.52, 0.65, 0.84, 1.0);
-                            gl.enable(glow::DEPTH_TEST);
-                            gl.depth_func(glow::LEQUAL);
-                            gl.clear_depth_f32(1.0);
-                            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-
-                            sky_pass.draw(gl, view_proj, cam.eye(), &sky);
-
-                            if show_ground {
-                                ground_pass.draw(
-                                    gl,
-                                    &GroundDrawParams {
-                                        view_proj,
-                                        light_view_proj: lvp,
-                                        cam_pos: cam.eye(),
-                                        sky: &sky,
-                                        shadow_depth: shadow.depth,
-                                        albedo: Vec3::new(0.062, 0.058, 0.044),
-                                        normal_bias,
-                                        // Far enough out that the plane always meets
-                                        // the horizon, whatever the camera does.
-                                        extent: (cam.distance + tree_height) * 12.0,
-                                    },
+                            // The camera's own depth, the same passes drawn from the
+                            // eye, for the ambient occlusion to read.
+                            if post.ao {
+                                renderer.begin_prepass(gl);
+                                gl.use_program(Some(depth_pass.program));
+                                gl.uniform_matrix_4_f32_slice(
+                                    Some(&depth_pass.u_light_view_proj),
+                                    false,
+                                    &view_proj.to_cols_array(),
                                 );
+                                wind.bind(gl, depth_pass.program);
+                                mesh_gpu.bind_and_draw(gl);
+                                gl.use_program(None);
+                                if let (true, Some(leaf_mat)) = (draw_leaves, leaf_material) {
+                                    leaf_depth_pass.draw(
+                                        gl,
+                                        &leaves_gpu,
+                                        view_proj,
+                                        &leaf_mat,
+                                        leaf_params,
+                                        &wind,
+                                    );
+                                }
+                                if ground.is_some() {
+                                    ground_pass.draw_depth(gl, view_proj, cam.eye(), extent);
+                                }
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                                renderer.ambient_occlusion(gl, cam.proj(), &post);
                             }
 
-                            let draw_params = MeshDrawParams {
-                                bark: bark_look,
-                                sky: &sky,
-                                normal_bias,
-                                view_proj,
-                                light_view_proj: lvp,
-                                cam_pos: cam.eye(),
-                                sun_dir,
-                                sun_color: sky.sun_color,
-                                mode,
-                                use_normal_map,
-                                material: &bark_material,
-                                shadow_depth: shadow.depth,
-                                wind: &wind,
-                            };
-                            mesh_gpu.draw(gl, &draw_params);
+                            renderer.begin_scene(gl);
+                            renderer.bind_lighting(gl, shadow.depth, post.ao);
+                            if mode == 0 || mode == 3 {
+                                if mode == 0 {
+                                    backdrop.draw(gl, view_proj, &lighting);
+                                } else {
+                                    gl.clear_color(1.0, 1.0, 1.0, 1.0);
+                                    gl.clear(glow::COLOR_BUFFER_BIT);
+                                }
+                                if let Some(ground) = ground {
+                                    ground_pass.draw(
+                                        gl,
+                                        &GroundDrawParams {
+                                            view_proj,
+                                            lighting: &lighting,
+                                            albedo: GROUND_ALBEDO,
+                                            extent,
+                                            mode: ground,
+                                            view: mode,
+                                        },
+                                    );
+                                }
+                            } else {
+                                // The debug views are shown as they are, not exposed,
+                                // so they go on a plain grey.
+                                gl.clear_color(0.32, 0.33, 0.35, 1.0);
+                                gl.clear(glow::COLOR_BUFFER_BIT);
+                            }
+
+                            mesh_gpu.draw(
+                                gl,
+                                &MeshDrawParams {
+                                    bark: bark_look,
+                                    lighting: &lighting,
+                                    view_proj,
+                                    mode,
+                                    use_normal_map,
+                                    material: &bark_material,
+                                    wind: &wind,
+                                },
+                            );
 
                             if let (true, Some(leaf_mat)) = (draw_leaves, leaf_material) {
                                 leaves_gpu.draw(
                                     gl,
                                     &LeafDrawParams {
-                                        sky: &sky,
-                                        normal_bias,
+                                        lighting: &lighting,
                                         view_proj,
-                                        light_view_proj: lvp,
-                                        cam_pos: cam.eye(),
-                                        sun_dir,
-                                        sun_color: sky.sun_color,
                                         mode,
                                         material: &leaf_mat,
-                                        shadow_depth: shadow.depth,
                                         leaf: leaf_params,
                                         wind: &wind,
                                     },
@@ -1302,9 +1824,12 @@ impl eframe::App for App {
                                     &wind,
                                 );
                             }
+                            renderer.unbind_lighting(gl);
+
+                            renderer.finish(gl, clip, &post, mode != 0);
 
                             if overlay {
-                                lines.draw(gl, mvp, clip, [sw, sh], false);
+                                lines.draw(gl, mvp, clip, false);
                             }
 
                             gl.disable(glow::SCISSOR_TEST);

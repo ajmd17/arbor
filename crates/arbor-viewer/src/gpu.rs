@@ -54,7 +54,7 @@ fn for_this_gl(src: &str) -> std::borrow::Cow<'_, str> {
     #[cfg(target_arch = "wasm32")]
     if let Some(body) = src.strip_prefix("#version 150") {
         return format!(
-            "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;{body}"
+            "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp samplerCube;\nprecision highp sampler2DShadow;{body}"
         )
         .into();
     }
@@ -249,18 +249,13 @@ impl GpuLines {
         self.vertex_count = (verts.len() / 6) as i32;
     }
 
-    pub fn draw(
-        &self,
-        gl: &glow::Context,
-        mvp: [f32; 16],
-        clip: [i32; 4],
-        screen: [i32; 2],
-        depth_test: bool,
-    ) {
+    /// Draws the lines over the scene in `clip` of the window, the viewport the
+    /// scene was composited into.
+    pub fn draw(&self, gl: &glow::Context, mvp: [f32; 16], clip: [i32; 4], depth_test: bool) {
         unsafe {
             gl.enable(glow::SCISSOR_TEST);
             gl.scissor(clip[0], clip[1], clip[2], clip[3]);
-            gl.viewport(0, 0, screen[0].max(1), screen[1].max(1));
+            gl.viewport(clip[0], clip[1], clip[2], clip[3]);
             if depth_test {
                 gl.enable(glow::DEPTH_TEST);
                 gl.depth_func(glow::LEQUAL);
@@ -747,10 +742,6 @@ pub struct GpuMesh {
     ibo: glow::Buffer,
     index_count: i32,
     u_view_proj: glow::UniformLocation,
-    u_light_view_proj: glow::UniformLocation,
-    u_cam_pos: glow::UniformLocation,
-    u_sun_dir: glow::UniformLocation,
-    u_sun_color: glow::UniformLocation,
     u_albedo_color: glow::UniformLocation,
     u_dead_color: glow::UniformLocation,
     u_dead_weathering: glow::UniformLocation,
@@ -762,7 +753,6 @@ pub struct GpuMesh {
     u_metallic: glow::UniformLocation,
     u_mode: glow::UniformLocation,
     u_use_normal_map: glow::UniformLocation,
-    u_normal_bias: glow::UniformLocation,
 }
 
 /// Colour of the moss on the bark, how far up it reaches, how much of the bark it
@@ -794,24 +784,23 @@ impl BarkLook {
 
 pub struct MeshDrawParams<'a> {
     pub bark: BarkLook,
-    pub sky: &'a SkyParams,
-    pub normal_bias: f32,
+    pub lighting: &'a Lighting,
     pub view_proj: Mat4,
-    pub light_view_proj: Mat4,
-    pub cam_pos: Vec3,
-    pub sun_dir: Vec3,
-    pub sun_color: Vec3,
     pub mode: i32,
     pub use_normal_map: bool,
     pub material: &'a MaterialTextures,
-    pub shadow_depth: glow::Texture,
     pub wind: &'a WindUniforms,
+}
+
+fn set3(gl: &glow::Context, loc: &glow::UniformLocation, v: Vec3) {
+    unsafe { gl.uniform_3_f32(Some(loc), v.x, v.y, v.z) }
 }
 
 impl GpuMesh {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
             let program = compile_program(gl, &shaders::mesh_vs(), &shaders::mesh_fs(), &MESH_ATTRIBS);
+            assign_units(gl, program);
             let vao = gl.create_vertex_array().expect("mesh vao");
             let vbo_pos = gl.create_buffer().expect("vbo pos");
             let vbo_nrm = gl.create_buffer().expect("vbo nrm");
@@ -844,19 +833,8 @@ impl GpuMesh {
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
 
-            let u = |name: &str| {
-                gl.get_uniform_location(program, name)
-                    .unwrap_or_else(|| panic!("uniform {name}"))
-            };
-            gl.use_program(Some(program));
-            gl.uniform_1_i32(Some(&u("u_albedo_tex")), 0);
-            gl.uniform_1_i32(Some(&u("u_normal_tex")), 1);
-            gl.uniform_1_i32(Some(&u("u_rough_tex")), 2);
-            gl.uniform_1_i32(Some(&u("u_shadow_tex")), 3);
-            gl.use_program(None);
-
+            let u = |name: &str| loc(gl, &program, name);
             Self {
-                program,
                 vao,
                 vbo_pos,
                 vbo_nrm,
@@ -867,10 +845,6 @@ impl GpuMesh {
                 ibo,
                 index_count: 0,
                 u_view_proj: u("u_view_proj"),
-                u_light_view_proj: u("u_light_view_proj"),
-                u_cam_pos: u("u_cam_pos"),
-                u_sun_dir: u("u_sun_dir"),
-                u_sun_color: u("u_sun_color"),
                 u_albedo_color: u("u_albedo_color"),
                 u_dead_color: u("u_dead_color"),
                 u_dead_weathering: u("u_dead_weathering"),
@@ -882,7 +856,7 @@ impl GpuMesh {
                 u_metallic: u("u_metallic"),
                 u_mode: u("u_mode"),
                 u_use_normal_map: u("u_use_normal_map"),
-                u_normal_bias: u("u_normal_bias"),
+                program,
             }
         }
     }
@@ -922,6 +896,7 @@ impl GpuMesh {
         }
     }
 
+    /// Draws the bark. The lighting's textures are the caller's to have bound.
     pub fn draw(&self, gl: &glow::Context, p: &MeshDrawParams) {
         unsafe {
             gl.use_program(Some(self.program));
@@ -930,40 +905,12 @@ impl GpuMesh {
                 false,
                 &p.view_proj.to_cols_array(),
             );
-            gl.uniform_matrix_4_f32_slice(
-                Some(&self.u_light_view_proj),
-                false,
-                &p.light_view_proj.to_cols_array(),
-            );
-            gl.uniform_3_f32(Some(&self.u_cam_pos), p.cam_pos.x, p.cam_pos.y, p.cam_pos.z);
-            gl.uniform_3_f32(Some(&self.u_sun_dir), p.sun_dir.x, p.sun_dir.y, p.sun_dir.z);
-            gl.uniform_3_f32(
-                Some(&self.u_sun_color),
-                p.sun_color.x,
-                p.sun_color.y,
-                p.sun_color.z,
-            );
-            gl.uniform_3_f32(
-                Some(&self.u_albedo_color),
-                p.bark.tint.x,
-                p.bark.tint.y,
-                p.bark.tint.z,
-            );
-            gl.uniform_3_f32(
-                Some(&self.u_dead_color),
-                p.bark.dead_color.x,
-                p.bark.dead_color.y,
-                p.bark.dead_color.z,
-            );
+            set3(gl, &self.u_albedo_color, p.bark.tint);
+            set3(gl, &self.u_dead_color, p.bark.dead_color);
             gl.uniform_1_f32(Some(&self.u_dead_weathering), p.bark.dead_weathering);
             gl.uniform_1_f32(Some(&self.u_roughness), 1.0);
             gl.uniform_1_f32(Some(&self.u_metallic), 0.0);
-            gl.uniform_3_f32(
-                Some(&self.u_moss_color),
-                p.bark.moss_color.x,
-                p.bark.moss_color.y,
-                p.bark.moss_color.z,
-            );
+            set3(gl, &self.u_moss_color, p.bark.moss_color);
             gl.uniform_1_f32(Some(&self.u_moss_height), p.bark.moss_height);
             gl.uniform_1_f32(Some(&self.u_moss_amount), p.bark.moss_amount);
             gl.uniform_1_f32(Some(&self.u_bark_darken_low), p.bark.darken_low);
@@ -972,8 +919,7 @@ impl GpuMesh {
                 Some(&self.u_use_normal_map),
                 i32::from(p.use_normal_map),
             );
-            gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
-            p.sky.bind(gl, self.program);
+            p.lighting.bind(gl, self.program);
             p.wind.bind(gl, self.program);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
@@ -981,8 +927,6 @@ impl GpuMesh {
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.normal));
             gl.active_texture(glow::TEXTURE2);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
-            gl.active_texture(glow::TEXTURE3);
-            gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
             self.bind_and_draw(gl);
             gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
@@ -990,7 +934,7 @@ impl GpuMesh {
     }
 }
 
-/// Threshold the leaf shadow pass tests alpha against to carve its silhouette. The
+/// Threshold the leaf depth passes test alpha against to carve their silhouette. The
 /// colour pass resolves the same cutout with alpha-to-coverage instead, so it does not
 /// share this value.
 pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
@@ -998,7 +942,7 @@ pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
 /// Leaf vertex attributes, in the order the one leaf vertex array binds them. The
 /// colour pass and the depth pass draw from that same array, so they have to agree on
 /// it or the depth pass reads positions out of the tint buffer.
-const LEAF_ATTRIBS: [&str; 9] = [
+pub const LEAF_ATTRIBS: [&str; 9] = [
     "a_pos",
     "a_normal",
     "a_uv",
@@ -1065,11 +1009,14 @@ impl LeafMaterialParams {
     }
 }
 
+/// Leaf cards into a depth map, alpha-tested: the sun's, for the shadow, and the
+/// camera's, for the ambient occlusion.
 pub struct LeafDepthPass {
     pub program: glow::Program,
     u_light_view_proj: glow::UniformLocation,
     u_atlas_scale: glow::UniformLocation,
     u_atlas_front: glow::UniformLocation,
+    u_atlas_back: glow::UniformLocation,
     u_alpha_cutoff: glow::UniformLocation,
 }
 
@@ -1084,17 +1031,19 @@ impl LeafDepthPass {
                 u_light_view_proj: loc(gl, &program, "u_light_view_proj"),
                 u_atlas_scale: loc(gl, &program, "u_atlas_scale"),
                 u_atlas_front: loc(gl, &program, "u_atlas_front"),
+                u_atlas_back: loc(gl, &program, "u_atlas_back"),
                 u_alpha_cutoff: loc(gl, &program, "u_alpha_cutoff"),
                 program,
             }
         }
     }
 
+    /// Draws the cards' depth as seen through `view_proj`.
     pub unsafe fn draw(
         &self,
         gl: &glow::Context,
         leaves: &GpuLeaves,
-        light_view_proj: Mat4,
+        view_proj: Mat4,
         material: &MaterialTextures,
         p: LeafMaterialParams,
         wind: &WindUniforms,
@@ -1105,30 +1054,26 @@ impl LeafDepthPass {
             gl.uniform_matrix_4_f32_slice(
                 Some(&self.u_light_view_proj),
                 false,
-                &light_view_proj.to_cols_array(),
+                &view_proj.to_cols_array(),
             );
             gl.uniform_2_f32(Some(&self.u_atlas_scale), p.atlas_scale[0], p.atlas_scale[1]);
             gl.uniform_2_f32(Some(&self.u_atlas_front), p.atlas_front[0], p.atlas_front[1]);
+            gl.uniform_2_f32(Some(&self.u_atlas_back), p.atlas_back[0], p.atlas_back[1]);
             gl.uniform_1_f32(Some(&self.u_alpha_cutoff), p.alpha_cutoff);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(material.albedo));
             leaves.bind_and_draw(gl);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
         }
     }
 }
 
 pub struct LeafDrawParams<'a> {
-    pub sky: &'a SkyParams,
-    pub normal_bias: f32,
+    pub lighting: &'a Lighting,
     pub view_proj: Mat4,
-    pub light_view_proj: Mat4,
-    pub cam_pos: Vec3,
-    pub sun_dir: Vec3,
-    pub sun_color: Vec3,
     pub mode: i32,
     pub material: &'a MaterialTextures,
-    pub shadow_depth: glow::Texture,
     pub leaf: LeafMaterialParams,
     pub wind: &'a WindUniforms,
 }
@@ -1146,10 +1091,6 @@ pub struct GpuLeaves {
     ibo: glow::Buffer,
     index_count: i32,
     u_view_proj: glow::UniformLocation,
-    u_light_view_proj: glow::UniformLocation,
-    u_cam_pos: glow::UniformLocation,
-    u_sun_dir: glow::UniformLocation,
-    u_sun_color: glow::UniformLocation,
     u_atlas_scale: glow::UniformLocation,
     u_atlas_front: glow::UniformLocation,
     u_atlas_back: glow::UniformLocation,
@@ -1161,13 +1102,13 @@ pub struct GpuLeaves {
     u_backface_volume: glow::UniformLocation,
     u_self_shadow: glow::UniformLocation,
     u_mode: glow::UniformLocation,
-    u_normal_bias: glow::UniformLocation,
 }
 
 impl GpuLeaves {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
             let program = compile_program(gl, &shaders::leaf_vs(), &shaders::leaf_fs(), &LEAF_ATTRIBS);
+            assign_units(gl, program);
             let vao = gl.create_vertex_array().expect("leaf vao");
             let vbo_pos = gl.create_buffer().expect("leaf pos");
             let vbo_nrm = gl.create_buffer().expect("leaf nrm");
@@ -1199,12 +1140,6 @@ impl GpuLeaves {
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
 
             let u = |name: &str| loc(gl, &program, name);
-            gl.use_program(Some(program));
-            gl.uniform_1_i32(Some(&u("u_albedo_tex")), 0);
-            gl.uniform_1_i32(Some(&u("u_rough_tex")), 2);
-            gl.uniform_1_i32(Some(&u("u_shadow_tex")), 3);
-            gl.use_program(None);
-
             Self {
                 vao,
                 vbo_pos,
@@ -1217,10 +1152,6 @@ impl GpuLeaves {
                 ibo,
                 index_count: 0,
                 u_view_proj: u("u_view_proj"),
-                u_light_view_proj: u("u_light_view_proj"),
-                u_cam_pos: u("u_cam_pos"),
-                u_sun_dir: u("u_sun_dir"),
-                u_sun_color: u("u_sun_color"),
                 u_atlas_scale: u("u_atlas_scale"),
                 u_atlas_front: u("u_atlas_front"),
                 u_atlas_back: u("u_atlas_back"),
@@ -1232,10 +1163,13 @@ impl GpuLeaves {
                 u_self_shadow: u("u_self_shadow"),
                 u_translucency: u("u_translucency"),
                 u_mode: u("u_mode"),
-                u_normal_bias: u("u_normal_bias"),
                 program,
             }
         }
+    }
+
+    pub fn has_cards(&self) -> bool {
+        self.index_count > 0
     }
 
     pub fn upload(&mut self, gl: &glow::Context, leaves: &arbor_core::LeafMesh) {
@@ -1282,6 +1216,7 @@ impl GpuLeaves {
         }
     }
 
+    /// Draws the canopy. The lighting's textures are the caller's to have bound.
     pub fn draw(&self, gl: &glow::Context, p: &LeafDrawParams) {
         if self.index_count == 0 {
             return;
@@ -1292,19 +1227,6 @@ impl GpuLeaves {
                 Some(&self.u_view_proj),
                 false,
                 &p.view_proj.to_cols_array(),
-            );
-            gl.uniform_matrix_4_f32_slice(
-                Some(&self.u_light_view_proj),
-                false,
-                &p.light_view_proj.to_cols_array(),
-            );
-            gl.uniform_3_f32(Some(&self.u_cam_pos), p.cam_pos.x, p.cam_pos.y, p.cam_pos.z);
-            gl.uniform_3_f32(Some(&self.u_sun_dir), p.sun_dir.x, p.sun_dir.y, p.sun_dir.z);
-            gl.uniform_3_f32(
-                Some(&self.u_sun_color),
-                p.sun_color.x,
-                p.sun_color.y,
-                p.sun_color.z,
             );
             let m = p.leaf;
             gl.uniform_2_f32(Some(&self.u_atlas_scale), m.atlas_scale[0], m.atlas_scale[1]);
@@ -1318,15 +1240,12 @@ impl GpuLeaves {
             gl.uniform_1_f32(Some(&self.u_backface_volume), m.backface_volume);
             gl.uniform_1_f32(Some(&self.u_self_shadow), m.self_shadow);
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
-            gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
-            p.sky.bind(gl, self.program);
+            p.lighting.bind(gl, self.program);
             p.wind.bind(gl, self.program);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE2);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
-            gl.active_texture(glow::TEXTURE3);
-            gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
             // Bark tubes are closed and wound counter-clockwise when seen from
             // outside, so their interior is never worth rasterising. Culling it also
             // means a fragment always faces the camera, which is what lets the shader
@@ -1341,7 +1260,6 @@ impl GpuLeaves {
             gl.enable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             gl.disable(glow::BLEND);
             self.bind_and_draw(gl);
-            gl.enable(glow::BLEND);
             gl.disable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             gl.disable(glow::CULL_FACE);
             gl.active_texture(glow::TEXTURE0);
@@ -1350,10 +1268,12 @@ impl GpuLeaves {
     }
 }
 
-use crate::lighting::{sh9_cached, SkyParams};
+use crate::lighting::SkyParams;
+use crate::render::{assign_units, Lighting};
 
 impl SkyParams {
-    unsafe fn bind(&self, gl: &glow::Context, program: glow::Program) {
+    /// Sets the procedural dome's colours on whichever program reads them.
+    pub unsafe fn bind_dome(&self, gl: &glow::Context, program: glow::Program) {
         unsafe {
             let set = |name: &str, v: Vec3| {
                 if let Some(l) = gl.get_uniform_location(program, name) {
@@ -1363,61 +1283,32 @@ impl SkyParams {
             set("u_sky_zenith", self.zenith);
             set("u_sky_horizon", self.horizon);
             set("u_ground_bounce", self.ground_bounce);
-
-            // The dome as harmonics, which is what every surface reads its ambient
-            // from, and the exposure that belongs to this time of day.
-            let sh = sh9_cached(self);
-            let mut flat = [0.0f32; 27];
-            for (i, c) in sh.iter().enumerate() {
-                flat[i * 3..i * 3 + 3].copy_from_slice(&c.to_array());
-            }
-            if let Some(l) = gl.get_uniform_location(program, "u_sh[0]") {
-                gl.uniform_3_f32_slice(Some(&l), &flat);
-            }
-            if let Some(l) = gl.get_uniform_location(program, "u_exposure") {
-                gl.uniform_1_f32(Some(&l), self.exposure());
-            }
         }
     }
 }
 
-/// Draws the sky as one full-screen triangle behind everything else.
-pub struct GpuSky {
+/// Draws whatever is behind the tree, the procedural sky or a photograph, as one
+/// full-screen triangle behind everything else.
+pub struct GpuBackdrop {
     program: glow::Program,
     vao: glow::VertexArray,
     u_inv_view_proj: glow::UniformLocation,
-    u_cam_pos: glow::UniformLocation,
-    u_sun_dir: glow::UniformLocation,
-    u_sun_color: glow::UniformLocation,
 }
 
-impl GpuSky {
+impl GpuBackdrop {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::SKY_VS, &shaders::sky_fs(), &["a_pos"]);
-            let vao = gl.create_vertex_array().expect("sky vao");
-            let vbo = gl.create_buffer().expect("sky vbo");
-            // One oversized triangle covers the screen with no seam down the middle.
-            let verts: [f32; 9] = [-1.0, -1.0, 0.0, 3.0, -1.0, 0.0, -1.0, 3.0, 0.0];
-            gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, cast_slice(&verts), glow::STATIC_DRAW);
-            gl.enable_vertex_attrib_array(0);
-            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
-            gl.bind_vertex_array(None);
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            let program = compile_program(gl, shaders::FULLSCREEN_VS, &shaders::backdrop_fs(), &[]);
+            assign_units(gl, program);
             Self {
                 u_inv_view_proj: loc(gl, &program, "u_inv_view_proj"),
-                u_cam_pos: loc(gl, &program, "u_cam_pos"),
-                u_sun_dir: loc(gl, &program, "u_sun_dir"),
-                u_sun_color: loc(gl, &program, "u_sun_color"),
+                vao: gl.create_vertex_array().expect("backdrop vao"),
                 program,
-                vao,
             }
         }
     }
 
-    pub fn draw(&self, gl: &glow::Context, view_proj: Mat4, cam_pos: Vec3, sky: &SkyParams) {
+    pub fn draw(&self, gl: &glow::Context, view_proj: Mat4, lighting: &Lighting) {
         unsafe {
             // Behind everything, and it writes no depth of its own.
             gl.depth_mask(false);
@@ -1428,20 +1319,7 @@ impl GpuSky {
                 false,
                 &view_proj.inverse().to_cols_array(),
             );
-            gl.uniform_3_f32(Some(&self.u_cam_pos), cam_pos.x, cam_pos.y, cam_pos.z);
-            gl.uniform_3_f32(
-                Some(&self.u_sun_dir),
-                sky.sun_dir.x,
-                sky.sun_dir.y,
-                sky.sun_dir.z,
-            );
-            gl.uniform_3_f32(
-                Some(&self.u_sun_color),
-                sky.sun_color.x,
-                sky.sun_color.y,
-                sky.sun_color.z,
-            );
-            sky.bind(gl, self.program);
+            lighting.bind(gl, self.program);
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_vertex_array(None);
@@ -1450,40 +1328,49 @@ impl GpuSky {
             gl.enable(glow::DEPTH_TEST);
         }
     }
+}
 
+/// What the ground under the tree is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroundMode {
+    /// A plain ground of its own, lit like the tree.
+    Plain,
+    /// The ground in the photograph, laid flat under the tree and catching its shadow.
+    Photo,
 }
 
 pub struct GroundDrawParams<'a> {
     pub view_proj: Mat4,
-    pub light_view_proj: Mat4,
-    pub cam_pos: Vec3,
-    pub sky: &'a SkyParams,
-    pub shadow_depth: glow::Texture,
+    pub lighting: &'a Lighting,
     pub albedo: Vec3,
-    pub normal_bias: f32,
     pub extent: f32,
+    pub mode: GroundMode,
+    /// The view the tree is drawn in, which the ground follows where it can.
+    pub view: i32,
 }
 
 /// A ground quad that receives the tree shadow.
 pub struct GpuGround {
     program: glow::Program,
+    /// The same quad, depth only, for the camera's depth pass.
+    depth_program: glow::Program,
+    u_depth_view_proj: glow::UniformLocation,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     u_view_proj: glow::UniformLocation,
-    u_light_view_proj: glow::UniformLocation,
-    u_cam_pos: glow::UniformLocation,
-    u_sun_dir: glow::UniformLocation,
-    u_sun_color: glow::UniformLocation,
     u_albedo_color: glow::UniformLocation,
-    u_normal_bias: glow::UniformLocation,
     u_fade_start: glow::UniformLocation,
     u_fade_end: glow::UniformLocation,
+    u_ground_mode: glow::UniformLocation,
+    u_mode: glow::UniformLocation,
 }
 
 impl GpuGround {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
             let program = compile_program(gl, shaders::GROUND_VS, &shaders::ground_fs(), &["a_pos"]);
+            assign_units(gl, program);
+            let depth_program = compile_program(gl, shaders::GROUND_VS, shaders::DEPTH_FS, &["a_pos"]);
             let vao = gl.create_vertex_array().expect("ground vao");
             let vbo = gl.create_buffer().expect("ground vbo");
             gl.bind_vertex_array(Some(vao));
@@ -1492,19 +1379,15 @@ impl GpuGround {
             gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            gl.use_program(Some(program));
-            gl.uniform_1_i32(Some(&loc(gl, &program, "u_shadow_tex")), 3);
-            gl.use_program(None);
             Self {
                 u_view_proj: loc(gl, &program, "u_view_proj"),
-                u_light_view_proj: loc(gl, &program, "u_light_view_proj"),
-                u_cam_pos: loc(gl, &program, "u_cam_pos"),
-                u_sun_dir: loc(gl, &program, "u_sun_dir"),
-                u_sun_color: loc(gl, &program, "u_sun_color"),
                 u_albedo_color: loc(gl, &program, "u_albedo_color"),
-                u_normal_bias: loc(gl, &program, "u_normal_bias"),
                 u_fade_start: loc(gl, &program, "u_fade_start"),
                 u_fade_end: loc(gl, &program, "u_fade_end"),
+                u_ground_mode: loc(gl, &program, "u_ground_mode"),
+                u_mode: loc(gl, &program, "u_mode"),
+                u_depth_view_proj: loc(gl, &depth_program, "u_view_proj"),
+                depth_program,
                 program,
                 vao,
                 vbo,
@@ -1542,51 +1425,38 @@ impl GpuGround {
         }
     }
 
+    /// Lays the ground's depth down for the occlusion to find the foot of the trunk by.
+    pub fn draw_depth(&self, gl: &glow::Context, view_proj: Mat4, cam_pos: Vec3, extent: f32) {
+        unsafe {
+            self.upload(gl, cam_pos, extent);
+            gl.use_program(Some(self.depth_program));
+            gl.uniform_matrix_4_f32_slice(Some(&self.u_depth_view_proj), false, &view_proj.to_cols_array());
+            gl.bind_vertex_array(Some(self.vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            gl.bind_vertex_array(None);
+            gl.use_program(None);
+        }
+    }
+
     pub fn draw(&self, gl: &glow::Context, p: &GroundDrawParams) {
         unsafe {
-            self.upload(gl, p.cam_pos, p.extent);
+            self.upload(gl, p.lighting.cam_pos, p.extent);
             gl.use_program(Some(self.program));
             gl.uniform_matrix_4_f32_slice(
                 Some(&self.u_view_proj),
                 false,
                 &p.view_proj.to_cols_array(),
             );
-            gl.uniform_matrix_4_f32_slice(
-                Some(&self.u_light_view_proj),
-                false,
-                &p.light_view_proj.to_cols_array(),
-            );
-            gl.uniform_3_f32(Some(&self.u_cam_pos), p.cam_pos.x, p.cam_pos.y, p.cam_pos.z);
-            gl.uniform_3_f32(
-                Some(&self.u_sun_dir),
-                p.sky.sun_dir.x,
-                p.sky.sun_dir.y,
-                p.sky.sun_dir.z,
-            );
-            gl.uniform_3_f32(
-                Some(&self.u_sun_color),
-                p.sky.sun_color.x,
-                p.sky.sun_color.y,
-                p.sky.sun_color.z,
-            );
-            gl.uniform_3_f32(
-                Some(&self.u_albedo_color),
-                p.albedo.x,
-                p.albedo.y,
-                p.albedo.z,
-            );
-            gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
+            set3(gl, &self.u_albedo_color, p.albedo);
             gl.uniform_1_f32(Some(&self.u_fade_start), p.extent * 0.10);
             gl.uniform_1_f32(Some(&self.u_fade_end), p.extent * 0.62);
-            p.sky.bind(gl, self.program);
-            gl.active_texture(glow::TEXTURE3);
-            gl.bind_texture(glow::TEXTURE_2D, Some(p.shadow_depth));
+            gl.uniform_1_i32(Some(&self.u_ground_mode), i32::from(p.mode == GroundMode::Photo));
+            gl.uniform_1_i32(Some(&self.u_mode), p.view);
+            p.lighting.bind(gl, self.program);
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
             gl.bind_vertex_array(None);
-            gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
         }
     }
-
 }
