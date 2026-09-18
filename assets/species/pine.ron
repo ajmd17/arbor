@@ -216,7 +216,9 @@
         enabled: true,
         min_level: 2,
         max_twig_radius: 0.03,
-        density: 4.3,
+        // About one tuft to each metre of leafy twig. Few, large tufts are what keeps
+        // the pine to about 19k triangles; see `card_length`.
+        density: 1.1,
         spacing_variance: 0.8,
         // Pine carries its needles on the last few seasons of each shoot, so the
         // foliage is a brush over the end of every twig with bare wood behind it.
@@ -231,16 +233,21 @@
         // them up off the twig, which is how a pine's shoot tips stand.
         //
         // Two cards to a tuft, rolled evenly into a cross, each carrying a baked bundle
-        // of five shoots (the `cluster` block below). This was six cards of a single
-        // shoot, then four, and the bundle is what made two enough: the leaves went
-        // 146k triangles to 97k to 49k with the crown holding its density.
+        // of twelve shoots (the `cluster` block below). This was six cards of a single
+        // shoot, then four, then two cards of five-shoot bundles, and now a quarter as
+        // many tufts again: the leaves went 146k triangles to 97k to 49k to 12k, the
+        // whole tree from about 172k to about 19k, and seen as a whole tree it barely
+        // changed.
         cluster_size: 2,
         cluster_spread_deg: 20.0,
-        // Square, because a baked cell is. Sized so a tuft of two carries the same
-        // needle as the four single-shoot cards it replaced. Kept under 0.6 m: at that
-        // size a tuft reads as one lobed leaf at a distance.
-        card_length: 0.47,
-        card_width: 0.47,
+        // Square, because a baked cell is. Past the 0.6 m where a tuft starts to read as
+        // one lobed leaf, and that is a trade taken on purpose: a quarter of the tufts
+        // have to be bigger to carry the same needle. It shows up close — the odd flat
+        // card seen edge on, and fan-shaped tufts at the crown's edge against the sky —
+        // and nowhere else. Three-card stars at 0.65 m fixed most of that for 28k
+        // triangles rather than 19k, and were judged not worth it.
+        card_length: 0.75,
+        card_width: 0.75,
         size_variance: 0.3,
         crotch_angle_deg: 10.0,
         crotch_variance_deg: 8.0,
@@ -268,8 +275,9 @@
         // Light comes through a needle crown in a thousand gaps; the shaded side of it
         // is darker blue-green, not black.
         self_shadow: 0.55,
-        // Five shoots baked into each card, fanned a little from one base: the cluster
-        // of shoots at the end of a pine twig. The shoots come from the two straight
+        // Twelve shoots baked into each card, fanned from one base: the cluster of
+        // shoots at the end of a pine twig, and enough of them that one card of it
+        // carries what four single-shoot cards used to. The shoots come from the two straight
         // needle brushes of the source, each leaf picking one (`sources`), with their
         // bare stalks trimmed off in the atlas so they meet at a compact base rather
         // than on crossed sticks — the stalks were half the cell and held coverage to
@@ -277,9 +285,9 @@
         // the bake stacks shoots deep enough that shading the back ones darkened the
         // whole crown.
         cluster: Some((
-            count: 5,
+            count: 12,
             leaf_length: 0.85,
-            base_angle_deg: 26.0,
+            base_angle_deg: 34.0,
             tip_angle_deg: 6.0,
             tip_scale: 0.85,
             angle_variance_deg: 7.0,
@@ -328,12 +336,15 @@
     mesh: (
         uv_scale: 1.2,
         silhouette_tolerance: 0.018,
-        min_radial: 4,
+        // Three sides: what is still swept below the limbs is thin enough that a
+        // triangle reads as round, and it is a quarter fewer triangles than four.
+        min_radial: 3,
         // Twigs under 3 cm are not swept at all: every living branchlet and shoot sits
         // inside a needle tuft, and with the foliage on the crown looks the same with or
-        // without them. That, and taking the dead twigs inside the crown with them (see
-        // `dead_bark_radius`), is 26k bark triangles down to 12k. The limbs are exempt
-        // however thin — a dropped limb leaves its foliage floating in the gaps.
+        // without them. With the dead twigs inside the crown going too (see
+        // `dead_bark_radius`) and three-sided twigs, the bark went from 26k triangles to
+        // 7k. The limbs are exempt however thin — a dropped limb leaves its foliage
+        // floating in the gaps.
         min_bark_radius: 0.03,
         cull_from_level: 2,
         max_radial: 32,
@@ -355,9 +366,11 @@
         dead_wood_weathering: 0.85,
         // The living twigs are culled at `min_bark_radius` because needles hide them;
         // the dead band carries nothing, and its fine twigs are most of what it is, so
-        // they are meshed down to the finest there are. Dead twigs inside the living
-        // crown are hidden like the living ones and are culled with them.
-        dead_bark_radius: 0.004,
+        // they are meshed far finer — down to 8 mm. The finest of them, under that, are
+        // dropped for the triangle budget and only show at close range. Dead twigs
+        // inside the living crown are hidden like the living ones and are culled with
+        // them.
+        dead_bark_radius: 0.008,
         irregularity: (
             flute_depth: 0.06,
             flute_waves: 5.0,
