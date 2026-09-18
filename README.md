@@ -14,7 +14,7 @@ I didn't want to pay for SpeedTree.
 | --- | --- |
 | `arbor-core` | The model: growth, meshing, foliage, cluster baking. No GL, no windowing. |
 | `arbor-viewer` | An OpenGL viewer (eframe/egui + glow) with live parameter sliders. |
-| `arbor-cli` | Grows a tree from the terminal, prints stats, optionally writes an OBJ. |
+| `arbor-cli` | Grows a tree from the terminal, prints stats, optionally writes an OBJ or glTF. |
 
 Species are plain RON files in `assets/species`, compiled in as the built-in
 presets. Presets saved from the viewer's panel (**Save as**) go to
@@ -58,6 +58,56 @@ cargo run --release -p arbor-cli -- oak --seed 7 --obj oak.obj
 The OBJ comes out as triangles in two groups, `bark` and `leaves`, with leaf UVs
 baked into their atlas cell (the viewer's shader picks a cell per card, an
 exported mesh has no such shader).
+
+## Exporting glTF
+
+From the viewer, **Export → GLB** or **glTF** (under **Save as**) writes the tree on
+screen to `exports/<name>.glb` or `.gltf`, named as it would be saved. From the CLI:
+
+```bash
+cargo run --release -p arbor-cli -- oak --seed 7 --glb oak.glb
+```
+
+```bash
+cargo run --release -p arbor-cli -- oak --gltf out/oak.gltf --wind-data
+```
+
+A `.glb` is one self-contained file. A `.gltf` is JSON, with `<name>.bin` and the
+textures as `<name>_*.png` written beside it. Textures are read from
+`assets/textures`; `--textures <dir>` reads them from somewhere else, and
+`--no-textures` leaves them out.
+
+The scene is a node named for the species with two children, `bark` and `leaves`,
+in metres with Y up. The materials are standard metallic-roughness, set up to match
+the viewer as closely as that allows:
+
+- **Bark:** the species' bark maps, with its tint as the base colour factor and the
+  darkening toward the foot of the trunk as a vertex colour (`COLOR_0`).
+- **Dead wood:** its own material, with the viewer's bleaching baked into a copy of
+  the bark albedo. Only a tree with dead wood the species bleaches has one.
+- **Leaves:** the leaf art, or the cluster atlas baked from it, alpha-masked at the
+  viewer's cutoff (0.35). Each card's tint and crown-depth shade go in `COLOR_0`.
+  glTF can't choose a texture by which side of a card is seen, so a species whose
+  leaves show a different cell from behind (the oak, the birch) gets a second,
+  back-facing copy of every card. Species with one cell get single, double-sided
+  cards.
+
+Moss, light through the leaves, and the viewer's coverage-preserving leaf mipmaps
+don't carry over. Expect distant canopies to thin a little in engines that build
+ordinary mips.
+
+`--wind-data` (the **Wind data** box in the viewer) adds what the viewer's wind shader
+reads, as custom vertex attributes:
+
+| Attribute | On | Holds |
+| --- | --- | --- |
+| `_WIND_1` | bark, leaves | Limb order: the pivot it bends about (xyz), and how far a point there swings per unit of flexibility, in metres (w). |
+| `_WIND_2` | bark, leaves | The same for the branch order. |
+| `_WIND_3` | bark, leaves | The same for twigs and everything finer. |
+| `_LEAF_ORIGIN` | leaves | The twig point a card hangs from, which it flutters about. |
+
+An order a vertex doesn't belong to has w = 0. The species' wind settings (flexibility
+per order, frequency, flutter) go in the root node's `extras.arbor.wind`.
 
 ## Tools
 

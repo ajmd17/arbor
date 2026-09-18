@@ -9,6 +9,5 @@ glam.workspace = true
 serde.workspace = true
 ron.workspace = true
 rand.workspace = true
-
-[dev-dependencies]
+# Reading texture maps and writing them into exports.
 image.workspace = true

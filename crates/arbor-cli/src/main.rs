@@ -1,4 +1,6 @@
+use arbor_core::gltf::{self, ExportOptions};
 use arbor_core::species::{builtin_presets, parse_species, CUSTOM_PRESET_DIR};
+use arbor_core::textures::TEXTURE_DIR;
 use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
 
 fn main() {
@@ -11,6 +13,9 @@ fn main() {
     let mut species_src: Option<String> = None;
     let mut seed_override: Option<u64> = None;
     let mut obj_out: Option<String> = None;
+    let mut gltf_out: Vec<String> = Vec::new();
+    let mut texture_dir: Option<String> = Some(TEXTURE_DIR.to_string());
+    let mut wind_data = false;
     let mut no_leaves = false;
 
     let mut i = 0;
@@ -24,6 +29,24 @@ fn main() {
                 i += 1;
                 obj_out = args.get(i).cloned();
             }
+            // Both name the file to write; the extension is what decides the format,
+            // so either flag takes either, and both may be given.
+            "--glb" | "--gltf" => {
+                i += 1;
+                match args.get(i) {
+                    Some(path) => gltf_out.push(path.clone()),
+                    None => {
+                        eprintln!("{} needs a file to write", args[i - 1]);
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--textures" => {
+                i += 1;
+                texture_dir = args.get(i).cloned();
+            }
+            "--no-textures" => texture_dir = None,
+            "--wind-data" => wind_data = true,
             "--no-leaves" => no_leaves = true,
             "--help" | "-h" => {
                 print_usage();
@@ -82,6 +105,32 @@ fn main() {
             std::process::exit(1);
         });
         println!("obj:     {path}");
+    }
+
+    let options = ExportOptions {
+        textures: texture_dir.map(Into::into),
+        wind: wind_data,
+    };
+    for path in gltf_out {
+        let t = std::time::Instant::now();
+        match gltf::export(std::path::Path::new(&path), &mesh, &leaves, &params, &options) {
+            Ok(report) => {
+                for warning in &report.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                println!(
+                    "gltf:    {path} ({} file{}, {:.1} MB, {:.0} ms)",
+                    report.files.len(),
+                    if report.files.len() == 1 { "" } else { "s" },
+                    report.bytes as f64 / 1e6,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            Err(e) => {
+                eprintln!("gltf export failed: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -165,10 +214,19 @@ fn print_usage() {
     // usage line quietly out of date.
     let names: Vec<&str> = builtin_presets().into_iter().map(|(n, _)| n).collect();
     println!(
-        "arbor-cli <{}|saved-preset|path/to/species.ron> [--seed N] [--obj out.obj] [--no-leaves]",
+        "arbor-cli <{}|saved-preset|path/to/species.ron> [--seed N] [--no-leaves]",
         names.join("|")
+    );
+    println!(
+        "          [--obj out.obj] [--glb out.glb] [--gltf out.gltf] \
+         [--textures DIR | --no-textures] [--wind-data]"
     );
     println!("Grows a tree, builds bark and leaf meshes, prints stats.");
     println!("A saved preset is one saved from the viewer, found by name in {CUSTOM_PRESET_DIR}.");
     println!("--obj writes a triangle OBJ with separate `bark` and `leaves` groups.");
+    println!("--glb writes one self-contained glTF binary, textures and all.");
+    println!("--gltf writes glTF JSON, with its buffer and textures as files beside it.");
+    println!("  Textures are read from {TEXTURE_DIR} unless --textures says otherwise;");
+    println!("  --no-textures leaves them out. --wind-data adds each vertex's sway pivots");
+    println!("  and weights as custom attributes, for driving wind in an engine.");
 }

@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod envelope;
+pub mod gltf;
 pub mod growth;
 pub mod leaves;
 pub(crate) mod math;
@@ -7,6 +8,7 @@ pub mod mesh;
 pub mod seed;
 pub mod skeleton;
 pub mod species;
+pub mod textures;
 pub mod wind;
 
 pub use cluster::{bake_cluster, BakedMaps, Bitmap, LeafMaps};

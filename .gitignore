@@ -2,3 +2,4 @@
 Cargo.lock
 *.obj.tmp
 .opencode
+/exports

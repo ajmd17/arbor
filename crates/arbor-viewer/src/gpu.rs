@@ -3,7 +3,7 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
-use arbor_core::cluster::{bake_cluster, Bitmap, LeafMaps};
+use arbor_core::cluster::Bitmap;
 use arbor_core::species::LeafParams;
 
 use crate::shaders;
@@ -542,39 +542,22 @@ pub unsafe fn load_leaf_material(
     lp: &LeafParams,
 ) -> Option<MaterialTextures> {
     unsafe {
-        let read = |suffix: &str| {
-            load_image(&format!("{dir}/{}_{suffix}.png", lp.texture))
-                .and_then(|(data, w, h)| Bitmap::from_rgba(w, h, data))
-        };
-        let mut albedo = read("albedo")?;
-        let mut normal = read("normal");
-        let mut roughness = read("roughness");
-
+        // Loaded, and clustered where the species clusters, by the same code the
+        // exporters use, so what is exported is what is on screen.
+        let started = std::time::Instant::now();
+        let maps = arbor_core::textures::load_leaf_maps(std::path::Path::new(dir), lp)?;
         if let Some(cluster) = &lp.cluster {
-            let started = std::time::Instant::now();
-            let baked = bake_cluster(
-                cluster,
-                lp.atlas_cols,
-                lp.atlas_rows,
-                LeafMaps {
-                    albedo: &albedo,
-                    normal: normal.as_ref(),
-                    roughness: roughness.as_ref(),
-                },
-            );
             println!(
                 "clustered {} into {}x{} from {} leaves, coverage {:.3} ({:.0} ms)",
                 lp.texture,
-                baked.albedo.width,
-                baked.albedo.height,
+                maps.albedo.width,
+                maps.albedo.height,
                 cluster.count,
-                baked.albedo.mean_alpha(),
+                maps.albedo.mean_alpha(),
                 started.elapsed().as_secs_f32() * 1000.0
             );
-            albedo = baked.albedo;
-            normal = baked.normal;
-            roughness = baked.roughness;
         }
+        let (albedo, normal, roughness) = (maps.albedo, maps.normal, maps.roughness);
 
         let upload = |map: Option<Bitmap>, fill: u8| match map {
             Some(m) => create_texture(gl, &m.pixels, m.width, m.height, false),

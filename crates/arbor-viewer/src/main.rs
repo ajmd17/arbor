@@ -15,6 +15,7 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
+use arbor_core::gltf::{self, ExportOptions};
 use arbor_core::species::{LeafClusterParams, CUSTOM_PRESET_DIR};
 use arbor_core::{build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
 
@@ -25,7 +26,9 @@ use gpu::{
 };
 use lighting::{light_view_proj, SkyParams};
 
-const TEXTURE_DIR: &str = "assets/textures";
+const TEXTURE_DIR: &str = arbor_core::textures::TEXTURE_DIR;
+/// Where exports are written, relative to the repository root.
+const EXPORT_DIR: &str = "exports";
 
 #[derive(Clone, Copy, PartialEq)]
 enum RenderMode {
@@ -141,6 +144,21 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Grows the tree `params` describes and writes it to `path`, returning the line the
+/// panel reports it with.
+fn export_tree(path: &Path, params: &SpeciesParams, options: &ExportOptions) -> Result<String, String> {
+    let skeleton = grow(params);
+    let mesh = build_mesh(&skeleton, params);
+    let leaves = build_leaves(&skeleton, params);
+    let report = gltf::export(path, &mesh, &leaves, params, options)?;
+    let mut message = format!("exported {} ({:.1} MB)", path.display(), report.bytes as f64 / 1e6);
+    for warning in report.warnings {
+        message.push_str("; ");
+        message.push_str(&warning);
+    }
+    Ok(message)
+}
+
 /// What the save field offers for a preset once it is loaded: a saved one's own name,
 /// so saving again replaces it, and a variant name for a built-in, which cannot be
 /// saved over.
@@ -250,6 +268,10 @@ struct App {
     status: Option<(String, bool)>,
     /// Delete has been clicked once and is waiting to be confirmed.
     confirm_delete: bool,
+    /// Whether an export carries each vertex's wind data.
+    export_wind: bool,
+    /// An export running on its own thread, and where its outcome will arrive.
+    export_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     params: SpeciesParams,
     skeleton: Skeleton,
     stats: SkeletonStats,
@@ -359,6 +381,8 @@ impl App {
             save_name,
             status,
             confirm_delete: false,
+            export_wind: false,
+            export_job: None,
             params,
             skeleton,
             stats: SkeletonStats::default(),
@@ -573,6 +597,50 @@ impl App {
         }
     }
 
+    /// Writes the tree as it stands to `exports/`, named as it would be saved, off the
+    /// UI thread: baking the leaf atlas and encoding the textures takes a second or two.
+    /// The tree is grown again there from a copy of the settings, which is the same
+    /// tree, since growth is deterministic, and cannot be a frame behind the panel.
+    fn start_export(&mut self, ext: &str) {
+        let key = match presets::key_for(&self.save_name) {
+            Ok(key) => key,
+            Err(why) => {
+                self.status = Some((why, true));
+                return;
+            }
+        };
+        let path = Path::new(EXPORT_DIR).join(format!("{key}.{ext}"));
+        let mut params = self.params.clone();
+        params.name = self.save_name.trim().to_string();
+        let options = ExportOptions {
+            textures: Some(TEXTURE_DIR.into()),
+            wind: self.export_wind,
+        };
+        self.status = Some((format!("exporting {}", path.display()), false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(export_tree(&path, &params, &options));
+        });
+        self.export_job = Some(rx);
+    }
+
+    /// Picks up the outcome of a finished export.
+    fn poll_export(&mut self) {
+        let Some(job) = &self.export_job else { return };
+        let outcome = match job.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the export stopped without finishing".to_string())
+            }
+        };
+        self.status = Some(match outcome {
+            Ok(message) => (message, false),
+            Err(why) => (format!("export failed: {why}"), true),
+        });
+        self.export_job = None;
+    }
+
     fn delete_preset(&mut self, i: usize) {
         self.confirm_delete = false;
         match presets::delete(&self.presets[i]) {
@@ -630,6 +698,35 @@ impl App {
             };
             if button.clicked() {
                 self.save_preset();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Export");
+            let idle = self.export_job.is_none();
+            let stem = presets::key_for(&self.save_name).map(|key| Path::new(EXPORT_DIR).join(key));
+            for (label, ext, what) in [
+                ("GLB", "glb", "one self-contained file, textures inside"),
+                ("glTF", "gltf", "JSON, with its buffer and textures as files beside it"),
+            ] {
+                let button = ui.add_enabled(idle && stem.is_ok(), egui::Button::new(label));
+                let button = match &stem {
+                    Ok(stem) => button.on_hover_text(format!(
+                        "Write the tree on screen to {}.{ext}: {what}.",
+                        stem.display()
+                    )),
+                    Err(why) => button.on_disabled_hover_text(why),
+                };
+                if button.clicked() {
+                    self.start_export(ext);
+                }
+            }
+            ui.checkbox(&mut self.export_wind, "Wind data").on_hover_text(
+                "Also write each vertex's sway pivots and weights as custom attributes \
+                 (_WIND_1 to _WIND_3, and _LEAF_ORIGIN on leaves), for driving wind in an engine.",
+            );
+            if !idle {
+                ui.spinner();
             }
         });
 
@@ -962,6 +1059,7 @@ impl eframe::App for App {
             self.regenerate();
             self.dirty = false;
         }
+        self.poll_export();
 
         if self.wind_on && !self.wind_paused {
             // Held to a tenth of a second so a stall — a regrow, a dragged window —
@@ -1214,6 +1312,27 @@ impl eframe::App for App {
 mod tests {
     use super::*;
     use arbor_core::species::{builtin_presets, parse_species, ChildPattern};
+
+    #[test]
+    fn an_export_writes_the_tree_and_says_where() {
+        // What the panel's Export buttons run, less the thread it runs on.
+        let (_, src) = builtin_presets()
+            .into_iter()
+            .find(|(name, _)| *name == "fir_open")
+            .expect("the open-grown fir is a built-in");
+        let params = parse_species(src).unwrap();
+        let dir = std::env::temp_dir().join(format!("arbor-viewer-export-{}", std::process::id()));
+        let path = dir.join("fir_open_custom.glb");
+        let options = ExportOptions {
+            textures: Some("../../assets/textures".into()),
+            wind: true,
+        };
+        let message = export_tree(&path, &params, &options).unwrap();
+        // Any texture it could not find would be reported after a semicolon.
+        assert!(message.starts_with("exported") && !message.contains(';'), "{message}");
+        assert_eq!(&std::fs::read(&path).unwrap()[0..4], b"glTF");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Every preset has to fit the panel that edits it.
     ///
