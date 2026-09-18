@@ -4,6 +4,7 @@ Procedural tree model generator in Rust. Aim is to generate ~7k-20k tri models.
 
 ![screenshot](docs/screenshot.png)
 
+
 Note, this application is almost entirely vibe-coded.
 
 I didn't want to pay for SpeedTree.
