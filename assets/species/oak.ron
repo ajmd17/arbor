@@ -225,24 +225,33 @@
         density: 0.80,
         spacing_variance: 0.85,
         leafy_length: 0.32,
-        cluster_size: 4,
+        // Two cards to a tuft, crossed by `even_roll` so neither is ever seen alone
+        // edge on, each 0.8 m and carrying a baked cluster of 128 leaves on three
+        // shoots. This was four 0.6 m cards of 72 leaves: the same leaves at the same
+        // size in half the cards, which took the foliage from 19.3k triangles to 9.7k.
+        // The three shoots are what keep a bigger cell a clump: on one shoot a cell of
+        // small leaves can only fill a strip two leaves wide, and the crown came out
+        // as long ribbons of leaves.
+        cluster_size: 2,
         cluster_spread_deg: 70.0,
-        card_length: 0.60,
-        card_width: 0.60,
+        card_length: 0.8,
+        card_width: 0.8,
         size_variance: 0.4,
         crotch_angle_deg: 58.0,
         crotch_variance_deg: 26.0,
         phyllotaxis_deg: 137.5,
         droop_deg: 26.0,
         twist_deg: 60.0,
+        even_roll: 1.0,
         normal_blend: 0.6,
         curvature: 0.35,
         tint: (0.55, 0.88, 0.42),
         hue_variance: 0.18,
         interior_shade: 0.55,
         cluster: Some((
-            count: 72,
-            leaf_length: 0.25,
+            count: 128,
+            shoots: 3,
+            leaf_length: 0.19,
             base_angle_deg: 92.0,
             tip_angle_deg: 66.0,
             tip_scale: 0.8,
@@ -259,7 +268,7 @@
             shoot_base: 0.94,
             shoot_tip: 0.14,
             source_aspect: 0.808,
-            cell_size: 512,
+            cell_size: 1024,
         )),
         atlas_cols: 2,
         atlas_rows: 1,
@@ -275,16 +284,29 @@
     ),
     mesh: (
         // Budgeted for a forest rather than for a hero shot. Bark is the part nobody
-        // sees once the canopy is on, so it is bought cheaply: a two-centimetre
-        // silhouette tolerance rather than one, rings thinned to the same budget, and
-        // nothing thinner than a wrist left meshed at all. The wood under the leaves
-        // went from 67k triangles to 16k, for a tree indistinguishable in leaf.
+        // sees once the canopy is on, so it is bought cheaply: a three-centimetre
+        // silhouette tolerance and nothing thinner than a wrist left meshed at all. The
+        // wood under the leaves went from 67k triangles to 16k, for a tree
+        // indistinguishable in leaf.
+        //
+        // The rings are the one thing not bought cheaply. Thinning them to three
+        // centimetres as well took the bark to 7.8k, and it showed: the branch collars
+        // go (a limb meets the trunk at a seam rather than growing out of a swelling),
+        // and so does the slow swell along the bole. Two centimetres keeps both and
+        // costs 19.1k; 0.025 is the halfway house at 12.4k and keeps about a fifth of
+        // the collars, which is not enough to read.
+        //
+        // `max_radial` stays at 32 where the other presets take 16. Most stems never
+        // reach it, but the bole does, and its five buttress roots need the sides to
+        // show as roots: at 16 the flare at the foot collapses into a plain cone. It
+        // costs a few hundred triangles on one stem. The mesher keeps the trunk's rings
+        // fine inside its flare zone for the same reason, whatever the budget above.
         //
         // `min_radial` is 4 rather than 3 on purpose: at this tolerance every thin limb
         // otherwise collapses to a triangular prism, which reads as a flat ribbon as it
         // turns. The extra side costs about 700 triangles over the whole tree.
         uv_scale: 0.8,
-        silhouette_tolerance: 0.020,
+        silhouette_tolerance: 0.03,
         min_radial: 4,
         min_bark_radius: 0.038,
         max_radial: 32,
@@ -327,7 +349,7 @@
             bark_ridge: 0.35,
             min_radius: 0.06,
             rings_per_meter: 14.0,
-            ring_tolerance: 0.020,
+            ring_tolerance: 0.02,
         ),
     ),
     envelope: (

@@ -231,13 +231,21 @@
         // per card, which is what pays for a crown this dense: a spruce is not a tree you
         // see the sky through.
         //
-        // Density against card size is the whole cost of this tree. A spruce carries far
-        // more twig than anything else here, so at a pine's card size it wanted 48k
-        // cards — four times the oak — for a canopy no fuller. Cards cost by the count
-        // and cover by the area, so trading count for size buys the same canopy for
-        // half the triangles; past about a metre they start catching the light as flat
-        // slabs and the needle grain goes.
-        density: 4.4,
+        // Density is the whole cost of this tree. A spruce carries far more twig than
+        // anything else here, so at a pine's card size it wanted 48k cards — four times
+        // the oak — for a canopy no fuller. Cards cost by the count and cover by the
+        // area, and the first saving was trading count for size; past about a metre
+        // they start catching the light as flat slabs and the needle grain goes, and
+        // the tiers the whole tree reads by smear into one cone.
+        //
+        // So the second saving leaves the card where it was and bakes more into it:
+        // thirteen sprays to a card rather than four (see the cluster block), and a
+        // bit over a third as many cards. The leaves went from 56.5k triangles to
+        // 20.9k, and the tiers survive. It is a little more open than it was — about a
+        // third less needle per cubic metre, most of it needle that sat behind other
+        // needle — which `open_grown_douglas_fir_is_a_sparse_spire_that_still_hangs`
+        // measures against, since the open fir is judged relative to this tree.
+        density: 1.6,
         spacing_variance: 0.72,
         leafy_length: 0.8,
         cluster_size: 1,
@@ -260,11 +268,12 @@
         hue_variance: 0.08,
         interior_shade: 0.55,
         cluster: Some((
-            // Four sprays to a card, curved hard. `leaf_length` holds a spray to the
-            // size it would have had on its own, so this buys cards rather than bigger
-            // needles; `shoot_curve` is what makes the four of them sweep the same way
-            // instead of standing up like a hand of cards.
-            count: 4,
+            // Thirteen sprays to a card, curved hard. `leaf_length` holds a spray to
+            // the size it would have had on its own, so this buys cards rather than
+            // bigger needles; `shoot_curve` is what makes them sweep the same way instead
+            // of standing up like a hand of cards. Past about twenty the bake stops
+            // getting fuller, and the card starts to read as felt.
+            count: 13,
             leaf_length: 0.48,
             base_angle_deg: 56.0,
             tip_angle_deg: 26.0,
@@ -282,7 +291,7 @@
             shoot_base: 0.88,
             shoot_tip: 0.22,
             source_aspect: 1.0,
-            cell_size: 512,
+            cell_size: 1024,
         )),
         atlas_cols: 1,
         atlas_rows: 1,
@@ -302,10 +311,11 @@
         // knots: a spruce keeps its lower limbs, and the ones it does lose leave scars
         // all the way down a bole that never had a clear length.
         uv_scale: 1.0,
-        silhouette_tolerance: 0.018,
-        min_radial: 4,
-        min_bark_radius: 0.016,
-        max_radial: 32,
+        silhouette_tolerance: 0.03,
+        min_radial: 3,
+        min_bark_radius: 0.03,
+        cull_from_level: 2,
+        max_radial: 16,
         root_flare: 1.0,
         flare_height: 1.8,
         root_taper: 2.2,
@@ -333,7 +343,7 @@
             collar_depth: 0.5,
             min_radius: 0.045,
             rings_per_meter: 15.0,
-            ring_tolerance: 0.018,
+            ring_tolerance: 0.03,
         ),
     ),
     envelope: (

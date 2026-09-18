@@ -268,25 +268,21 @@
         // spire: the fuller upper crown is more cards in more volume, and it carried
         // the tree past the one invariant that separates it from the spruce —
         // `douglas_fir_has_a_clear_bole_and_an_open_crown` wants it under four fifths
-        // of the spruce's cards per cubic metre. Net effect is the same card budget as
+        // of the spruce's needle per cubic metre. Net effect is the same card budget as
         // before, spread up the crown instead of piled in its bottom half.
         //
-        // Cards per metre of twig, and the number to watch is `card_length * density`
-        // — how many card-lengths of foliage are stacked over each length of twig. At
-        // 6.5 under a 0.8 m card that was 5.2, against the spruce's 3.7, and everything
-        // above about four was geometry drawn inside geometry already drawn: it cost
-        // vertices and returned almost no silhouette. 4.46 under a 0.9 m card is 4.0,
-        // and with the cell baking 37.3% rather than 32.4% the canopy it covers is the
-        // same to within a per cent — `density * card_length^2 * cell` is 1.35 either
-        // way. That is 23.4k cards for 32.6k, so 94k leaf vertices for 130k, with
-        // nothing given up.
+        // Cards per metre of twig. This used to be 4.46 under a 0.9 m card, and the
+        // reasoning then was about `card_length * density` — how many card-lengths are
+        // stacked over each length of twig — and a window of about three to five inside
+        // which a spray neither comes apart into cards nor washes into a felt.
         //
-        // It does not go much below this. Overlap is also what makes a spray read: the
-        // leaf shader hands filtered alpha straight to alpha-to-coverage while a card
-        // is bigger than a pixel, so cards that overlap blend rather than cut, and
-        // there is a window — under about three and a spray comes apart into separate
-        // cards, over about five and it washes into a felt with no outline in it.
-        density: 4.46,
+        // It sits below that window now, at about two, and on purpose: this is the
+        // triangle budget. The cards are bigger and each carries far more needle (see
+        // `card_length` and the cluster bake), so a third of them hold the crown. The
+        // leaves went from 42.5k triangles to 15.8k. The crown still reads as tiers from
+        // any distance a fifty-metre tree is seen whole at; the cost is up close, where
+        // the bigger cards show as spiky slabs at the crown's edge.
+        density: 1.6,
         spacing_variance: 0.85,
         // The shell of foliage over bare branchwork, and at 1.8 it was not one. This
         // is measured back from a twig's tip along the length it actually grew, and
@@ -308,19 +304,20 @@
         // under alpha-to-coverage blend instead of cutting. 0.62 m was tried with
         // `density` at 10.8, which is the same coverage, and in the viewer it is clearly
         // worse: seven card-lengths stacked over each length of twig wash into an even
-        // felt with no spray outlines in it at all, and it takes 53k cards to do it. A
-        // big card overlapped four times still reads as a plate.
+        // felt with no spray outlines in it at all, and it takes 53k cards to do it.
         //
-        // 0.9 rather than 0.8 is that same reasoning read forwards: a larger card needs
-        // fewer of them for the same cover, at the square, and that is most of where the
-        // vertex saving came from. It stops here — past about a metre a card is big
-        // enough to catch the light as one flat slab and the needle grain goes with it.
+        // 1.3 m is past the metre where a card starts to catch the light as one slab,
+        // and that was taken for the budget: bigger cards baked fuller (thirty-six
+        // shoots, where 0.9 m carried sixteen at the same real size) is what lets a
+        // third of the cards hold the crown. The needle bake saturates near twenty
+        // shoots on a 0.9 m card, so the spruce's way — same card, fuller bake — was not
+        // open here.
         //
         // Judge this one in `arbor-viewer --screenshot` and nowhere else. The offline
         // preview alpha tests hard, so it draws crisp cards stacking where the build
         // draws them dissolving, and it scores a smaller card as an improvement.
-        card_length: 0.9,
-        card_width: 0.9,
+        card_length: 1.3,
+        card_width: 1.3,
         size_variance: 0.4,
         crotch_angle_deg: 46.0,
         crotch_variance_deg: 20.0,
@@ -356,11 +353,17 @@
             // Sixteen bake to 37.3%, and that is very near the end of it — the curve
             // runs 34.9 at twelve, 38.0 at eighteen, 39.2 at twenty-four, so past about
             // twenty the sprays only land on each other and the bake gets slower for
-            // nothing. Sixteen is bought here in order to spend it on `density`, which
-            // is where the vertices are: a cell that covers a sixth more lets a sixth
-            // fewer cards hold the same canopy.
-            count: 16,
-            leaf_length: 0.4,
+            // nothing — on a 0.9 m card. Sixteen was bought in order to spend it on
+            // `density`, which is where the vertices are: a cell that covers a sixth
+            // more lets a sixth fewer cards hold the same canopy.
+            //
+            // Thirty-six now, on a 1.3 m card, with `leaf_length` 0.28 so each spray is
+            // still the size it was on the smaller card: the bigger cell holds about
+            // twice the sprays before it saturates, and that fuller card is what lets a
+            // third as many of them hold the crown. The invariant above has since moved
+            // to needle per cubic metre, which is what this paragraph was arguing for.
+            count: 36,
+            leaf_length: 0.28,
             base_angle_deg: 58.0,
             tip_angle_deg: 28.0,
             tip_scale: 0.85,
@@ -377,7 +380,7 @@
             shoot_base: 0.9,
             shoot_tip: 0.2,
             source_aspect: 1.0,
-            cell_size: 512,
+            cell_size: 1024,
         )),
         atlas_cols: 1,
         atlas_rows: 1,
@@ -398,10 +401,11 @@
         // is a tree that grew and shed limbs over the whole of its clear length and
         // grew over every one of the scars.
         uv_scale: 1.3,
-        silhouette_tolerance: 0.02,
-        min_radial: 4,
-        min_bark_radius: 0.018,
-        max_radial: 32,
+        silhouette_tolerance: 0.03,
+        min_radial: 3,
+        min_bark_radius: 0.03,
+        cull_from_level: 2,
+        max_radial: 16,
         root_flare: 1.3,
         flare_height: 2.6,
         root_taper: 2.0,
@@ -432,7 +436,7 @@
             collar_depth: 0.5,
             min_radius: 0.045,
             rings_per_meter: 12.0,
-            ring_tolerance: 0.02,
+            ring_tolerance: 0.03,
         ),
     ),
     envelope: (

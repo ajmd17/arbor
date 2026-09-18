@@ -511,6 +511,24 @@ fn ring_error(path: &StemPath, mp: &MeshParams, phase: (f32, f32), prev: usize, 
     worst
 }
 
+/// How far above `flare_height` the trunk keeps its fine rings, as a multiple of it.
+/// The flare dies away smoothly rather than stopping, so its tail wants them too.
+const FLARE_RING_REACH: f32 = 1.3;
+/// Ring budget inside the trunk's flare zone, in metres, however coarse the rest.
+const FLARE_RING_TOLERANCE: f32 = 0.01;
+/// Most a stem may turn between one kept ring and the next, in radians: twenty degrees.
+///
+/// The ring budget is a distance, and a distance is the wrong measure for a bend. A limb
+/// that curves five degrees a node for twenty nodes turns a hundred degrees in a smooth
+/// arc, and every one of those nodes sits within three centimetres of the straight line
+/// to its neighbours, so a coarse budget kept three rings of it and swept the arc as two
+/// straight spans meeting at a sixty-degree elbow — thirty-five of the pine's limbs had
+/// one, on a skeleton whose sharpest corner is five degrees. Nothing about the distance
+/// budget would ever catch that, because the eye is reading the corner, not the offset.
+/// Twenty degrees is where the elbows stop showing at the distance a bare limb is looked
+/// at, for about half as many extra rings again as fifteen.
+const MAX_SPAN_TURN: f32 = 0.349;
+
 /// Which rings to keep. Walks the stem dropping any ring whose absence moves the
 /// surface less than the tolerance, never two in a row, so the result still follows
 /// every feature the bark has while spending nothing on the stretches between them.
@@ -525,11 +543,21 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
     }
     let mut keep = Vec::with_capacity(path.len());
     keep.push(0);
+    // The buttress is the place on a tree where the shape changes fastest along the
+    // stem and matters most up close, and a coarse budget smooths its flare away over
+    // a couple of metres. The trunk's flare zone is held to the finest budget the
+    // mesher uses by default instead, which costs a handful of rings on one stem.
+    let flare_top = mp.flare_height * FLARE_RING_REACH;
+    let flare_tol = tol.min(FLARE_RING_TOLERANCE);
     let mut i = 1;
     while i < path.len() - 1 {
         let prev = *keep.last().unwrap();
-        let limit = tol;
-        if ring_error(path, mp, phase, prev, i, i + 1) < limit {
+        let fine = path.is_trunk && path.arc[i] < flare_top;
+        let limit = if fine { flare_tol } else { tol };
+        // Two things keep a ring: the surface moving more than the budget without it,
+        // and the stem turning more than a span may across it.
+        let turns = path.dirs[prev].angle_between(path.dirs[i + 1]) > MAX_SPAN_TURN;
+        if !turns && ring_error(path, mp, phase, prev, i, i + 1) < limit {
             // Dropped. The next ring is measured against the same neighbour, so a long
             // smooth run collapses rather than losing every other ring.
             i += 1;
@@ -589,6 +617,17 @@ impl StemPath {
     }
 
     fn build(
+        sk: &Skeleton,
+        stem: &[u32],
+        mp: &MeshParams,
+        seed: u64,
+        children: &[Vec<u32>],
+    ) -> Option<StemPath> {
+        Some(Self::build_dense(sk, stem, mp, seed, children)?.thinned(mp, seed_phases(seed)))
+    }
+
+    /// The stem at full ring density, before thinning.
+    fn build_dense(
         sk: &Skeleton,
         stem: &[u32],
         mp: &MeshParams,
@@ -732,7 +771,7 @@ impl StemPath {
             frames,
             irregular,
         };
-        Some(dense.thinned(mp, seed_phases(seed)))
+        Some(dense)
     }
 
     /// The same stem with every ring that was not earning its place removed.
@@ -751,7 +790,13 @@ impl StemPath {
         // Arc comes from the dense polyline, so thinning cannot slide the bark along
         // the stem and move the burls.
         let arc: Vec<f32> = keep.iter().map(|&i| self.arc[i]).collect();
-        let dirs = dirs_for(&points);
+        // Each kept ring keeps the aim it had on the dense stem rather than being
+        // re-aimed at its new neighbours. Those can be metres off once a coarse budget
+        // has thinned a smooth run — the ring after a socket, say, whose next kept ring
+        // is far out along the limb — and a ring aimed across that gap turns until its
+        // wall folds through the ring before it, inside out. The dense aim is the
+        // stem's own tangent there, which is what the sweep wants anyway.
+        let dirs: Vec<Vec3> = keep.iter().map(|&i| self.dirs[i]).collect();
         let frames = frames_for(&dirs);
         StemPath {
             points,
@@ -1317,7 +1362,9 @@ mod tests {
                 );
                 checked += 1;
             }
-            assert!(checked > 1000, "{}: only {checked} triangles", params.name);
+            // Enough to mean something, and within what the budgeted presets keep: the
+            // birch's whole bark is under a thousand triangles.
+            assert!(checked > 500, "{}: only {checked} triangles", params.name);
         }
     }
 
@@ -1746,6 +1793,10 @@ mod tests {
         params.mesh.irregularity.burl_density = 0.0;
         params.mesh.irregularity.knot_density = 0.0;
         params.mesh.irregularity.collar_depth = 0.0;
+        // And the rings at the default spacing: the oak's own are thinned for its
+        // triangle budget, far past where there are enough of them to measure.
+        params.mesh.silhouette_tolerance = MeshParams::default().silhouette_tolerance;
+        params.mesh.irregularity.ring_tolerance = BarkIrregularity::default().ring_tolerance;
         let sk = crate::grow(&params);
         let path = trunk_path(&params, &sk);
         let phase = seed_phases(params.seed);
@@ -2142,5 +2193,50 @@ mod tests {
         // Twigs are still culled.
         let twigs = stem_costs(&sk, &params).iter().filter(|c| c.level >= 2).count();
         assert_eq!(twigs, 0, "{twigs} twigs survived a 20 cm cutoff");
+    }
+    #[test]
+    fn thinning_does_not_put_elbows_in_a_smooth_limb() {
+        // The ring budget is a distance, and a limb curving gently for metres stays
+        // within it however few rings are kept — so a coarse budget once swept a smooth
+        // hundred-degree arc as two straight spans meeting at a sixty-degree elbow.
+        // Measured against the dense path each stem was thinned from, so this holds
+        // whatever the skeleton did: a corner in the mesh may not be sharper than the
+        // span limit plus whatever the stem itself turned there.
+        for src in [PINE_RON, BIRCH_RON, OAK_RON] {
+            let params = parse_species(src).unwrap();
+            let sk = crate::grow(&params);
+            let children = child_index(&sk);
+            let corner = |pts: &[Vec3]| {
+                pts.windows(3)
+                    .map(|w| (w[1] - w[0]).angle_between(w[2] - w[1]))
+                    .fold(0.0f32, f32::max)
+            };
+            let (mut checked, mut worst) = (0, 0.0f32);
+            for stem in sk.stem_runs() {
+                if sk.nodes[stem[0] as usize].level != 1 {
+                    continue;
+                }
+                let Some(dense) = StemPath::build_dense(&sk, &stem, &params.mesh, params.seed, &children) else { continue };
+                if too_thin_for_bark(&dense, &params.mesh) || dense.len() < 6 {
+                    continue;
+                }
+                let skeleton = corner(&dense.points);
+                let thinned = dense.thinned(&params.mesh, seed_phases(params.seed));
+                let mesh = corner(&thinned.points);
+                checked += 1;
+                worst = worst.max(mesh);
+                // A fixed bound rather than `MAX_SPAN_TURN`, which would move with it:
+                // twenty-five degrees over whatever the stem itself turns there.
+                assert!(
+                    mesh <= 0.436 + skeleton,
+                    "{}: thinning put a {:.0} degree corner in a limb whose own sharpest is {:.0}",
+                    params.name,
+                    mesh.to_degrees(),
+                    skeleton.to_degrees()
+                );
+            }
+            assert!(checked > 30, "{}: only {checked} limbs measured", params.name);
+            assert!(worst > 0.05, "{}: no limb bends at all, so nothing was tested", params.name);
+        }
     }
 }

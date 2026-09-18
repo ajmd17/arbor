@@ -351,7 +351,7 @@
         // inside a needle tuft, and with the foliage on the crown looks the same with or
         // without them. With the dead twigs inside the crown going too (see
         // `dead_bark_radius`), three-sided twigs and the coarser tolerances here, the
-        // bark went from 26k triangles to 2.8k. The limbs are exempt however thin — a
+        // bark went from 26k triangles to 4.1k. The limbs are exempt however thin — a
         // dropped limb leaves its foliage floating in the gaps.
         min_bark_radius: 0.03,
         cull_from_level: 2,
@@ -396,8 +396,15 @@
             // most it can be; it is capped at `silhouette_tolerance`) the bole keeps its
             // flutes but loses the slow swelling along its length and most of the collars
             // where limbs leave it, so up close a limb meets the trunk at a seam. That
-            // was taken for the budget: 0.02 keeps both for 2.2k more triangles (5.0k of
-            // bark rather than 2.8k), and the default 0.018 for 2.9k.
+            // was taken for the budget: 0.02 keeps both for 5.7k of bark rather than
+            // 4.1k.
+            //
+            // What this budget does not decide any more is how a limb bends. It used to:
+            // a limb curving gently for metres stays within three centimetres of the
+            // straight line between any three of its rings, so the thinning kept three
+            // rings of a twenty-node arc and swept it as two straight spans meeting at
+            // an elbow. The mesher now holds every span to a twenty-degree turn whatever
+            // the budget here, which is most of the 1.3k this tree's bark grew by.
             ring_tolerance: 0.03,
         ),
     ),

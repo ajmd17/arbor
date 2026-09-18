@@ -131,12 +131,13 @@ fn douglas_fir_has_a_clear_bole_and_an_open_crown() {
 
     // Sparser, too — and the honest way to say that is against the spruce, which is
     // the same needles on the opposite habit. An absolute figure would just be whatever
-    // this preset happened to measure on the day.
-    let open = crown_card_area_per_m3(&sk, &params);
-    let solid = crown_card_area_per_m3(&spruce_sk, &spruce);
+    // this preset happened to measure on the day. Needle rather than card, since the
+    // two carry their needle at different densities per card.
+    let open = crown_needle_area_per_m3(&sk, &params);
+    let solid = crown_needle_area_per_m3(&spruce_sk, &spruce);
     assert!(
         open < solid * 0.8,
-        "douglas fir carries {open:.2} square metres of card per cubic metre against          the spruce's {solid:.2}; it is meant to be the open one"
+        "douglas fir carries {open:.2} square metres of needle per cubic metre against          the spruce's {solid:.2}; it is meant to be the open one"
     );
 }
 
@@ -218,17 +219,25 @@ fn open_grown_douglas_fir_is_a_sparse_spire_that_still_hangs() {
     // the denser of the two. Openness cannot come from the outline here, because the
     // outline is the spruce's, so it has to come from the branchwork being thinner and
     // this is what holds it there.
-    let open_area = crown_card_area_per_m3(&sk, &params);
+    let open_area = crown_needle_area_per_m3(&sk, &params);
     let spruce_params = parse_species(SPRUCE_RON).unwrap();
     let spruce_grown = grow(&spruce_params);
-    let solid = crown_card_area_per_m3(&spruce_grown, &spruce_params);
-    // The ceiling moved with the habit: this is per cubic metre, and the same foliage
-    // in a spire rather than a broad cone sits in well under half the volume, so the
-    // number rises without a single card being added. What it is really holding is the
-    // needle you look through, which measures 29% of the spruce's.
+    let solid = crown_needle_area_per_m3(&spruce_grown, &spruce_params);
+    // Needle rather than card, because the two carry very different amounts of it per
+    // card: this fir draws one airy photographed spray to a card, the spruce a baked
+    // bundle of thirteen shoots.
+    //
+    // The ceiling has moved twice. Once with the habit: this is per cubic metre, and
+    // the same foliage in a spire rather than a broad cone sits in well under half the
+    // volume, so the number rises without a card being added. And once with the
+    // spruce's triangle budget, which cut it to a third of its cards and left it about
+    // a third less needle per cubic metre — mostly needle that sat behind other needle
+    // and was never seen. This fir did not change, and measured 0.27 of the spruce
+    // before that and 0.41 after; what still holds is that it is well under half as
+    // dense, which is what seeing the trunk through one and not the other comes to.
     assert!(
-        open_area < solid * 0.35,
-        "open-grown fir carries {open_area:.2} square metres of card per cubic metre \
+        open_area < solid * 0.5,
+        "open-grown fir carries {open_area:.2} square metres of needle per cubic metre \
          against the spruce's {solid:.2}; you are meant to see the trunk and the branch \
          tips through it"
     );
@@ -536,6 +545,51 @@ fn crown_card_area_per_m3(sk: &arbor_core::Skeleton, params: &arbor_core::Specie
     let volume = std::f32::consts::PI * r2 * (top - base).max(0.1);
     let card = params.leaves.card_length * params.leaves.card_width;
     (leaves.positions.len() / 4) as f32 * card / volume
+}
+
+/// Share of a card that is foliage rather than air, read off the atlas the species
+/// actually samples: its leaf art, baked into clusters first where the species asks
+/// for that, exactly as the renderer does.
+fn card_coverage(params: &arbor_core::SpeciesParams) -> f32 {
+    let lp = &params.leaves;
+    let path = format!(
+        "{}/../../assets/textures/{}_albedo.png",
+        env!("CARGO_MANIFEST_DIR"),
+        lp.texture
+    );
+    let img = image::open(&path)
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    let source = arbor_core::Bitmap::from_rgba(w, h, img.into_raw()).expect("rgba");
+    let sheet = match &lp.cluster {
+        Some(cluster) => {
+            arbor_core::bake_cluster(
+                cluster,
+                lp.atlas_cols,
+                lp.atlas_rows,
+                arbor_core::LeafMaps {
+                    albedo: &source,
+                    normal: None,
+                    roughness: None,
+                },
+            )
+            .albedo
+        }
+        None => source,
+    };
+    sheet.mean_alpha()
+}
+
+/// Needle, not card, per cubic metre of crown: card area weighted by how much of each
+/// card is foliage.
+///
+/// Card area alone stops meaning anything once two species carry their needle at
+/// different densities per card, and that is exactly what a triangle budget does — a
+/// crown drawn with a third of the cards, each baked three times as full, has a third
+/// of the card area and nothing like a third less needle.
+fn crown_needle_area_per_m3(sk: &arbor_core::Skeleton, params: &arbor_core::SpeciesParams) -> f32 {
+    crown_card_area_per_m3(sk, params) * card_coverage(params)
 }
 
 #[test]
