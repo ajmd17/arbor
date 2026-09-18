@@ -526,6 +526,16 @@ pub struct ChildParams {
     /// at the shade line, where the limbs have only just died. At 1 nothing is cut back
     /// and the dead band is as long as the tree grew it.
     pub shade_keep: f32,
+    /// How far a shaded-out child may settle down about its base once it has died, in
+    /// degrees.
+    ///
+    /// A living limb is held up by the wood it lays down each year against its own
+    /// weight; a dead one lays down nothing and settles. The band of dead limbs under a
+    /// pine's crown is not the tidy radiating rack the crown's live limbs make — some
+    /// stand where they grew, some hang, a few have dropped to hang almost against the
+    /// trunk. Each dead limb tilts rigidly about its attachment by a share of this,
+    /// skewed so most settle a little and a few settle hard. Zero leaves them as grown.
+    pub dead_sag_deg: f32,
 }
 
 impl Default for ChildParams {
@@ -548,6 +558,7 @@ impl Default for ChildParams {
             shade_line: 0.0,
             shade_blend: 0.0,
             shade_keep: 1.0,
+            dead_sag_deg: 0.0,
         }
     }
 }

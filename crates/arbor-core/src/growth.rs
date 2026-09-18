@@ -217,6 +217,7 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
     // the tail of the one above: a species that loses no wood to dieback still has
     // wood the crown pruned, and that has to break back too.
     break_dead_wood(params, &mut skeleton, shade_keep.as_deref());
+    sag_dead_limbs(params, &mut skeleton);
     skeleton
 }
 
@@ -284,7 +285,12 @@ fn stem_arcs(skeleton: &Skeleton) -> (Vec<f32>, Vec<f32>) {
         if let Some(p) = node.parent {
             let parent = &skeleton.nodes[p as usize];
             let run = (node.position - parent.position).length();
-            arc[i] = if parent.stem == node.stem { arc[p as usize] + run } else { run };
+            // A fork is the same axis carrying on, not a new stem starting at zero:
+            // a whorl a tenth of the way along a fork near the top of the tree is
+            // near the top of the tree, and measuring it from the fork instead put a
+            // whole whorl of the pine's crown under the shade line and killed it.
+            let continues = parent.stem == node.stem || parent.level == node.level;
+            arc[i] = if continues { arc[p as usize] + run } else { run };
         }
         let s = node.stem as usize;
         if s < n {
@@ -478,6 +484,56 @@ fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton, keep: Option
         // off the moment it was marked dead and the bole came out clean again.
         if frac > keeps && same_stem {
             skeleton.nodes[i].broken = true;
+        }
+    }
+}
+
+/// Settles the limbs the tree has lost down about their bases.
+///
+/// Shape is decided while a stem grows and death is decided afterwards, so a dead limb
+/// comes out shaped exactly like a living one: held up as though it were still laying
+/// down wood against its weight. This is what lets it settle. Each dead subtree whose
+/// root hangs off living wood is tilted rigidly about that attachment, down, by a share
+/// of the parent's `dead_sag_deg` drawn so most limbs settle a little and a few settle
+/// hard — the rack of dead limbs under a crown is not tidy. A rigid tilt keeps whatever
+/// curve the limb grew with; it is the hinge at the base that a dead limb reads by.
+fn sag_dead_limbs(params: &SpeciesParams, skeleton: &mut Skeleton) {
+    let any = std::iter::once(&params.trunk)
+        .chain(params.branch_levels.iter())
+        .any(|sp| sp.children.dead_sag_deg > 0.0);
+    if !any {
+        return;
+    }
+    for i in 0..skeleton.nodes.len() {
+        let node = &skeleton.nodes[i];
+        let Some(p) = node.parent else { continue };
+        let parent = &skeleton.nodes[p as usize];
+        // Only a lateral settles about its base. A fork is the axis carrying on, and
+        // a dead leader stands as it grew.
+        if !node.dead || parent.dead || node.level != parent.level + 1 {
+            continue;
+        }
+        let Some(psp) = stem_params(params, parent.level) else { continue };
+        let max = psp.children.dead_sag_deg;
+        if max <= 0.0 {
+            continue;
+        }
+        let base = parent.position;
+        let heading = horizontal(node.position - base);
+        if heading.length_squared() < 1e-6 {
+            // Straight up or down has no side to settle toward.
+            continue;
+        }
+        let u = hash_unit(params.seed ^ 0x5A6D_EAD5, node.path);
+        let angle = (max * u * u).to_radians();
+        // Tilting about the horizontal across the limb's heading swings its tip down.
+        let axis = Vec3::Y.cross(heading.normalize()).normalize();
+        let turn = glam::Quat::from_axis_angle(axis, angle);
+        let mut stack = vec![i as u32];
+        while let Some(k) = stack.pop() {
+            let at = &mut skeleton.nodes[k as usize];
+            at.position = base + turn * (at.position - base);
+            stack.extend(at.children.iter().copied());
         }
     }
 }
@@ -2067,7 +2123,9 @@ mod tests {
 
             let mut checked = 0;
             for (i, node) in sk.nodes.iter().enumerate() {
-                if node.level == 0 || stubs.contains(&(i as u32)) {
+                // Dead wood is exempt: a shaded-out limb settles below where it grew,
+                // and the crown only ever shaped living growth.
+                if node.level == 0 || node.dead || stubs.contains(&(i as u32)) {
                     continue;
                 }
                 // Every prefix of the leader is a trunk some branch was grown against,
@@ -2472,6 +2530,94 @@ mod tests {
              out bare, but the bare tip is {:.0}% against {:.0}% stretched",
             absolute * 100.0,
             taller * 100.0
+        );
+    }
+    #[test]
+    fn a_dead_limb_settles_and_a_living_one_does_not() {
+        // Dead limbs are shaped as though alive, so without this they radiate from the
+        // trunk as tidily as the crown does. With it every dead subtree tilts about its
+        // base and nothing living moves at all.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.trunk.children.dead_sag_deg = 0.0;
+        let held = grow(&params);
+        params.trunk.children.dead_sag_deg = 40.0;
+        let settled = grow(&params);
+        assert_eq!(held.nodes.len(), settled.nodes.len());
+
+        let (mut dead_limbs, mut dropped, mut living_moved) = (0, 0, 0);
+        for (a, b) in held.nodes.iter().zip(settled.nodes.iter()) {
+            if !a.dead {
+                if (a.position - b.position).length() > 1e-5 {
+                    living_moved += 1;
+                }
+                continue;
+            }
+            // A dead limb's own head, off the trunk.
+            let Some(p) = a.parent else { continue };
+            if held.nodes[p as usize].dead || a.level != 1 {
+                continue;
+            }
+            dead_limbs += 1;
+            // Its tip is the deepest node of its subtree; any drop at all counts, and a
+            // limb that drew a small share of the sag may drop only a little.
+            if b.position.y < a.position.y - 1e-4 {
+                dropped += 1;
+            }
+        }
+        assert_eq!(living_moved, 0, "settling dead limbs moved living wood");
+        assert!(dead_limbs > 20, "only {dead_limbs} dead limbs to settle");
+        assert!(
+            dropped * 4 > dead_limbs * 3,
+            "only {dropped} of {dead_limbs} dead limbs settled at all"
+        );
+    }
+    #[test]
+    fn the_shade_line_carries_on_through_a_fork() {
+        // A trunk that forks is one axis, and where a limb sits on it is where it sits
+        // on the tree. Measuring the shade line from the fork instead restarts it at
+        // zero there, and a whorl just past a fork near the top of the tree is killed
+        // as though it were at the foot of the trunk.
+        let mut params = SpeciesParams {
+            max_levels: 2,
+            max_split_depth: 1,
+            ..Default::default()
+        };
+        params.envelope.volumes = vec![crate::envelope::EnvelopeVolume::Ellipsoid {
+            center: [0.0, 0.0, 0.0],
+            radii: [500.0, 500.0, 500.0],
+        }];
+        params.trunk.split_probability = 1.0;
+        params.trunk.split_start_fraction = 0.55;
+        params.trunk.split_evenness = 0.9;
+        params.trunk.children.pattern = ChildPattern::Whorl { every: 1, count: 3 };
+        params.trunk.children.start_fraction = 0.05;
+        params.trunk.children.shade_line = 0.5;
+        params.trunk.children.shade_blend = 0.0;
+        params.branch_levels[0].split_probability = 0.0;
+        params.branch_levels[0].dieback = 0.0;
+
+        let sk = grow(&params);
+        let height = sk.stats().height;
+        let trunk_stem = sk.nodes[0].stem;
+        let (mut on_fork, mut dead_on_fork) = (0, 0);
+        for run in sk.stem_runs() {
+            let head = &sk.nodes[run[0] as usize];
+            let Some(p) = head.parent else { continue };
+            let parent = &sk.nodes[p as usize];
+            // A limb on a fork of the trunk, well above the shade line.
+            if head.level != 1 || parent.level != 0 || parent.stem == trunk_stem {
+                continue;
+            }
+            if parent.position.y < height * 0.65 {
+                continue;
+            }
+            on_fork += 1;
+            dead_on_fork += usize::from(head.dead);
+        }
+        assert!(on_fork > 5, "only {on_fork} limbs found on a fork above the shade line");
+        assert_eq!(
+            dead_on_fork, 0,
+            "{dead_on_fork} of {on_fork} limbs high on a fork were shaded out as though at the foot"
         );
     }
 }

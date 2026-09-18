@@ -117,7 +117,7 @@ pub static STEM: &[Group<StemParams>] = &[
             knob("Gravity", (-0.2, 0.5), "Pull downward per segment, evenly along the stem. Negative lifts.", |s| &mut s.gravity),
             knob("Droop", (0.0, 10.0), "How much harder gravity bends the tip than the base. Zero is an even bend.", |s| &mut s.droop),
             knob("Zigzag", (0.0, 40.0), "Alternating jog at each node, in degrees. Breaks the extruded look without changing where the stem goes.", |s| &mut s.zigzag_deg),
-            knob("Turn bank", (0.0, 2.0), "Total turning a stem may do, in radians per metre of its length. Zero uses the model's default; lower stiffens long limbs.", |s| &mut s.turn_bank),
+            knob("Turn bank", (0.0, 5.0), "Total turning a stem may do, in radians per metre of its length. Zero uses the model's default of 0.26; lower stiffens long limbs, and a short twig needs several to hang at all.", |s| &mut s.turn_bank),
         ],
         counts: &[],
     },
@@ -162,6 +162,7 @@ pub static CHILDREN: &[Group<ChildParams>] = &[
             knob("Shade line", (0.0, 1.0), "Share of the parent, from its base, whose children are dead: shaded out by the crown above. The dead lower limbs of a pine, or the bare inside of a limb.", |c| &mut c.shade_line),
             knob("Shade blend", (0.0, 1.0), "How far under the shade line the odds run from all alive to all dead, so the lowest living limb is not a ruled line.", |c| &mut c.shade_blend),
             knob("Shade keep", (0.0, 1.0), "How much of its length a shaded-out child keeps at the parent's base, rising to all of it at the shade line. Lower reels the dead band in: old dead limbs stopped growing and lost their ends.", |c| &mut c.shade_keep),
+            knob("Dead sag", (0.0, 90.0), "How far a shaded-out child may settle down about its base once dead, in degrees. Drawn per limb, skewed so most settle a little and a few settle hard.", |c| &mut c.dead_sag_deg),
         ],
         counts: &[Count {
             label: "Count variance",

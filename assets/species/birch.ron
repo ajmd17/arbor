@@ -99,10 +99,15 @@
             segment_length: 0.24,
             curvature: 0.055,
             phototropism: 0.010,
-            gravity: 0.030,
-            droop: 4.2,
+            gravity: 0.06,
+            droop: 2.0,
             zigzag_deg: 4.0,
-            turn_bank: 0.18,
+            // These are the shoots long enough to arch over and hang, and the bank is
+            // what let them: at the default they could turn 27 degrees in all. With the
+            // sag moved toward the base (less `droop`, more `gravity`) they bend from
+            // where they leave rather than only at the tip, which is how a birch shoot
+            // hangs. The finest levels below take the same treatment.
+            turn_bank: 1.0,
             vigor_falloff: 0.42,
             dieback: 0.06,
             snap_radius: 0.035,
@@ -138,9 +143,14 @@
             segment_length: 0.18,
             curvature: 0.05,
             phototropism: 0.004,
-            gravity: 0.060,
-            droop: 6.0,
+            gravity: 0.12,
+            droop: 1.5,
             zigzag_deg: 3.5,
+            // The turn bank is what kept these straight. It is drawn per metre of the stem's
+            // length, and a twig under half a metre was allowed six degrees in all, so the
+            // gravity and droop above it never got to act. A silver birch's fine twigs hang
+            // like string; this is enough turning for them to do it.
+            turn_bank: 3.0,
             vigor_falloff: 0.5,
             dieback: 0.09,
             snap_radius: 0.03,
@@ -173,9 +183,10 @@
             segment_length: 0.15,
             curvature: 0.055,
             phototropism: 0.002,
-            gravity: 0.095,
-            droop: 7.0,
+            gravity: 0.16,
+            droop: 1.0,
             zigzag_deg: 4.0,
+            turn_bank: 3.0,
             vigor_falloff: 0.6,
             dieback: 0.11,
             snap_radius: 0.025,
@@ -211,9 +222,10 @@
             segment_length: 0.11,
             curvature: 0.06,
             phototropism: 0.0,
-            gravity: 0.12,
-            droop: 8.0,
+            gravity: 0.2,
+            droop: 0.5,
             zigzag_deg: 5.0,
+            turn_bank: 3.0,
             vigor_falloff: 0.7,
             dieback: 0.12,
             snap_radius: 0.02,

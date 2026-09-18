@@ -32,9 +32,12 @@
         split_evenness: 0.0,
         split_start_fraction: 0.8,
         children: (
-            // Five to a whorl, and only rarely a gap: a forest pine's crown is a dense
-            // mass with the limbs showing through it, not a few tiers standing apart.
-            pattern: Whorl(every: 1, count: 5),
+            // Seven to a whorl on every second segment, so the tiers stand a little over
+            // two metres apart. It was five on every segment, and the crown came out as
+            // one even lollipop; a Scots pine's crown is a stack of flat pads of foliage
+            // with gaps between, and the gaps come from the tier spacing while the pads
+            // come from `planarity` on the levels below.
+            pattern: Whorl(every: 2, count: 7),
             start_fraction: 0.12,
             end_fraction: 0.99,
             crotch_angle_deg: 110.0,
@@ -43,8 +46,8 @@
             roll_variance_deg: 30.0,
             phyllotaxis_deg: 137.5,
             scale: 0.5,
-            scale_variance: 0.4,
-            dominance: 0.3,
+            scale_variance: 0.5,
+            dominance: 0.5,
             acrotony: -0.2,
             planarity: 0.4,
             count_variance: 2,
@@ -56,6 +59,9 @@
             // band at all. `pine_carries_its_dead_limbs_under_a_living_crown` holds it.
             shade_line: 0.58,
             shade_blend: 0.08,
+            // Once dead, a limb settles about its base; most a little, a few nearly
+            // to the trunk. Without it the dead band radiated as tidily as the crown.
+            dead_sag_deg: 35.0,
             // The dead limbs stopped growing when they died and have lost their ends
             // since, so the oldest, lowest ones keep only this much of their length,
             // rising to all of it for the ones that have only just died under the
@@ -69,7 +75,7 @@
             // down a season at a time and each season's shoot sets off at its own
             // angle, which is what the zigzag and the curvature stand for.
             length: 8.0,
-            length_variance: 0.25,
+            length_variance: 0.4,
             radius: 0.11,
             radius_ratio: 0.45,
             taper: 0.12,
@@ -81,7 +87,7 @@
             droop: 1.2,
             zigzag_deg: 7.0,
             vigor_falloff: 0.5,
-            dieback: 0.04,
+            dieback: 0.02,
             snap_radius: 0.02,
             split_probability: 0.05,
             split_angle_deg: 25.0,
@@ -101,7 +107,7 @@
                 scale_variance: 0.4,
                 dominance: 0.3,
                 acrotony: 0.5,
-                planarity: 0.5,
+                planarity: 0.9,
                 count_variance: 0,
                 // The inside of a living limb is bare: its own outer growth shades
                 // it, and the twigs there are dead ones.
@@ -140,7 +146,7 @@
                 scale_variance: 0.4,
                 dominance: 0.35,
                 acrotony: 0.3,
-                planarity: 0.2,
+                planarity: 0.85,
                 count_variance: 0,
                 shade_line: 0.15,
                 shade_blend: 0.2,
@@ -176,7 +182,7 @@
                 scale_variance: 0.35,
                 dominance: 0.35,
                 acrotony: 0.3,
-                planarity: 0.1,
+                planarity: 0.7,
                 count_variance: 0,
             ),
         ),
@@ -216,13 +222,15 @@
         enabled: true,
         min_level: 2,
         max_twig_radius: 0.03,
-        // Under one tuft to each metre of leafy twig. Few, large tufts are what keeps
-        // the pine to about 10k triangles; see `card_length`.
-        density: 0.7,
+        // Tufts per metre of leafy twig. Few, large tufts are what keeps the pine to
+        // about 12k triangles; see `card_length`. Raised with `leafy_length` cut, so the
+        // same needle sits on the last stretch of each shoot: that is what makes each
+        // limb's branchlets read as one flat pad rather than a fuzz along the limb.
+        density: 1.8,
         spacing_variance: 0.8,
         // Pine carries its needles on the last few seasons of each shoot, so the
         // foliage is a brush over the end of every twig with bare wood behind it.
-        leafy_length: 0.7,
+        leafy_length: 0.45,
         // How the tuft is built, and the one thing here that decides whether the crown
         // reads as a pine at all. A needle brush is round: the needles leave the shoot
         // on every side. One flat card of it seen face on is a feather, and a fan of
