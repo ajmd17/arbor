@@ -7,7 +7,8 @@ mod mipmap;
 mod presets;
 mod shaders;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -15,7 +16,7 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
-use arbor_core::gltf::{self, ExportOptions};
+use arbor_core::gltf::{self, ExportOptions, Format};
 use arbor_core::species::{LeafClusterParams, CUSTOM_PRESET_DIR};
 use arbor_core::{build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
 
@@ -27,8 +28,10 @@ use gpu::{
 use lighting::{light_view_proj, SkyParams};
 
 const TEXTURE_DIR: &str = arbor_core::textures::TEXTURE_DIR;
-/// Where exports are written, relative to the repository root.
+/// Where exports go until another folder is chosen, relative to the repository root.
 const EXPORT_DIR: &str = "exports";
+/// Most trees one export may grow.
+const MAX_VARIATIONS: u32 = 1000;
 
 #[derive(Clone, Copy, PartialEq)]
 enum RenderMode {
@@ -144,19 +147,49 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Grows the tree `params` describes and writes it to `path`, returning the line the
-/// panel reports it with.
-fn export_tree(path: &Path, params: &SpeciesParams, options: &ExportOptions) -> Result<String, String> {
-    let skeleton = grow(params);
-    let mesh = build_mesh(&skeleton, params);
-    let leaves = build_leaves(&skeleton, params);
-    let report = gltf::export(path, &mesh, &leaves, params, options)?;
-    let mut message = format!("exported {} ({:.1} MB)", path.display(), report.bytes as f64 / 1e6);
+/// Grows `count` trees from `params` — its own seed, then each one after — and writes
+/// them into `dir` named after `name`, returning the line the panel reports it with.
+/// `progress` hears how many are done after each; returning false stops the batch.
+fn export_trees(
+    dir: &Path,
+    name: &str,
+    format: Format,
+    params: &SpeciesParams,
+    count: u32,
+    options: &ExportOptions,
+    progress: impl FnMut(u32) -> bool,
+) -> Result<String, String> {
+    let report = gltf::export_batch(dir, name, format, params, count, options, progress)?;
+    let size = report.bytes as f64 / 1e6;
+    let done = report.trees.len();
+    let mut message = if report.stopped {
+        format!("stopped after {done} of {count} trees in {} ({size:.1} MB)", dir.display())
+    } else if count == 1 {
+        format!("exported {} ({size:.1} MB)", report.trees[0].display())
+    } else {
+        format!("exported {done} trees to {} ({size:.1} MB)", dir.display())
+    };
     for warning in report.warnings {
         message.push_str("; ");
         message.push_str(&warning);
     }
     Ok(message)
+}
+
+/// What an export running on its own thread says as it goes.
+enum ExportEvent {
+    /// This many trees are written.
+    Progress(u32),
+    Finished(Result<String, String>),
+}
+
+/// An export running on its own thread.
+struct ExportJob {
+    events: std::sync::mpsc::Receiver<ExportEvent>,
+    /// Set to ask it to stop after the tree it is on.
+    stop: Arc<AtomicBool>,
+    done: u32,
+    total: u32,
 }
 
 /// What the save field offers for a preset once it is loaded: a saved one's own name,
@@ -268,10 +301,16 @@ struct App {
     status: Option<(String, bool)>,
     /// Delete has been clicked once and is waiting to be confirmed.
     confirm_delete: bool,
+    /// Folder exports are written to, as typed or picked.
+    export_dir: String,
+    /// How many trees an export grows, one per seed from the tree's own up.
+    export_variations: u32,
     /// Whether an export carries each vertex's wind data.
     export_wind: bool,
-    /// An export running on its own thread, and where its outcome will arrive.
-    export_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// Browse was clicked; the folder picker opens once the panel is drawn, where the
+    /// window it belongs to is to hand.
+    browse_requested: bool,
+    export_job: Option<ExportJob>,
     params: SpeciesParams,
     skeleton: Skeleton,
     stats: SkeletonStats,
@@ -381,7 +420,10 @@ impl App {
             save_name,
             status,
             confirm_delete: false,
+            export_dir: EXPORT_DIR.to_string(),
+            export_variations: 1,
             export_wind: false,
+            browse_requested: false,
             export_job: None,
             params,
             skeleton,
@@ -597,41 +639,80 @@ impl App {
         }
     }
 
-    /// Writes the tree as it stands to `exports/`, named as it would be saved, off the
-    /// UI thread: baking the leaf atlas and encoding the textures takes a second or two.
-    /// The tree is grown again there from a copy of the settings, which is the same
-    /// tree, since growth is deterministic, and cannot be a frame behind the panel.
-    fn start_export(&mut self, ext: &str) {
-        let key = match presets::key_for(&self.save_name) {
-            Ok(key) => key,
+    /// Where an export would go and what its files would be called, for the buttons
+    /// to say before they are pressed, or why it cannot go anywhere.
+    fn export_target(&self, format: Format) -> Result<(PathBuf, String), String> {
+        let name = presets::key_for(&self.save_name)?;
+        let dir = self.export_dir.trim();
+        if dir.is_empty() {
+            return Err("choose a folder to export to".to_string());
+        }
+        let count = self.export_variations.clamp(1, MAX_VARIATIONS);
+        let first = self.params.seed;
+        let files = if count == 1 {
+            gltf::batch_file(&name, format, first, 1)
+        } else {
+            format!(
+                "{count} trees, {} to {}",
+                gltf::batch_file(&name, format, first, count),
+                gltf::batch_file(&name, format, first.wrapping_add(u64::from(count) - 1), count)
+            )
+        };
+        Ok((PathBuf::from(dir), files))
+    }
+
+    /// Writes the tree as it stands, and as many more of the species as the panel asks
+    /// for, off the UI thread: growing a batch, baking the leaf atlas and encoding the
+    /// textures takes a while. Each tree is grown again there from a copy of the
+    /// settings, which gives the same tree, since growth is deterministic, and cannot
+    /// be a frame behind the panel.
+    fn start_export(&mut self, format: Format) {
+        let (dir, files) = match self.export_target(format) {
+            Ok(target) => target,
             Err(why) => {
                 self.status = Some((why, true));
                 return;
             }
         };
-        let path = Path::new(EXPORT_DIR).join(format!("{key}.{ext}"));
+        let name = presets::key_for(&self.save_name).expect("checked by export_target");
         let mut params = self.params.clone();
         params.name = self.save_name.trim().to_string();
+        let count = self.export_variations.clamp(1, MAX_VARIATIONS);
         let options = ExportOptions {
             textures: Some(TEXTURE_DIR.into()),
             wind: self.export_wind,
         };
-        self.status = Some((format!("exporting {}", path.display()), false));
-        let (tx, rx) = std::sync::mpsc::channel();
+        self.status = Some((format!("exporting {files} to {}", dir.display()), false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let asked_to_stop = Arc::clone(&stop);
+        let (tx, events) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(export_tree(&path, &params, &options));
+            let progress = tx.clone();
+            let outcome = export_trees(&dir, &name, format, &params, count, &options, |done| {
+                let _ = progress.send(ExportEvent::Progress(done));
+                !asked_to_stop.load(Ordering::Relaxed)
+            });
+            let _ = tx.send(ExportEvent::Finished(outcome));
         });
-        self.export_job = Some(rx);
+        self.export_job = Some(ExportJob {
+            events,
+            stop,
+            done: 0,
+            total: count,
+        });
     }
 
-    /// Picks up the outcome of a finished export.
+    /// Picks up how far an export has got, and its outcome once it is done.
     fn poll_export(&mut self) {
-        let Some(job) = &self.export_job else { return };
-        let outcome = match job.try_recv() {
-            Ok(outcome) => outcome,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err("the export stopped without finishing".to_string())
+        let Some(job) = &mut self.export_job else { return };
+        let outcome = loop {
+            match job.events.try_recv() {
+                Ok(ExportEvent::Progress(done)) => job.done = done,
+                Ok(ExportEvent::Finished(outcome)) => break outcome,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    break Err("the export stopped without finishing".to_string());
+                }
             }
         };
         self.status = Some(match outcome {
@@ -639,6 +720,25 @@ impl App {
             Err(why) => (format!("export failed: {why}"), true),
         });
         self.export_job = None;
+    }
+
+    /// The system's folder picker, opened over the viewer's window at the folder the
+    /// field names when there is one.
+    fn browse_export_dir(&mut self, frame: &eframe::Frame) {
+        let typed = Path::new(self.export_dir.trim());
+        let start = std::path::absolute(typed)
+            .ok()
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok());
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Export to")
+            .set_parent(frame);
+        if let Some(start) = start {
+            dialog = dialog.set_directory(start);
+        }
+        if let Some(dir) = dialog.pick_folder() {
+            self.export_dir = dir.display().to_string();
+        }
     }
 
     fn delete_preset(&mut self, i: usize) {
@@ -652,6 +752,81 @@ impl App {
             }
             Err(e) => self.status = Some((e, true)),
         }
+    }
+
+    /// Where exports go, how many trees they grow, and the buttons that start them.
+    fn export_ui(&mut self, ui: &mut egui::Ui) {
+        let idle = self.export_job.is_none();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Export to");
+            ui.add_enabled(
+                idle,
+                egui::TextEdit::singleline(&mut self.export_dir)
+                    .desired_width(160.0)
+                    .hint_text("folder"),
+            )
+            .on_hover_text(
+                "Folder the exports are written to, created if it is not there. A relative \
+                 path is taken from the folder the viewer was started in.",
+            );
+            if ui
+                .add_enabled(idle, egui::Button::new("Browse…"))
+                .on_hover_text("Pick the folder.")
+                .clicked()
+            {
+                self.browse_requested = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Variations");
+            ui.add_enabled(
+                idle,
+                egui::DragValue::new(&mut self.export_variations)
+                    .range(1..=MAX_VARIATIONS)
+                    .speed(0.2),
+            )
+            .on_hover_text(
+                "How many trees to export: this one, then the same species grown from each \
+                 seed after its own. With more than one, each file is named for its seed \
+                 (name_seed7.glb), so any of them can be grown again.",
+            );
+            ui.checkbox(&mut self.export_wind, "Wind data").on_hover_text(
+                "Also write each vertex's sway pivots and weights as custom attributes \
+                 (_WIND_1 to _WIND_3, and _LEAF_ORIGIN on leaves), for driving wind in an engine.",
+            );
+        });
+        ui.horizontal(|ui| {
+            for (label, format, what) in [
+                ("Export GLB", Format::Glb, "one self-contained file per tree, textures inside"),
+                ("Export glTF", Format::Gltf, "JSON per tree, with its buffer and the textures as files beside it"),
+            ] {
+                let target = self.export_target(format);
+                let button = ui.add_enabled(idle && target.is_ok(), egui::Button::new(label));
+                let button = match &target {
+                    Ok((dir, files)) => {
+                        button.on_hover_text(format!("Write {files} to {}: {what}.", dir.display()))
+                    }
+                    Err(why) => button.on_disabled_hover_text(why.as_str()),
+                };
+                if button.clicked() {
+                    self.start_export(format);
+                }
+            }
+            if let Some(job) = &self.export_job {
+                ui.spinner();
+                if job.total > 1 {
+                    ui.label(format!("{} / {}", job.done, job.total));
+                    if ui
+                        .button("Stop")
+                        .on_hover_text("Stop after the tree being written now. What is written stays.")
+                        .clicked()
+                    {
+                        job.stop.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
     }
 
     /// Picking, saving and deleting presets.
@@ -701,34 +876,7 @@ impl App {
             }
         });
 
-        ui.horizontal(|ui| {
-            ui.label("Export");
-            let idle = self.export_job.is_none();
-            let stem = presets::key_for(&self.save_name).map(|key| Path::new(EXPORT_DIR).join(key));
-            for (label, ext, what) in [
-                ("GLB", "glb", "one self-contained file, textures inside"),
-                ("glTF", "gltf", "JSON, with its buffer and textures as files beside it"),
-            ] {
-                let button = ui.add_enabled(idle && stem.is_ok(), egui::Button::new(label));
-                let button = match &stem {
-                    Ok(stem) => button.on_hover_text(format!(
-                        "Write the tree on screen to {}.{ext}: {what}.",
-                        stem.display()
-                    )),
-                    Err(why) => button.on_disabled_hover_text(why),
-                };
-                if button.clicked() {
-                    self.start_export(ext);
-                }
-            }
-            ui.checkbox(&mut self.export_wind, "Wind data").on_hover_text(
-                "Also write each vertex's sway pivots and weights as custom attributes \
-                 (_WIND_1 to _WIND_3, and _LEAF_ORIGIN on leaves), for driving wind in an engine.",
-            );
-            if !idle {
-                ui.spinner();
-            }
-        });
+        self.export_ui(ui);
 
         if let Some(i) = self.preset.filter(|&i| self.presets[i].is_saved()) {
             let name = self.presets[i].name.clone();
@@ -1030,7 +1178,7 @@ fn push_skeleton(skeleton: &Skeleton, verts: &mut Vec<f32>) {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // A capture run draws a few frames, asks egui for the finished image, writes
         // it and quits. What lands on disk is the real renderer, not a stand-in.
         if let Some(capture) = self.capture.clone() {
@@ -1060,6 +1208,9 @@ impl eframe::App for App {
             self.dirty = false;
         }
         self.poll_export();
+        if std::mem::take(&mut self.browse_requested) {
+            self.browse_export_dir(frame);
+        }
 
         if self.wind_on && !self.wind_paused {
             // Held to a tenth of a second so a stall — a regrow, a dragged window —
@@ -1314,23 +1465,38 @@ mod tests {
     use arbor_core::species::{builtin_presets, parse_species, ChildPattern};
 
     #[test]
-    fn an_export_writes_the_tree_and_says_where() {
+    fn an_export_writes_its_trees_and_says_where() {
         // What the panel's Export buttons run, less the thread it runs on.
         let (_, src) = builtin_presets()
             .into_iter()
             .find(|(name, _)| *name == "fir_open")
             .expect("the open-grown fir is a built-in");
-        let params = parse_species(src).unwrap();
+        let mut params = parse_species(src).unwrap();
+        params.seed = 7;
         let dir = std::env::temp_dir().join(format!("arbor-viewer-export-{}", std::process::id()));
-        let path = dir.join("fir_open_custom.glb");
         let options = ExportOptions {
             textures: Some("../../assets/textures".into()),
             wind: true,
         };
-        let message = export_tree(&path, &params, &options).unwrap();
+        let one = export_trees(&dir, "fir", Format::Glb, &params, 1, &options, |_| true).unwrap();
         // Any texture it could not find would be reported after a semicolon.
-        assert!(message.starts_with("exported") && !message.contains(';'), "{message}");
-        assert_eq!(&std::fs::read(&path).unwrap()[0..4], b"glTF");
+        assert!(one.starts_with("exported") && !one.contains(';'), "{one}");
+        assert_eq!(&std::fs::read(dir.join("fir.glb")).unwrap()[0..4], b"glTF");
+
+        let mut heard = Vec::new();
+        let three = export_trees(&dir, "fir", Format::Glb, &params, 3, &options, |done| {
+            heard.push(done);
+            true
+        })
+        .unwrap();
+        assert!(three.starts_with("exported 3 trees"), "{three}");
+        assert_eq!(heard, [1, 2, 3]);
+        for seed in 7..10 {
+            assert!(dir.join(format!("fir_seed{seed}.glb")).is_file());
+        }
+
+        let stopped = export_trees(&dir, "stop", Format::Glb, &params, 4, &options, |_| false).unwrap();
+        assert!(stopped.starts_with("stopped after 1 of 4"), "{stopped}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

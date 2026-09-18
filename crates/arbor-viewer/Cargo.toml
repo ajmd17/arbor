@@ -15,3 +15,4 @@ rand.workspace = true
 bytemuck.workspace = true
 image.workspace = true
 ron.workspace = true
+rfd.workspace = true

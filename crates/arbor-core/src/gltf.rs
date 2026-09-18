@@ -88,6 +88,13 @@ impl Format {
             _ => None,
         }
     }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::Glb => "glb",
+            Format::Gltf => "gltf",
+        }
+    }
 }
 
 /// What an export wrote, and anything it had to leave out.
@@ -98,6 +105,151 @@ pub struct ExportReport {
     pub warnings: Vec<String>,
 }
 
+/// A species' textures, read, baked and encoded once, ready to go into any number of
+/// exports of it. The leaf atlas of a clustering species is grown here, and every map
+/// is encoded here, which is most of what an export costs; a batch pays it once.
+#[derive(Default)]
+pub struct Textures {
+    bark_albedo: Option<Vec<u8>>,
+    bark_normal: Option<Vec<u8>>,
+    bark_roughness: Option<Vec<u8>>,
+    /// The bark albedo with the viewer's dead-wood bleaching baked in, for a species
+    /// that bleaches its dead wood.
+    dead_albedo: Option<Vec<u8>>,
+    leaf_albedo: Option<Vec<u8>>,
+    /// The leaf roughness, packed as glTF wants it.
+    leaf_roughness: Option<Vec<u8>>,
+    /// Maps that were looked for and not found.
+    pub warnings: Vec<String>,
+}
+
+impl Textures {
+    /// Reads the species' maps from `dir`. A missing map is reported in `warnings` and
+    /// left out, and the material it belongs to is exported without it.
+    pub fn load(params: &SpeciesParams, dir: &Path) -> Result<Self, String> {
+        let mut out = Textures::default();
+        let mp = &params.mesh;
+        let name = &mp.bark_texture;
+        // Bark maps go in as they are on disk, byte for byte: nothing needs changing.
+        let read = |map: &str| std::fs::read(textures::map_path(dir, name, map)).ok();
+        out.bark_albedo = read("albedo");
+        out.bark_normal = read("normal");
+        out.bark_roughness = read("roughness");
+        if out.bark_albedo.is_none() {
+            out.warnings.push(format!("no {name}_albedo.png: the bark is exported untextured"));
+        }
+        let bleach = mp.dead_wood_weathering.clamp(0.0, 1.0);
+        if bleach > 0.0
+            && let Some(bitmap) = textures::load_bitmap(&textures::map_path(dir, name, "albedo"))
+        {
+            let bleached = bleach_bark(&bitmap, mp.bark_tint, mp.dead_wood_color, bleach);
+            out.dead_albedo = Some(textures::encode_png(&bleached)?);
+        }
+
+        // A tree grown without leaves has no use for them, and growing a cluster atlas
+        // is the slowest thing here.
+        let lp = &params.leaves;
+        if lp.enabled {
+            match textures::load_leaf_maps(dir, lp) {
+                Some(maps) => {
+                    out.leaf_albedo = Some(textures::encode_png(&maps.albedo)?);
+                    if let Some(r) = &maps.roughness {
+                        out.leaf_roughness = Some(textures::encode_png(&leaf_roughness(r))?);
+                    }
+                }
+                None => out.warnings.push(format!(
+                    "no {}_albedo.png: the leaf cards are exported untextured",
+                    lp.texture
+                )),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Writes trees of one species, preparing its textures once however many are written.
+pub struct Exporter {
+    textures: Textures,
+    wind: bool,
+    /// What a `.gltf`'s image files are named after, in place of the file's own name,
+    /// so a batch of trees shares one set.
+    shared_images: Option<String>,
+    /// Image files this exporter has already written, which are not written again.
+    written: std::collections::HashSet<PathBuf>,
+}
+
+impl Exporter {
+    pub fn new(params: &SpeciesParams, options: &ExportOptions) -> Result<Self, String> {
+        let textures = match &options.textures {
+            Some(dir) => Textures::load(params, dir)?,
+            None => Textures::default(),
+        };
+        Ok(Self {
+            textures,
+            wind: options.wind,
+            shared_images: None,
+            written: Default::default(),
+        })
+    }
+
+    /// Maps that were looked for and not found.
+    pub fn warnings(&self) -> &[String] {
+        &self.textures.warnings
+    }
+
+    /// Names the image files of every `.gltf` written from here on `<name>_*.png`,
+    /// rather than after each `.gltf`, so trees written into one folder share them.
+    pub fn share_images(&mut self, name: &str) {
+        self.shared_images = Some(name.to_string());
+    }
+
+    /// Writes one tree to `path`, as a `.glb` or a `.gltf` by its extension. `params`
+    /// has to be the species the exporter was made for; only the seed may differ.
+    pub fn write(
+        &mut self,
+        path: &Path,
+        mesh: &Mesh,
+        leaves: &LeafMesh,
+        params: &SpeciesParams,
+    ) -> Result<ExportReport, String> {
+        let format = Format::from_path(path)
+            .ok_or_else(|| format!("{}: export to a .glb or a .gltf", path.display()))?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("tree")
+            .to_string();
+        let dir = path.parent().unwrap_or(Path::new(""));
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let images = self.shared_images.clone().unwrap_or_else(|| stem.clone());
+        let doc = build(format, &stem, &images, mesh, leaves, params, &self.textures, self.wind);
+        let mut report = ExportReport::default();
+        let mut write = |path: PathBuf, bytes: &[u8]| -> Result<(), String> {
+            std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+            report.bytes += bytes.len() as u64;
+            report.files.push(path);
+            Ok(())
+        };
+        match format {
+            Format::Glb => write(path.to_path_buf(), &doc.glb())?,
+            Format::Gltf => {
+                write(path.to_path_buf(), doc.json.as_bytes())?;
+                write(dir.join(format!("{stem}.bin")), &doc.bin)?;
+                for (name, bytes) in &doc.files {
+                    let file = dir.join(name);
+                    if self.written.insert(file.clone()) {
+                        write(file, bytes)?;
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
 /// Writes the tree to `path`, as a `.glb` or a `.gltf` by its extension.
 pub fn export(
     path: &Path,
@@ -106,39 +258,9 @@ pub fn export(
     params: &SpeciesParams,
     options: &ExportOptions,
 ) -> Result<ExportReport, String> {
-    let format = Format::from_path(path)
-        .ok_or_else(|| format!("{}: export to a .glb or a .gltf", path.display()))?;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("tree")
-        .to_string();
-    let dir = path.parent().unwrap_or(Path::new(""));
-    if !dir.as_os_str().is_empty() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let (doc, warnings) = build(format, &stem, mesh, leaves, params, options)?;
-    let mut report = ExportReport {
-        warnings,
-        ..Default::default()
-    };
-    let mut write = |path: PathBuf, bytes: &[u8]| -> Result<(), String> {
-        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        report.bytes += bytes.len() as u64;
-        report.files.push(path);
-        Ok(())
-    };
-    match format {
-        Format::Glb => write(path.to_path_buf(), &doc.glb())?,
-        Format::Gltf => {
-            write(path.to_path_buf(), doc.json.as_bytes())?;
-            write(dir.join(format!("{stem}.bin")), &doc.bin)?;
-            for (name, bytes) in &doc.files {
-                write(dir.join(name), bytes)?;
-            }
-        }
-    }
+    let mut exporter = Exporter::new(params, options)?;
+    let mut report = exporter.write(path, mesh, leaves, params)?;
+    report.warnings = exporter.textures.warnings;
     Ok(report)
 }
 
@@ -149,7 +271,74 @@ pub fn to_glb(
     params: &SpeciesParams,
     options: &ExportOptions,
 ) -> Result<Vec<u8>, String> {
-    Ok(build(Format::Glb, "tree", mesh, leaves, params, options)?.0.glb())
+    let exporter = Exporter::new(params, options)?;
+    let doc = build(Format::Glb, "tree", "tree", mesh, leaves, params, &exporter.textures, options.wind);
+    Ok(doc.glb())
+}
+
+/// What a batch wrote.
+#[derive(Clone, Debug, Default)]
+pub struct BatchReport {
+    /// The tree files, one per tree, in seed order. A `.gltf`'s buffer and images are
+    /// counted in `bytes` but not listed.
+    pub trees: Vec<PathBuf>,
+    pub bytes: u64,
+    pub warnings: Vec<String>,
+    /// Whether `progress` asked for it to stop before every tree was written.
+    pub stopped: bool,
+}
+
+/// The file a batch writes the tree grown from `seed` to: `<stem>.<ext>` when it is the
+/// only one, and `<stem>_seed<seed>.<ext>` when there are several, so any of them can
+/// be grown again from its name.
+pub fn batch_file(stem: &str, format: Format, seed: u64, count: u32) -> String {
+    if count <= 1 {
+        format!("{stem}.{}", format.extension())
+    } else {
+        format!("{stem}_seed{seed}.{}", format.extension())
+    }
+}
+
+/// Grows and writes `count` trees of one species into `dir`: the one `params`
+/// describes, and then the same species from each seed after its own. The textures are
+/// prepared once, and a batch of `.gltf` shares one set of image files, `<stem>_*.png`.
+///
+/// `progress` hears how many trees are done after each one; returning false from it
+/// stops the batch there.
+pub fn export_batch(
+    dir: &Path,
+    stem: &str,
+    format: Format,
+    params: &SpeciesParams,
+    count: u32,
+    options: &ExportOptions,
+    mut progress: impl FnMut(u32) -> bool,
+) -> Result<BatchReport, String> {
+    let count = count.max(1);
+    let mut exporter = Exporter::new(params, options)?;
+    if count > 1 {
+        exporter.share_images(stem);
+    }
+    let mut report = BatchReport {
+        warnings: exporter.warnings().to_vec(),
+        ..Default::default()
+    };
+    for i in 0..count {
+        let mut species = params.clone();
+        species.seed = params.seed.wrapping_add(u64::from(i));
+        let skeleton = crate::grow(&species);
+        let mesh = crate::build_mesh(&skeleton, &species);
+        let leaves = crate::build_leaves(&skeleton, &species);
+        let path = dir.join(batch_file(stem, format, species.seed, count));
+        let written = exporter.write(&path, &mesh, &leaves, &species)?;
+        report.bytes += written.bytes;
+        report.trees.push(path);
+        if !progress(i + 1) && i + 1 < count {
+            report.stopped = true;
+            break;
+        }
+    }
+    Ok(report)
 }
 
 /// A finished document: the JSON, the binary buffer it indexes into, and, for a
@@ -189,23 +378,26 @@ impl Document {
     }
 }
 
+/// The document for one tree. `stem` names a `.gltf`'s buffer file and `images` its
+/// image files.
+#[allow(clippy::too_many_arguments)]
 fn build(
     format: Format,
     stem: &str,
+    images: &str,
     mesh: &Mesh,
     leaves: &LeafMesh,
     params: &SpeciesParams,
-    options: &ExportOptions,
-) -> Result<(Document, Vec<String>), String> {
-    let mut doc = Builder::new(format, stem);
-    let mut warnings = Vec::new();
-    let texture_dir = options.textures.as_deref();
+    textures: &Textures,
+    wind: bool,
+) -> Document {
+    let mut doc = Builder::new(format, stem, images);
 
     let mut children = Vec::new();
     if !mesh.positions.is_empty() {
         let dead = mesh.weathering.iter().any(|&w| w > 0.5);
-        let materials = bark_materials(&mut doc, params, texture_dir, dead, &mut warnings)?;
-        let m = bark_mesh(&mut doc, mesh, params, materials, options.wind);
+        let materials = bark_materials(&mut doc, params, textures, dead);
+        let m = bark_mesh(&mut doc, mesh, params, materials, wind);
         children.push(doc.node(r#""name":"bark""#, m));
     }
     if !leaves.is_empty() {
@@ -213,8 +405,8 @@ fn build(
         let (cols, rows) = (lp.atlas_cols.max(1), lp.atlas_rows.max(1));
         let last = cols * rows - 1;
         let two_faced = lp.atlas_front.min(last) != lp.atlas_back.min(last);
-        let material = leaf_material(&mut doc, params, texture_dir, two_faced, &mut warnings)?;
-        let m = leaf_mesh(&mut doc, leaves, params, material, two_faced, options.wind);
+        let material = leaf_material(&mut doc, textures, two_faced);
+        let m = leaf_mesh(&mut doc, leaves, params, material, two_faced, wind);
         children.push(doc.node(r#""name":"leaves""#, m));
     }
 
@@ -223,7 +415,7 @@ fn build(
         json_str(&params.name),
         params.seed
     );
-    if options.wind {
+    if wind {
         let w = &params.wind;
         let _ = write!(
             extras,
@@ -241,7 +433,7 @@ fn build(
         json_str(&params.name)
     ));
     let scene = format!(r#"{{"name":{},"nodes":[{root}]}}"#, json_str(&params.name));
-    Ok((doc.finish(scene), warnings))
+    doc.finish(scene)
 }
 
 /// The living bark's material and, when the tree has dead wood the species bleaches,
@@ -249,32 +441,24 @@ fn build(
 fn bark_materials(
     doc: &mut Builder,
     params: &SpeciesParams,
-    texture_dir: Option<&Path>,
+    textures: &Textures,
     has_dead: bool,
-    warnings: &mut Vec<String>,
-) -> Result<(usize, Option<usize>), String> {
+) -> (usize, Option<usize>) {
     let mp = &params.mesh;
     let tint = mp.bark_tint;
     let bleach = mp.dead_wood_weathering.clamp(0.0, 1.0);
     let wants_dead = has_dead && bleach > 0.0;
-    let name = &mp.bark_texture;
 
-    // The maps go in as they are on disk, byte for byte, where nothing needs changing.
-    let read = |map: &str| {
-        texture_dir.and_then(|dir| std::fs::read(textures::map_path(dir, name, map)).ok())
-    };
-    let (albedo, normal, roughness) = (read("albedo"), read("normal"), read("roughness"));
-    if texture_dir.is_some() && albedo.is_none() {
-        warnings.push(format!("no {name}_albedo.png: the bark is exported untextured"));
-    }
     let repeat = doc.sampler(REPEAT);
-    let texture = |doc: &mut Builder, label: &str, png: Vec<u8>| {
-        let image = doc.image(label, png);
-        doc.texture(image, repeat)
+    let texture = |doc: &mut Builder, label: &str, png: &Option<Vec<u8>>| {
+        png.as_ref().map(|png| {
+            let image = doc.image(label, png);
+            doc.texture(image, repeat)
+        })
     };
-    let albedo_tex = albedo.map(|png| texture(doc, "bark_albedo", png));
-    let normal_tex = normal.map(|png| texture(doc, "bark_normal", png));
-    let rough_tex = roughness.map(|png| texture(doc, "bark_roughness", png));
+    let albedo_tex = texture(doc, "bark_albedo", &textures.bark_albedo);
+    let normal_tex = texture(doc, "bark_normal", &textures.bark_normal);
+    let rough_tex = texture(doc, "bark_roughness", &textures.bark_roughness);
 
     let living_color = match albedo_tex {
         Some(_) => tint,
@@ -293,14 +477,8 @@ fn bark_materials(
     let dead = if wants_dead {
         // The viewer blends dead wood toward one silver-grey keeping the grain of the
         // living bark; baking that into a copy of the albedo is the same picture.
-        let bleached = texture_dir
-            .and_then(|dir| textures::load_bitmap(&textures::map_path(dir, name, "albedo")))
-            .map(|bitmap| bleach_bark(&bitmap, tint, mp.dead_wood_color, bleach));
-        let (color, tex) = match bleached {
-            Some(bitmap) => {
-                let png = textures::encode_png(&bitmap)?;
-                ([1.0, 1.0, 1.0], Some(texture(doc, "dead_wood_albedo", png)))
-            }
+        let (color, tex) = match texture(doc, "dead_wood_albedo", &textures.dead_albedo) {
+            Some(tex) => ([1.0, 1.0, 1.0], Some(tex)),
             None => (lerp3(mul3(tint, BARK_FALLBACK), mp.dead_wood_color, bleach), None),
         };
         Some(doc.material(&pbr_material(
@@ -315,32 +493,18 @@ fn bark_materials(
     } else {
         None
     };
-    Ok((living, dead))
+    (living, dead)
 }
 
 /// The leaf cards' material: the art, or the cluster atlas grown from it, cut out at the
 /// viewer's alpha test.
-fn leaf_material(
-    doc: &mut Builder,
-    params: &SpeciesParams,
-    texture_dir: Option<&Path>,
-    two_faced: bool,
-    warnings: &mut Vec<String>,
-) -> Result<usize, String> {
-    let lp = &params.leaves;
-    let maps = texture_dir.and_then(|dir| textures::load_leaf_maps(dir, lp));
-    if texture_dir.is_some() && maps.is_none() {
-        warnings.push(format!(
-            "no {}_albedo.png: the leaf cards are exported untextured",
-            lp.texture
-        ));
-    }
+fn leaf_material(doc: &mut Builder, textures: &Textures, two_faced: bool) -> usize {
     // A card's own side is the only thing that tells the viewer which cell it reads,
     // so with two cells each side is its own card; with one, a card shows from both.
     let sided = if two_faced { "" } else { r#","doubleSided":true"# };
     let mask = format!(r#","alphaMode":"MASK","alphaCutoff":{}{sided}"#, num(LEAF_ALPHA_CUTOFF));
-    let Some(maps) = maps else {
-        return Ok(doc.material(&pbr_material(
+    let Some(albedo) = &textures.leaf_albedo else {
+        return doc.material(&pbr_material(
             "leaves",
             [0.12, 0.22, 0.06, 1.0],
             None,
@@ -348,20 +512,19 @@ fn leaf_material(
             LEAF_ROUGHNESS_DEFAULT,
             None,
             &mask,
-        )));
+        ));
     };
     let clamp = doc.sampler(CLAMP_TO_EDGE);
-    let albedo = doc.image("leaf_albedo", textures::encode_png(&maps.albedo)?);
+    let albedo = doc.image("leaf_albedo", albedo);
     let albedo = doc.texture(albedo, clamp);
-    let (rough_tex, rough_factor) = match &maps.roughness {
-        Some(r) => {
-            let packed = leaf_roughness(r);
-            let image = doc.image("leaf_roughness", textures::encode_png(&packed)?);
+    let (rough_tex, rough_factor) = match &textures.leaf_roughness {
+        Some(png) => {
+            let image = doc.image("leaf_roughness", png);
             (Some(doc.texture(image, clamp)), 1.0)
         }
         None => (None, LEAF_ROUGHNESS_DEFAULT),
     };
-    Ok(doc.material(&pbr_material(
+    doc.material(&pbr_material(
         "leaves",
         [1.0, 1.0, 1.0, 1.0],
         Some(albedo),
@@ -369,7 +532,7 @@ fn leaf_material(
         rough_factor,
         None,
         &mask,
-    )))
+    ))
 }
 
 /// Bark, split into living and dead wood where the dead wood has its own material.
@@ -569,7 +732,10 @@ fn pbr_material(
 /// buffer the accessors read.
 struct Builder {
     format: Format,
+    /// What a `.gltf`'s buffer file is named after.
     stem: String,
+    /// What a `.gltf`'s image files are named after.
+    images_stem: String,
     bin: Vec<u8>,
     views: Vec<String>,
     accessors: Vec<String>,
@@ -583,10 +749,11 @@ struct Builder {
 }
 
 impl Builder {
-    fn new(format: Format, stem: &str) -> Self {
+    fn new(format: Format, stem: &str, images_stem: &str) -> Self {
         Self {
             format,
             stem: stem.to_string(),
+            images_stem: images_stem.to_string(),
             bin: Vec::new(),
             views: Vec::new(),
             accessors: Vec::new(),
@@ -661,16 +828,16 @@ impl Builder {
     }
 
     /// A PNG, inside the buffer for a `.glb` and as a file beside a `.gltf`.
-    fn image(&mut self, label: &str, png: Vec<u8>) -> usize {
+    fn image(&mut self, label: &str, png: &[u8]) -> usize {
         let entry = match self.format {
             Format::Glb => {
-                let view = self.view(&png, None);
+                let view = self.view(png, None);
                 format!(r#"{{"name":{},"bufferView":{view},"mimeType":"image/png"}}"#, json_str(label))
             }
             Format::Gltf => {
-                let file = format!("{}_{label}.png", self.stem);
+                let file = format!("{}_{label}.png", self.images_stem);
                 let entry = format!(r#"{{"name":{},"uri":{}}}"#, json_str(label), json_str(&uri(&file)));
-                self.files.push((file, png));
+                self.files.push((file, png.to_vec()));
                 entry
             }
         };
@@ -1043,6 +1210,94 @@ mod tests {
         for a in ["_WIND_1", "_WIND_2", "_WIND_3", "_LEAF_ORIGIN"] {
             assert!(with.iter().any(|w| w == a), "no {a} in {with:?}");
         }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("arbor-gltf-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn fir_open() -> SpeciesParams {
+        let (_, src) = crate::species::builtin_presets()
+            .into_iter()
+            .find(|(name, _)| *name == "fir_open")
+            .expect("the open-grown fir is a built-in");
+        parse_species(src).unwrap()
+    }
+
+    #[test]
+    fn a_batch_grows_one_tree_per_seed_and_names_each_by_it() {
+        let dir = scratch("batch");
+        let mut params = fir_open();
+        params.seed = 41;
+        let report =
+            export_batch(&dir, "fir", Format::Glb, &params, 3, &ExportOptions::default(), |_| true)
+                .unwrap();
+        let names: Vec<String> = report
+            .trees
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["fir_seed41.glb", "fir_seed42.glb", "fir_seed43.glb"]);
+        assert!(!report.stopped);
+        // Each is its own tree: the seed it names is the one it was grown from, and no
+        // two came out the same.
+        let mut buffers = Vec::new();
+        for (path, seed) in report.trees.iter().zip(41u64..) {
+            let glb = std::fs::read(path).unwrap();
+            let (doc, bin) = chunks(&glb);
+            validate(&doc, bin);
+            let root = seq(get(&doc, "nodes")).last().unwrap();
+            assert_eq!(int(get(get(get(root, "extras"), "arbor"), "seed")), seed as usize);
+            buffers.push(bin.to_vec());
+        }
+        assert!(buffers[0] != buffers[1] && buffers[1] != buffers[2]);
+
+        // One tree is just the name.
+        let one = export_batch(&dir, "one", Format::Glb, &params, 1, &ExportOptions::default(), |_| true)
+            .unwrap();
+        assert_eq!(one.trees, [dir.join("one.glb")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_gltf_batch_shares_one_set_of_images() {
+        // The textures are the species', not the tree's, so twenty trees should not
+        // write twenty copies of the leaf atlas.
+        let dir = scratch("shared");
+        let options = ExportOptions {
+            textures: Some(PathBuf::from("../../assets/textures")),
+            wind: false,
+        };
+        let report = export_batch(&dir, "fir", Format::Gltf, &fir_open(), 2, &options, |_| true).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let mut uris = Vec::new();
+        for tree in &report.trees {
+            let doc: Value = ron::from_str(&std::fs::read_to_string(tree).unwrap()).unwrap();
+            let images: Vec<String> = seq(get(&doc, "images")).iter().map(|i| text(get(i, "uri"))).collect();
+            assert!(images.iter().all(|u| u.starts_with("fir_") && dir.join(u).is_file()));
+            uris.push(images);
+        }
+        assert_eq!(uris[0], uris[1], "the two trees name different images");
+        let pngs = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "png"))
+            .count();
+        assert_eq!(pngs, uris[0].len(), "images were written once per tree");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_batch_stops_when_asked() {
+        let dir = scratch("stop");
+        let report = export_batch(&dir, "fir", Format::Glb, &fir_open(), 5, &ExportOptions::default(), |done| {
+            done < 2
+        })
+        .unwrap();
+        assert!(report.stopped);
+        assert_eq!(report.trees.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

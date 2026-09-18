@@ -61,19 +61,33 @@ exported mesh has no such shader).
 
 ## Exporting glTF
 
-From the viewer, **Export → GLB** or **glTF** (under **Save as**) writes the tree on
-screen to `exports/<name>.glb` or `.gltf`, named as it would be saved. From the CLI:
+In the viewer, under **Save as**:
+
+- **Export to** is the folder exports go to (`exports` by default, created if it's
+  missing). Type a path or pick one with **Browse…**.
+- **Variations** is how many trees to write: the one on screen, then the same species
+  grown from each seed after its own.
+- **Export GLB** / **Export glTF** write them, named as the preset would be saved:
+  `<name>.glb` for one tree, `<name>_seed<N>.glb` for each of a batch, so any of them
+  can be grown again from its seed. A batch shows its progress and can be stopped
+  between trees.
+
+From the CLI:
 
 ```bash
 cargo run --release -p arbor-cli -- oak --seed 7 --glb oak.glb
 ```
 
 ```bash
-cargo run --release -p arbor-cli -- oak --gltf out/oak.gltf --wind-data
+cargo run --release -p arbor-cli -- oak --seed 7 --gltf out/oak.gltf --variations 10 --wind-data
 ```
 
-A `.glb` is one self-contained file. A `.gltf` is JSON, with `<name>.bin` and the
-textures as `<name>_*.png` written beside it. Textures are read from
+The second writes `out/oak_seed7.gltf` through `out/oak_seed16.gltf`.
+
+A `.glb` is one self-contained file. A `.gltf` is JSON, with its `.bin` and the
+textures as `<name>_*.png` written beside it. A batch of `.gltf` files shares one set
+of textures, since they're the species' rather than the tree's. Textures are
+prepared once per export, however many trees it writes. Textures are read from
 `assets/textures`; `--textures <dir>` reads them from somewhere else, and
 `--no-textures` leaves them out.
 

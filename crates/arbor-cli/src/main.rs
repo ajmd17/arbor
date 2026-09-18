@@ -16,6 +16,7 @@ fn main() {
     let mut gltf_out: Vec<String> = Vec::new();
     let mut texture_dir: Option<String> = Some(TEXTURE_DIR.to_string());
     let mut wind_data = false;
+    let mut variations: u32 = 1;
     let mut no_leaves = false;
 
     let mut i = 0;
@@ -47,6 +48,16 @@ fn main() {
             }
             "--no-textures" => texture_dir = None,
             "--wind-data" => wind_data = true,
+            "--variations" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse::<u32>().ok()) {
+                    Some(n) if n >= 1 => variations = n,
+                    _ => {
+                        eprintln!("--variations needs a count of one or more");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--no-leaves" => no_leaves = true,
             "--help" | "-h" => {
                 print_usage();
@@ -113,15 +124,40 @@ fn main() {
     };
     for path in gltf_out {
         let t = std::time::Instant::now();
-        match gltf::export(std::path::Path::new(&path), &mesh, &leaves, &params, &options) {
+        let path = std::path::Path::new(&path);
+        let Some(format) = gltf::Format::from_path(path) else {
+            eprintln!("{}: export to a .glb or a .gltf", path.display());
+            std::process::exit(1);
+        };
+        let dir = path.parent().unwrap_or(std::path::Path::new(""));
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("tree");
+        // The batch grows each tree again, which for the one already grown above is the
+        // same tree: growth is deterministic.
+        let report = gltf::export_batch(dir, stem, format, &params, variations, &options, |done| {
+            if variations > 1 {
+                eprint!("\rexporting {done}/{variations}");
+            }
+            true
+        });
+        if variations > 1 {
+            eprintln!();
+        }
+        match report {
             Ok(report) => {
                 for warning in &report.warnings {
                     eprintln!("warning: {warning}");
                 }
+                let what = match report.trees.as_slice() {
+                    [one] => one.display().to_string(),
+                    trees => format!(
+                        "{} trees, {} to {}",
+                        trees.len(),
+                        trees[0].display(),
+                        trees[trees.len() - 1].display()
+                    ),
+                };
                 println!(
-                    "gltf:    {path} ({} file{}, {:.1} MB, {:.0} ms)",
-                    report.files.len(),
-                    if report.files.len() == 1 { "" } else { "s" },
+                    "gltf:    {what} ({:.1} MB, {:.0} ms)",
                     report.bytes as f64 / 1e6,
                     t.elapsed().as_secs_f64() * 1000.0
                 );
@@ -219,7 +255,7 @@ fn print_usage() {
     );
     println!(
         "          [--obj out.obj] [--glb out.glb] [--gltf out.gltf] \
-         [--textures DIR | --no-textures] [--wind-data]"
+         [--textures DIR | --no-textures] [--wind-data] [--variations N]"
     );
     println!("Grows a tree, builds bark and leaf meshes, prints stats.");
     println!("A saved preset is one saved from the viewer, found by name in {CUSTOM_PRESET_DIR}.");
@@ -229,4 +265,6 @@ fn print_usage() {
     println!("  Textures are read from {TEXTURE_DIR} unless --textures says otherwise;");
     println!("  --no-textures leaves them out. --wind-data adds each vertex's sway pivots");
     println!("  and weights as custom attributes, for driving wind in an engine.");
+    println!("  --variations N writes N trees, from the seed and each one after it, each");
+    println!("  named for its seed: out_seed7.glb, out_seed8.glb, and so on.");
 }

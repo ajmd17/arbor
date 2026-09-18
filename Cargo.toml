@@ -18,5 +18,7 @@ eframe = { version = "0.32", default-features = false, features = ["default_font
 egui = "0.32"
 egui_glow = "0.32"
 glow = "0.16"
+# Native folder picker for choosing where exports go.
+rfd = "0.17"
 
 arbor-core = { path = "crates/arbor-core" }
