@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::envelope::EnvelopeParams;
+use crate::ranged::{key, map_array, Ranged, Scalar};
 
 pub const PINE_RON: &str = include_str!("../../../assets/species/pine.ron");
 pub const OAK_RON: &str = include_str!("../../../assets/species/oak.ron");
@@ -27,26 +28,45 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-pub fn parse_species(ron_src: &str) -> Result<SpeciesParams, String> {
+/// A species as its file describes it: a kind of tree, any of whose numbers may be a
+/// range for each tree grown from it to land in. `instance` gives the one tree its
+/// seed lands on. See `ranged`.
+pub type SpeciesTemplate = SpeciesParams<Ranged>;
+
+/// A species file, ranges and all.
+pub fn parse_template(ron_src: &str) -> Result<SpeciesTemplate, String> {
     ron::from_str(ron_src).map_err(|e| e.to_string())
 }
 
+/// The tree a species file grows at its own seed.
+///
+/// Any range in the file has already landed here, at the seed the file names. To grow
+/// the species at another seed, set the seed on `parse_template` and take its
+/// `instance`: changing `seed` on what this returns grows a different tree from the
+/// numbers the file's own seed landed on, which is not a tree the species would grow.
+pub fn parse_species(ron_src: &str) -> Result<SpeciesParams, String> {
+    parse_template(ron_src).map(|t| t.instance())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SpeciesParams {
+#[serde(
+    default = "SpeciesParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct SpeciesParams<V = f32> {
     pub name: String,
     pub seed: u64,
     pub max_levels: u8,
     pub max_split_depth: u32,
-    pub trunk: StemParams,
-    pub branch_levels: Vec<StemParams>,
-    pub gravity_multiplier: f32,
-    pub phototropism_multiplier: f32,
-    pub envelope_scale: f32,
-    pub leaves: LeafParams,
-    pub wind: WindParams,
-    pub mesh: MeshParams,
-    pub envelope: EnvelopeParams,
+    pub trunk: StemParams<V>,
+    pub branch_levels: Vec<StemParams<V>>,
+    pub gravity_multiplier: V,
+    pub phototropism_multiplier: V,
+    pub envelope_scale: V,
+    pub leaves: LeafParams<V>,
+    pub wind: WindParams<V>,
+    pub mesh: MeshParams<V>,
+    pub envelope: EnvelopeParams<V>,
 }
 
 impl Default for SpeciesParams {
@@ -69,7 +89,68 @@ impl Default for SpeciesParams {
     }
 }
 
+impl<V: Scalar> SpeciesParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        SpeciesParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> SpeciesParams<W> {
+        SpeciesParams {
+            name: self.name.clone(),
+            seed: self.seed,
+            max_levels: self.max_levels,
+            max_split_depth: self.max_split_depth,
+            trunk: self.trunk.map(&key(at, "trunk"), f),
+            branch_levels: self
+                .branch_levels
+                .iter()
+                .enumerate()
+                .map(|(i, level)| level.map(&key(at, &format!("branch_levels.{i}")), f))
+                .collect(),
+            gravity_multiplier: f(&key(at, "gravity_multiplier"), self.gravity_multiplier),
+            phototropism_multiplier: f(
+                &key(at, "phototropism_multiplier"),
+                self.phototropism_multiplier,
+            ),
+            envelope_scale: f(&key(at, "envelope_scale"), self.envelope_scale),
+            leaves: self.leaves.map(&key(at, "leaves"), f),
+            wind: self.wind.map(&key(at, "wind"), f),
+            mesh: self.mesh.map(&key(at, "mesh"), f),
+            envelope: self.envelope.map(&key(at, "envelope"), f),
+        }
+    }
+}
+
+impl SpeciesTemplate {
+    /// The one tree this species grows at its seed: every range pinned to wherever the
+    /// seed lands in it, every fixed number as it is.
+    pub fn instance(&self) -> SpeciesParams {
+        let seed = self.seed;
+        self.map("", &mut |key, v| v.land(seed, key))
+    }
+
+    /// Every number given as a range, by key — `trunk.length`, `branch_levels.0.droop` —
+    /// with where this species' seed lands in it.
+    pub fn landings(&self) -> Vec<(String, Ranged, f32)> {
+        let seed = self.seed;
+        let mut found = Vec::new();
+        self.map("", &mut |key, v| {
+            if v.is_range() {
+                found.push((key.to_string(), v, v.land(seed, key)));
+            }
+        });
+        found
+    }
+}
+
 impl SpeciesParams {
+    /// A species that grows exactly these numbers, whatever its seed.
+    pub fn template(&self) -> SpeciesTemplate {
+        self.map("", &mut |_, v| Ranged::Fixed(v))
+    }
+
     /// The crown envelope as the tree is grown against it: scaled by `envelope_scale`,
     /// and stretched along the trunk to follow it when the volumes were drawn for a
     /// trunk of a different length.
@@ -91,35 +172,38 @@ impl SpeciesParams {
 /// from finite differences of the radius: anything smooth gets correct shading for
 /// free, and anything that is not shows up as faceting.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BarkIrregularity {
+#[serde(
+    default = "BarkIrregularity::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct BarkIrregularity<V = f32> {
     /// Depth of the flutes running up the stem, as a fraction of its radius.
-    pub flute_depth: f32,
+    pub flute_depth: V,
     /// Roughly how many flutes go round. Several frequencies are mixed around this,
     /// so the cross-section does not come out as a tidy cog.
-    pub flute_waves: f32,
+    pub flute_waves: V,
     /// How far the flutes wind around the stem, in turns per metre.
-    pub flute_twist: f32,
+    pub flute_twist: V,
     /// Slow swelling and waisting along the length, as a fraction of the radius.
-    pub swell_depth: f32,
+    pub swell_depth: V,
     /// Length of the longest swelling, in metres.
-    pub swell_period: f32,
+    pub swell_period: V,
     /// Burls per metre of stem thick enough to carry them.
-    pub burl_density: f32,
+    pub burl_density: V,
     /// How far a burl stands out, as a fraction of the radius.
-    pub burl_depth: f32,
+    pub burl_depth: V,
     /// Width of a burl in metres, before it is scaled to the stem.
-    pub burl_size: f32,
+    pub burl_size: V,
     /// Knots per metre of stem thick enough to carry them.
     ///
     /// Where a limb was lost the bark grows over it, leaving a dimple inside a raised
     /// collar. It is the single most recognisable mark on an old bole, and nothing
     /// else in this model makes a hollow rather than a bump.
-    pub knot_density: f32,
+    pub knot_density: V,
     /// How deep the dimple runs, as a fraction of the stem's radius.
-    pub knot_depth: f32,
+    pub knot_depth: V,
     /// Width of a knot in metres, before it is scaled to the stem.
-    pub knot_size: f32,
+    pub knot_size: V,
     /// How far below the lowest branch a stem still carries, as a multiple of its own
     /// radius, a knot may sit.
     ///
@@ -128,35 +212,35 @@ pub struct BarkIrregularity {
     /// the wood a little under it is where the ones already shed used to be. Below
     /// that is clean bole that never carried a limb — which on a trunk is the stretch
     /// at eye level that anyone standing by the tree looks at hardest.
-    pub knot_reach: f32,
+    pub knot_reach: V,
     /// Smallest stem that may carry a knot, as a multiple of the knot's own width.
     ///
     /// Growing over a lost branch takes years of wood laid on around it, so a stem no
     /// thicker than the scar is younger than the scar it would be wearing. It also
     /// keeps a knot from wrapping most of the way round a thin stem, which reads as a
     /// bite taken out of it rather than as a scar on it.
-    pub knot_min_stem: f32,
+    pub knot_min_stem: V,
     /// Height of the branch bark ridge: the raised seam that runs up the parent from
     /// a crotch, where the bark of the two stems meets and is pushed out. It is the
     /// most recognisable mark a living junction leaves, and nothing else here makes it.
-    pub bark_ridge: f32,
+    pub bark_ridge: V,
     /// Swelling where a branch leaves, as a fraction of the child's radius. A real
     /// trunk thickens into every limb it carries rather than meeting it at a seam.
-    pub collar_depth: f32,
+    pub collar_depth: V,
     /// Stems thinner than this stay clean: a twig has no room for any of it, and
     /// paying for the rings to describe it would be waste.
-    pub min_radius: f32,
+    pub min_radius: V,
     /// Rings per metre on stems that do carry the detail, before the ones that are
     /// not earning their place are dropped again. The skeleton is segmented for
     /// growth, far too coarsely to show a burl.
-    pub rings_per_meter: f32,
+    pub rings_per_meter: V,
     /// How far the surface may move when a ring is dropped, in metres.
     ///
     /// Rings are laid down densely and then thinned against this, so a smooth stretch
     /// of bole costs what a smooth stretch should and the rings end up where the shape
     /// actually needs them. Capped at `silhouette_tolerance`, so the surface is held to
     /// one budget along the stem and around it rather than two that disagree.
-    pub ring_tolerance: f32,
+    pub ring_tolerance: V,
 }
 
 impl Default for BarkIrregularity {
@@ -184,17 +268,51 @@ impl Default for BarkIrregularity {
     }
 }
 
+impl<V: Scalar> BarkIrregularity<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        BarkIrregularity::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> BarkIrregularity<W> {
+        BarkIrregularity {
+            flute_depth: f(&key(at, "flute_depth"), self.flute_depth),
+            flute_waves: f(&key(at, "flute_waves"), self.flute_waves),
+            flute_twist: f(&key(at, "flute_twist"), self.flute_twist),
+            swell_depth: f(&key(at, "swell_depth"), self.swell_depth),
+            swell_period: f(&key(at, "swell_period"), self.swell_period),
+            burl_density: f(&key(at, "burl_density"), self.burl_density),
+            burl_depth: f(&key(at, "burl_depth"), self.burl_depth),
+            burl_size: f(&key(at, "burl_size"), self.burl_size),
+            knot_density: f(&key(at, "knot_density"), self.knot_density),
+            knot_depth: f(&key(at, "knot_depth"), self.knot_depth),
+            knot_size: f(&key(at, "knot_size"), self.knot_size),
+            knot_reach: f(&key(at, "knot_reach"), self.knot_reach),
+            knot_min_stem: f(&key(at, "knot_min_stem"), self.knot_min_stem),
+            bark_ridge: f(&key(at, "bark_ridge"), self.bark_ridge),
+            collar_depth: f(&key(at, "collar_depth"), self.collar_depth),
+            min_radius: f(&key(at, "min_radius"), self.min_radius),
+            rings_per_meter: f(&key(at, "rings_per_meter"), self.rings_per_meter),
+            ring_tolerance: f(&key(at, "ring_tolerance"), self.ring_tolerance),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MeshParams {
-    pub uv_scale: f32,
+#[serde(
+    default = "MeshParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct MeshParams<V = f32> {
+    pub uv_scale: V,
     /// How far a swept tube may cut the corner off the circle it stands for, in metres.
     ///
     /// A stem sweept at `n` sides misses its true radius by `r * (1 - cos(pi/n))` at
     /// every corner, so this decides the sides directly: thick stems earn more of them
     /// and twigs earn fewer, which is what a fixed count per metre of radius could not
     /// express. A quarter of a centimetre is about a pixel on a trunk filling a screen.
-    pub silhouette_tolerance: f32,
+    pub silhouette_tolerance: V,
     pub min_radial: u32,
     /// Stems thinner than this get no bark at all.
     ///
@@ -202,7 +320,7 @@ pub struct MeshParams {
     /// and each is a sliver a centimetre across carrying leaf cards many times its own
     /// size. Under foliage they cannot be seen at all; bare, a few millimetres costs
     /// only the finest hairs. Zero keeps every one of them.
-    pub min_bark_radius: f32,
+    pub min_bark_radius: V,
     /// Shallowest level the bark cutoffs may cull from. Stems above it are always
     /// swept, however thin.
     ///
@@ -213,63 +331,63 @@ pub struct MeshParams {
     pub cull_from_level: u32,
     pub max_radial: u32,
     /// How much wider than the bole the buttress gets where it meets the ground.
-    pub root_flare: f32,
+    pub root_flare: V,
     /// How far up the bole the buttress reaches.
-    pub flare_height: f32,
+    pub flare_height: V,
     /// Buttress roots around the foot of the trunk. A mature broadleaf stands on a
     /// handful of distinct ridges running down into the ground, not on a cone.
     pub root_count: u32,
     /// How peaked those ridges are. At 1 they are a smooth wave; higher narrows each
     /// root and opens the hollow between them, which is what reads as buttressing.
-    pub root_sharpness: f32,
+    pub root_sharpness: V,
     /// How quickly the buttress dies away with height. Higher keeps it to the foot.
-    pub root_taper: f32,
+    pub root_taper: V,
     /// How much the buttress lobes narrow into separate arms as they near the ground.
     /// At zero the flare stays an unbroken skirt all the way down.
-    pub root_split: f32,
+    pub root_split: V,
     /// How far the roots carry on below the ground, in metres.
     ///
     /// A trunk that stops dead at the ground plane is a cut cylinder. Carrying it a
     /// little way under lets the ground hide the cap, and the roots read as going into
     /// the soil rather than being sawn off level with it.
-    pub root_depth: f32,
+    pub root_depth: V,
     /// Depth of the finer grooves running down each buttress root.
-    pub root_grooves: f32,
-    pub tip_length: f32,
-    pub socket_flare: f32,
+    pub root_grooves: V,
+    pub tip_length: V,
+    pub socket_flare: V,
     /// How tightly the socket flare gathers at the very foot of a branch.
     ///
     /// A limb does not widen evenly into its parent, it trumpets: nearly all of the
     /// extra girth is in the last few centimetres before the bark of the two meet.
     /// Higher values pull the flare into that last stretch, which is what stands in
     /// for a fillet where two swept tubes just intersect.
-    pub socket_power: f32,
+    pub socket_power: V,
     /// How much more the socket flares on the underside of a limb than on top, where
     /// a branch lays down extra wood to carry its own weight.
-    pub socket_bias: f32,
+    pub socket_bias: V,
     /// Base name of the bark texture set under `assets/textures`.
     pub bark_texture: String,
     /// Colour of the moss and lichen that grows on the bark.
-    pub moss_color: [f32; 3],
+    pub moss_color: [V; 3],
     /// How far up the tree moss reaches, in metres.
-    pub moss_height: f32,
+    pub moss_height: V,
     /// How much of the bark it takes at its thickest. Zero is bare bark.
-    pub moss_amount: f32,
+    pub moss_amount: V,
     /// How much darker the bark is at the foot of the tree than high in the crown.
     /// Old bark low down weathers and holds damp; new wood above it does not.
-    pub bark_darken_low: f32,
+    pub bark_darken_low: V,
     /// Colour multiplier over the bark texture, for pulling a bark set to the tone a
     /// species wants without re-authoring the art.
-    pub bark_tint: [f32; 3],
+    pub bark_tint: [V; 3],
     /// Colour dead wood weathers toward.
     ///
     /// A branch that has lost its bark, or kept it and been bleached for years, goes
     /// silver-grey whatever the living bark was, and on a conifer that is what makes
     /// the dead lower limbs read as dead at a glance rather than as bare living ones.
-    pub dead_wood_color: [f32; 3],
+    pub dead_wood_color: [V; 3],
     /// How far dead wood has gone toward `dead_wood_color`, from 0 to 1. The grain
     /// of the bark is kept and only its colour is pulled across.
-    pub dead_wood_weathering: f32,
+    pub dead_wood_weathering: V,
     /// Bare dead wood thinner than this gets no bark, in metres. Zero follows
     /// `min_bark_radius`.
     ///
@@ -279,8 +397,8 @@ pub struct MeshParams {
     /// the living twigs do. Bare means reaching the trunk through nothing but dead
     /// wood. A dead twig on a living limb is inside the crown, hidden as well as any
     /// living one, and takes `min_bark_radius` like them.
-    pub dead_bark_radius: f32,
-    pub irregularity: BarkIrregularity,
+    pub dead_bark_radius: V,
+    pub irregularity: BarkIrregularity<V>,
 }
 
 impl Default for MeshParams {
@@ -318,30 +436,74 @@ impl Default for MeshParams {
     }
 }
 
+impl<V: Scalar> MeshParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        MeshParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> MeshParams<W> {
+        MeshParams {
+            uv_scale: f(&key(at, "uv_scale"), self.uv_scale),
+            silhouette_tolerance: f(&key(at, "silhouette_tolerance"), self.silhouette_tolerance),
+            min_radial: self.min_radial,
+            min_bark_radius: f(&key(at, "min_bark_radius"), self.min_bark_radius),
+            cull_from_level: self.cull_from_level,
+            max_radial: self.max_radial,
+            root_flare: f(&key(at, "root_flare"), self.root_flare),
+            flare_height: f(&key(at, "flare_height"), self.flare_height),
+            root_count: self.root_count,
+            root_sharpness: f(&key(at, "root_sharpness"), self.root_sharpness),
+            root_taper: f(&key(at, "root_taper"), self.root_taper),
+            root_split: f(&key(at, "root_split"), self.root_split),
+            root_depth: f(&key(at, "root_depth"), self.root_depth),
+            root_grooves: f(&key(at, "root_grooves"), self.root_grooves),
+            tip_length: f(&key(at, "tip_length"), self.tip_length),
+            socket_flare: f(&key(at, "socket_flare"), self.socket_flare),
+            socket_power: f(&key(at, "socket_power"), self.socket_power),
+            socket_bias: f(&key(at, "socket_bias"), self.socket_bias),
+            bark_texture: self.bark_texture.clone(),
+            moss_color: map_array(&key(at, "moss_color"), self.moss_color, f),
+            moss_height: f(&key(at, "moss_height"), self.moss_height),
+            moss_amount: f(&key(at, "moss_amount"), self.moss_amount),
+            bark_darken_low: f(&key(at, "bark_darken_low"), self.bark_darken_low),
+            bark_tint: map_array(&key(at, "bark_tint"), self.bark_tint, f),
+            dead_wood_color: map_array(&key(at, "dead_wood_color"), self.dead_wood_color, f),
+            dead_wood_weathering: f(&key(at, "dead_wood_weathering"), self.dead_wood_weathering),
+            dead_bark_radius: f(&key(at, "dead_bark_radius"), self.dead_bark_radius),
+            irregularity: self.irregularity.map(&key(at, "irregularity"), f),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct StemParams {
-    pub length: f32,
-    pub length_variance: f32,
+#[serde(
+    default = "StemParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct StemParams<V = f32> {
+    pub length: V,
+    pub length_variance: V,
     /// Base radius of a stem at this level growing at full vigor. The trunk uses it
     /// directly; a branch takes the smaller of this and `radius_ratio` of whatever
     /// its parent measures where it attaches.
-    pub radius: f32,
+    pub radius: V,
     /// Ceiling on a stem base radius as a fraction of its parent at the attachment
     /// point. Applied once per stem, never per segment.
-    pub radius_ratio: f32,
-    pub taper: f32,
-    pub da_vinci_exponent: f32,
-    pub segment_length: f32,
-    pub curvature: f32,
-    pub phototropism: f32,
-    pub gravity: f32,
+    pub radius_ratio: V,
+    pub taper: V,
+    pub da_vinci_exponent: V,
+    pub segment_length: V,
+    pub curvature: V,
+    pub phototropism: V,
+    pub gravity: V,
     /// How much further a stem sags toward its tip than at its base.
     ///
     /// Gravity on its own bends a stem evenly, which is not how a limb behaves: the
     /// bending moment accumulates along it while the wood thins, so the last part of a
     /// long branch droops far more than the first. Zero keeps the even bend.
-    pub droop: f32,
+    pub droop: V,
     /// How far a stem jogs sideways at each node, in degrees.
     ///
     /// A shoot is not one smooth curve. The terminal bud aborts at the end of each
@@ -350,11 +512,11 @@ pub struct StemParams {
     /// net turn and a stem still goes where the rest of the model sends it; what it
     /// changes is that the wood stops reading as extruded. It matters most on the fine
     /// levels, which are short enough that nothing else bends them measurably.
-    pub zigzag_deg: f32,
-    pub vigor_falloff: f32,
-    pub split_probability: f32,
+    pub zigzag_deg: V,
+    pub vigor_falloff: V,
+    pub split_probability: V,
     /// How far a co-dominant fork leans away from the stem it splits from.
-    pub split_angle_deg: f32,
+    pub split_angle_deg: V,
     /// Turning a stem of this level may bank, in radians per metre of its own length.
     /// Zero takes the model's own figure.
     ///
@@ -364,7 +526,7 @@ pub struct StemParams {
     /// has to come back on itself to stay inside, and the result is a shepherd's crook.
     /// A species whose limbs are stiff, or long against the crown they grow in, wants
     /// less than the default.
-    pub turn_bank: f32,
+    pub turn_bank: V,
     /// How evenly a fork divides the drive of the stem it leaves.
     ///
     /// At 0 the fork is a side branch: it takes the smaller share and the original
@@ -373,30 +535,30 @@ pub struct StemParams {
     /// does exactly that — it gives up its leader partway up and builds the crown out
     /// of three or four co-dominant limbs — and that one difference is most of what
     /// separates a rounded oak from a conical spruce.
-    pub split_evenness: f32,
+    pub split_evenness: V,
     /// Length left behind when the crown prunes a stem on its very first segment.
     /// Those are branches born outside the crown, which on a real conifer are the
     /// dead stubs along the bare lower trunk. Zero removes them entirely.
-    pub dead_stub_length: f32,
+    pub dead_stub_length: V,
     /// Share of stems at this level that the tree has lost.
     ///
     /// Every mature broadleaf carries dead wood: branches shaded out by their own
     /// neighbours that never shed. They keep their bark, carry no leaves, and end in a
     /// break. The weakest go first, so this is weighted by vigor rather than drawn
     /// evenly.
-    pub dieback: f32,
+    pub dieback: V,
     /// Radius at which dead wood still stands, in metres.
     ///
     /// A dead limb thicker than this keeps its length; anything thinner snaps back
     /// toward its base, and the thinner it is the less of it is left. Without this a
     /// dead twig stands intact above the crown for ever, which is the one thing dead
     /// wood never does.
-    pub snap_radius: f32,
+    pub snap_radius: V,
     /// Earliest point along a stem, as a fraction of its length, where it may fork.
     /// Without it a trunk can split at ground level and grow a second pole flush
     /// against the first.
-    pub split_start_fraction: f32,
-    pub children: ChildParams,
+    pub split_start_fraction: V,
+    pub children: ChildParams<V>,
 }
 
 impl StemParams {
@@ -458,28 +620,66 @@ impl Default for StemParams {
     }
 }
 
+impl<V: Scalar> StemParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        StemParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> StemParams<W> {
+        StemParams {
+            length: f(&key(at, "length"), self.length),
+            length_variance: f(&key(at, "length_variance"), self.length_variance),
+            radius: f(&key(at, "radius"), self.radius),
+            radius_ratio: f(&key(at, "radius_ratio"), self.radius_ratio),
+            taper: f(&key(at, "taper"), self.taper),
+            da_vinci_exponent: f(&key(at, "da_vinci_exponent"), self.da_vinci_exponent),
+            segment_length: f(&key(at, "segment_length"), self.segment_length),
+            curvature: f(&key(at, "curvature"), self.curvature),
+            phototropism: f(&key(at, "phototropism"), self.phototropism),
+            gravity: f(&key(at, "gravity"), self.gravity),
+            droop: f(&key(at, "droop"), self.droop),
+            zigzag_deg: f(&key(at, "zigzag_deg"), self.zigzag_deg),
+            vigor_falloff: f(&key(at, "vigor_falloff"), self.vigor_falloff),
+            split_probability: f(&key(at, "split_probability"), self.split_probability),
+            split_angle_deg: f(&key(at, "split_angle_deg"), self.split_angle_deg),
+            turn_bank: f(&key(at, "turn_bank"), self.turn_bank),
+            split_evenness: f(&key(at, "split_evenness"), self.split_evenness),
+            dead_stub_length: f(&key(at, "dead_stub_length"), self.dead_stub_length),
+            dieback: f(&key(at, "dieback"), self.dieback),
+            snap_radius: f(&key(at, "snap_radius"), self.snap_radius),
+            split_start_fraction: f(&key(at, "split_start_fraction"), self.split_start_fraction),
+            children: self.children.map(&key(at, "children"), f),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ChildParams {
-    pub pattern: ChildPattern,
-    pub start_fraction: f32,
-    pub end_fraction: f32,
-    pub crotch_angle_deg: f32,
+#[serde(
+    default = "ChildParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct ChildParams<V = f32> {
+    pub pattern: ChildPattern<V>,
+    pub start_fraction: V,
+    pub end_fraction: V,
+    pub crotch_angle_deg: V,
     /// Angle to use at the very tip of the parent. Conifer branches stand more
     /// upright the nearer the leader they are, which is what draws the crown to a
     /// spire; one angle for the whole stem gives a pincushion instead. The blend is
     /// weighted hard toward the tip so the body of the crown keeps the angle
     /// `crotch_angle_deg` asks for. Leave the two equal for a stem whose children
     /// all leave at one angle.
-    pub crotch_angle_tip_deg: f32,
-    pub crotch_variance_deg: f32,
-    pub roll_variance_deg: f32,
-    pub phyllotaxis_deg: f32,
-    pub scale: f32,
+    pub crotch_angle_tip_deg: V,
+    pub crotch_variance_deg: V,
+    pub roll_variance_deg: V,
+    pub phyllotaxis_deg: V,
+    pub scale: V,
     /// Spread of `scale` between siblings. Without it every branch in a whorl gets
     /// the same drive and so the same length, which reads as a wheel spoke pattern
     /// rather than a tree.
-    pub scale_variance: f32,
+    pub scale_variance: V,
     /// How unequally siblings share the drive going into them.
     ///
     /// `scale_variance` spreads them symmetrically, which keeps every branch close to
@@ -488,7 +688,7 @@ pub struct ChildParams {
     /// skewed: at 1 most children come away well under the mean and a handful come
     /// away at several times it, while the average is unchanged. That hierarchy is
     /// what the eye reads as a tree having competed for its shape.
-    pub dominance: f32,
+    pub dominance: V,
     /// How much of a parent's drive goes to the children near its tip rather than its
     /// base, from -1 to 1.
     ///
@@ -498,13 +698,13 @@ pub struct ChildParams {
     /// parent and the foliage comes out as a band along every limb instead. Negative
     /// favours the base, which is what a stem whose lower branches have had the most
     /// years to grow wants.
-    pub acrotony: f32,
+    pub acrotony: V,
     /// How far children are pulled into the flat plane of the limb carrying them.
     /// Conifer branchlets grow in a plane, and the flat sprays that makes are most
     /// of what gives a fir its layered silhouette; at 0 they spiral around the limb
     /// instead. The first branch off the trunk sets the plane, everything deeper on
     /// that limb shares it.
-    pub planarity: f32,
+    pub planarity: V,
     /// Whorls vary by up to this many branches either way, and may come out empty,
     /// which is what breaks the ladder rhythm of a whorl on every single node.
     pub count_variance: u32,
@@ -517,12 +717,12 @@ pub struct ChildParams {
     /// of the limb with the foliage carried out at its end. Measured along the length
     /// the parent actually grew, not the length it set out to, because a limb the
     /// envelope cut short is shaded along what it has. Zero kills nothing.
-    pub shade_line: f32,
+    pub shade_line: V,
     /// Depth of the transition under `shade_line`, as a share of the parent. At the
     /// shade line every child still lives; this far below it every child is dead, and
     /// in between the odds run evenly from one to the other, so the lowest living limb
     /// is not a ruled line across the tree. Zero is a hard line.
-    pub shade_blend: f32,
+    pub shade_blend: V,
     /// How much of its length a shaded-out child keeps, at the parent's base.
     ///
     /// A limb that died years ago stopped growing when it died, and its thin outer end
@@ -531,7 +731,7 @@ pub struct ChildParams {
     /// share kept by a child at the very base of the parent; it runs up to all of it
     /// at the shade line, where the limbs have only just died. At 1 nothing is cut back
     /// and the dead band is as long as the tree grew it.
-    pub shade_keep: f32,
+    pub shade_keep: V,
     /// How far a shaded-out child may settle down about its base once it has died, in
     /// degrees.
     ///
@@ -541,7 +741,7 @@ pub struct ChildParams {
     /// stand where they grew, some hang, a few have dropped to hang almost against the
     /// trunk. Each dead limb tilts rigidly about its attachment by a share of this,
     /// skewed so most settle a little and a few settle hard. Zero leaves them as grown.
-    pub dead_sag_deg: f32,
+    pub dead_sag_deg: V,
     /// Longest a branch leaving this stem may grow, as a multiple of the stem still to
     /// come past the point it leaves. Holds side branches and forks alike.
     ///
@@ -556,7 +756,7 @@ pub struct ChildParams {
     /// Zero uses the model's default: 1 off a branch, and no limit off the trunk, whose
     /// limbs the crown envelope shapes instead — a broadleaf's limbs rightly outreach the
     /// leader above them.
-    pub tip_reach: f32,
+    pub tip_reach: V,
 }
 
 impl Default for ChildParams {
@@ -585,8 +785,40 @@ impl Default for ChildParams {
     }
 }
 
+impl<V: Scalar> ChildParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        ChildParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> ChildParams<W> {
+        ChildParams {
+            pattern: self.pattern.map(&key(at, "pattern"), f),
+            start_fraction: f(&key(at, "start_fraction"), self.start_fraction),
+            end_fraction: f(&key(at, "end_fraction"), self.end_fraction),
+            crotch_angle_deg: f(&key(at, "crotch_angle_deg"), self.crotch_angle_deg),
+            crotch_angle_tip_deg: f(&key(at, "crotch_angle_tip_deg"), self.crotch_angle_tip_deg),
+            crotch_variance_deg: f(&key(at, "crotch_variance_deg"), self.crotch_variance_deg),
+            roll_variance_deg: f(&key(at, "roll_variance_deg"), self.roll_variance_deg),
+            phyllotaxis_deg: f(&key(at, "phyllotaxis_deg"), self.phyllotaxis_deg),
+            scale: f(&key(at, "scale"), self.scale),
+            scale_variance: f(&key(at, "scale_variance"), self.scale_variance),
+            dominance: f(&key(at, "dominance"), self.dominance),
+            acrotony: f(&key(at, "acrotony"), self.acrotony),
+            planarity: f(&key(at, "planarity"), self.planarity),
+            count_variance: self.count_variance,
+            shade_line: f(&key(at, "shade_line"), self.shade_line),
+            shade_blend: f(&key(at, "shade_blend"), self.shade_blend),
+            shade_keep: f(&key(at, "shade_keep"), self.shade_keep),
+            dead_sag_deg: f(&key(at, "dead_sag_deg"), self.dead_sag_deg),
+            tip_reach: f(&key(at, "tip_reach"), self.tip_reach),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ChildPattern {
+pub enum ChildPattern<V = f32> {
     None,
     Whorl { every: u32, count: u32 },
     /// Children per metre of the parent stem.
@@ -596,7 +828,20 @@ pub enum ChildPattern {
     /// the probability that one segment carried one child, which saturated at 1.0 —
     /// every value at or above that was the same value — and that ceiling was what
     /// held the presets to two or three orders of branching.
-    Continuous { density: f32 },
+    Continuous { density: V },
+}
+
+impl<V: Scalar> ChildPattern<V> {
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> ChildPattern<W> {
+        match *self {
+            ChildPattern::None => ChildPattern::None,
+            ChildPattern::Whorl { every, count } => ChildPattern::Whorl { every, count },
+            ChildPattern::Continuous { density } => ChildPattern::Continuous {
+                density: f(&key(at, "density"), density),
+            },
+        }
+    }
 }
 
 /// How a single-leaf texture is grown into a leaf-cluster one.
@@ -716,45 +961,48 @@ impl Default for LeafClusterParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LeafParams {
+#[serde(
+    default = "LeafParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct LeafParams<V = f32> {
     pub enabled: bool,
     /// Leaves grow on stems at this level and deeper, so the canopy sits on twigs
     /// rather than on structural limbs.
     pub min_level: u8,
     /// Nothing thicker than this carries leaves, whatever its level.
-    pub max_twig_radius: f32,
+    pub max_twig_radius: V,
     /// Cluster anchors per metre of twig. Each anchor carries `cluster_size` cards.
-    pub density: f32,
+    pub density: V,
     /// How irregular the gaps between anchors are, as a fraction of the mean gap.
     /// Evenly spaced anchors read as a pinstripe along every twig and give the whole
     /// canopy one grain; scattering them is what lets the cards bunch and leave holes.
-    pub spacing_variance: f32,
+    pub spacing_variance: V,
     /// Metres back from the tip of a twig that carry leaves, 0 for all of it.
     ///
     /// A tree bears its leaves on the shoots it grew this year, so the foliage is a
     /// shell over bare branchwork rather than a solid volume. Without this the crown
     /// fills in solid to the trunk: every limb is buried, the silhouette is one dome,
     /// and none of the light and shade that comes of masses standing apart survives.
-    pub leafy_length: f32,
+    pub leafy_length: V,
     /// Leaves emitted together at one point on a twig. Real foliage grows in tufts,
     /// and clumping the cards gives a canopy of masses and gaps instead of a uniform
     /// spray, for the same number of triangles.
     pub cluster_size: u32,
     /// How far the cards in one cluster fan out from its shared direction.
-    pub cluster_spread_deg: f32,
-    pub card_length: f32,
-    pub card_width: f32,
-    pub size_variance: f32,
+    pub cluster_spread_deg: V,
+    pub card_length: V,
+    pub card_width: V,
+    pub size_variance: V,
     /// Angle between the leaf and the twig it grows from.
-    pub crotch_angle_deg: f32,
-    pub crotch_variance_deg: f32,
+    pub crotch_angle_deg: V,
+    pub crotch_variance_deg: V,
     /// Roll between successive leaves around the twig.
-    pub phyllotaxis_deg: f32,
+    pub phyllotaxis_deg: V,
     /// How far the blade hangs under its own weight.
-    pub droop_deg: f32,
+    pub droop_deg: V,
     /// Random roll of the blade about its own length.
-    pub twist_deg: f32,
+    pub twist_deg: V,
     /// How evenly the cards of one cluster are rolled about their own length, 0 to 1.
     ///
     /// At 0 each card takes its own random roll within `twist_deg`. At 1 they are
@@ -762,19 +1010,19 @@ pub struct LeafParams {
     /// turned to a random angle: two cards make a cross, three a star. It is what lets a
     /// tuft of needles be two cards rather than four — two rolled at random line up
     /// often enough that the tuft goes thin seen from one side.
-    pub even_roll: f32,
+    pub even_roll: V,
     /// How far the shading normal leans from the flat card toward the outward
     /// direction of the crown. This is what makes a pile of quads light like a
     /// canopy; at 0 every leaf shades as the flat plane it really is.
-    pub normal_blend: f32,
+    pub normal_blend: V,
     /// Bend applied to the normal across the width of a card, for a rounded blade.
-    pub curvature: f32,
+    pub curvature: V,
     /// Flat colour multiplier for the whole canopy, for pulling a leaf texture to
     /// the colour a species wants without re-authoring the art.
-    pub tint: [f32; 3],
-    pub hue_variance: f32,
+    pub tint: [V; 3],
+    pub hue_variance: V,
     /// Darkening applied to leaves deep inside the crown.
-    pub interior_shade: f32,
+    pub interior_shade: V,
     /// How crisp the cutout edge stays as a card shrinks on screen, from 0 to 1.
     ///
     /// At 0 the filtered alpha is handed straight to alpha-to-coverage, which is soft:
@@ -784,7 +1032,7 @@ pub struct LeafParams {
     /// out as smudges. At 1 the alpha is rescaled by how fast it changes across the
     /// screen, so every edge is resolved to about a pixel whatever the mip, and the
     /// strands stay strands.
-    pub edge_sharpness: f32,
+    pub edge_sharpness: V,
     /// How far a card seen from behind keeps the crown's outward shading, from 0 to 1.
     ///
     /// A card is one quad drawn from both sides, and seen from behind its shading normal
@@ -795,7 +1043,7 @@ pub struct LeafParams {
     /// rolled cards goes near black that way. A tuft of needles has no front and back —
     /// it is a volume — so at 1 only the card's own flat share of the normal is turned
     /// and the outward share stays put.
-    pub backface_volume: f32,
+    pub backface_volume: V,
     /// How dark foliage in shadow goes, from 0 to 1.
     ///
     /// The shadow map is a hard yes or no, and a card behind other foliage gets the
@@ -804,7 +1052,7 @@ pub struct LeafParams {
     /// in a thousand gaps — and holding every card behind another to the sky alone
     /// makes the shaded side of the crown go black where it should stay green. Below 1
     /// that much of the sun is let through the shadow.
-    pub self_shadow: f32,
+    pub self_shadow: V,
     /// When set, the leaf texture named below is a single leaf, and the atlas the
     /// renderer actually samples is generated from it at load. `atlas_cols` and
     /// `atlas_rows` describe both, since clustering maps each source cell to one
@@ -858,6 +1106,50 @@ impl Default for LeafParams {
     }
 }
 
+impl<V: Scalar> LeafParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        LeafParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> LeafParams<W> {
+        LeafParams {
+            enabled: self.enabled,
+            min_level: self.min_level,
+            max_twig_radius: f(&key(at, "max_twig_radius"), self.max_twig_radius),
+            density: f(&key(at, "density"), self.density),
+            spacing_variance: f(&key(at, "spacing_variance"), self.spacing_variance),
+            leafy_length: f(&key(at, "leafy_length"), self.leafy_length),
+            cluster_size: self.cluster_size,
+            cluster_spread_deg: f(&key(at, "cluster_spread_deg"), self.cluster_spread_deg),
+            card_length: f(&key(at, "card_length"), self.card_length),
+            card_width: f(&key(at, "card_width"), self.card_width),
+            size_variance: f(&key(at, "size_variance"), self.size_variance),
+            crotch_angle_deg: f(&key(at, "crotch_angle_deg"), self.crotch_angle_deg),
+            crotch_variance_deg: f(&key(at, "crotch_variance_deg"), self.crotch_variance_deg),
+            phyllotaxis_deg: f(&key(at, "phyllotaxis_deg"), self.phyllotaxis_deg),
+            droop_deg: f(&key(at, "droop_deg"), self.droop_deg),
+            twist_deg: f(&key(at, "twist_deg"), self.twist_deg),
+            even_roll: f(&key(at, "even_roll"), self.even_roll),
+            normal_blend: f(&key(at, "normal_blend"), self.normal_blend),
+            curvature: f(&key(at, "curvature"), self.curvature),
+            tint: map_array(&key(at, "tint"), self.tint, f),
+            hue_variance: f(&key(at, "hue_variance"), self.hue_variance),
+            interior_shade: f(&key(at, "interior_shade"), self.interior_shade),
+            edge_sharpness: f(&key(at, "edge_sharpness"), self.edge_sharpness),
+            backface_volume: f(&key(at, "backface_volume"), self.backface_volume),
+            self_shadow: f(&key(at, "self_shadow"), self.self_shadow),
+            cluster: self.cluster.clone(),
+            atlas_cols: self.atlas_cols,
+            atlas_rows: self.atlas_rows,
+            atlas_front: self.atlas_front,
+            atlas_back: self.atlas_back,
+            texture: self.texture.clone(),
+        }
+    }
+}
+
 /// How a species gives to the wind.
 ///
 /// Only the tree's side of it lives here. How hard the wind blows, from where and how
@@ -866,19 +1158,22 @@ impl Default for LeafParams {
 /// `gustiness` from before the two were split parses as it always did; the fields are
 /// ignored.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WindParams {
+#[serde(
+    default = "WindParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct WindParams<V = f32> {
     /// How far each order of wood bends in a full gale, in radians: the trunk, the limbs
     /// off it, the branches off those, and every finer twig as one. Finer wood is
     /// whippier, so these climb.
-    pub flexibility: [f32; 4],
+    pub flexibility: [V; 4],
     /// How far a leaf card flutters about where it hangs from its twig, in radians in a
     /// full gale.
-    pub flutter: f32,
+    pub flutter: V,
     /// How fast the trunk sways, in hertz. Each finer order swings faster than the one
     /// carrying it. A tall conifer is slow — a fifty-metre fir goes back and forth about
     /// once every five seconds — and a birch several times quicker.
-    pub frequency: f32,
+    pub frequency: V,
 }
 
 impl Default for WindParams {
@@ -887,6 +1182,22 @@ impl Default for WindParams {
             flexibility: [0.05, 0.15, 0.35, 0.8],
             flutter: 0.5,
             frequency: 0.4,
+        }
+    }
+}
+
+impl<V: Scalar> WindParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        WindParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> WindParams<W> {
+        WindParams {
+            flexibility: map_array(&key(at, "flexibility"), self.flexibility, f),
+            flutter: f(&key(at, "flutter"), self.flutter),
+            frequency: f(&key(at, "frequency"), self.frequency),
         }
     }
 }
@@ -904,14 +1215,74 @@ mod tests {
 
     #[test]
     fn ron_roundtrip_is_lossless() {
+        // As the viewer saves them: the species, ranges and all.
         for (_, src) in builtin_presets() {
-            let params = parse_species(src).unwrap();
+            let params = parse_template(src).unwrap();
             let serial =
                 ron::ser::to_string_pretty(&params, ron::ser::PrettyConfig::default()).unwrap();
             let reparsed =
-                parse_species(&serial).unwrap_or_else(|e| panic!("reparse failed: {e}\n{serial}"));
+                parse_template(&serial).unwrap_or_else(|e| panic!("reparse failed: {e}\n{serial}"));
             assert_eq!(params, reparsed);
         }
+    }
+
+    #[test]
+    fn a_species_without_ranges_is_the_tree_it_always_was() {
+        // Nothing lands anywhere, so every seed grows from the numbers in the file.
+        for (name, src) in builtin_presets() {
+            let mut species = parse_template(src).unwrap();
+            let own = species.instance();
+            assert_eq!(own.template().instance(), own, "{name}");
+            species.seed = 12345;
+            let other = species.instance();
+            assert_eq!(SpeciesParams { seed: own.seed, ..other }, own, "{name}");
+        }
+    }
+
+    #[test]
+    fn any_number_in_a_species_may_be_a_range() {
+        // Every number in a preset turned into a range, written out and read back: the
+        // file format has to carry one wherever a number goes, nested levels, arrays
+        // and the child pattern included.
+        let mut n = 0;
+        let spread: SpeciesTemplate = parse_species(OAK_RON).unwrap().map("", &mut |_, v| {
+            n += 1;
+            Ranged::Between(v, v + 1.0)
+        });
+        let text = ron::ser::to_string_pretty(&spread, ron::ser::PrettyConfig::default()).unwrap();
+        let back = parse_template(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(back, spread);
+        assert_eq!(back.landings().len(), n);
+        // And each is drawn on its own: no two numbers share a key.
+        let mut keys: Vec<String> = back.landings().into_iter().map(|(k, _, _)| k).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), n);
+        assert!(keys.contains(&"trunk.length".to_string()));
+        assert!(keys.contains(&"branch_levels.0.children.pattern.density".to_string()));
+        assert!(keys.contains(&"leaves.tint.1".to_string()));
+    }
+
+    #[test]
+    fn a_range_lands_by_seed_and_leaves_the_rest_alone() {
+        let src = "(seed: 3, trunk: (length: (12.0, 18.0), radius: 0.4))";
+        let mut species = parse_template(src).unwrap();
+        let heights: Vec<f32> = (0..16)
+            .map(|seed| {
+                species.seed = seed;
+                let tree = species.instance();
+                assert_eq!(tree.trunk.radius, 0.4);
+                tree.trunk.length
+            })
+            .collect();
+        assert!(heights.iter().all(|h| (12.0..=18.0).contains(h)), "{heights:?}");
+        let (lo, hi) = heights.iter().fold((f32::MAX, f32::MIN), |(a, b), &h| (a.min(h), b.max(h)));
+        assert!(hi - lo > 3.0, "sixteen seeds all landed between {lo} and {hi}");
+        // parse_species is the file's own seed.
+        let own = parse_species(src).unwrap();
+        species.seed = 3;
+        assert_eq!(own.trunk.length, species.instance().trunk.length);
+        assert_eq!(species.landings()[0].0, "trunk.length");
     }
 
     #[test]

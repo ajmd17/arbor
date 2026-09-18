@@ -4,7 +4,7 @@ use std::f32::consts::{PI, TAU};
 use crate::math::{norm_or_zero, ortho_of, ortho_unit, transport};
 use crate::skeleton::Skeleton;
 use crate::species::{BarkIrregularity, MeshParams, SpeciesParams};
-use crate::wind::{Sway, StemSway, SwayField};
+use crate::wind::{Sway, SwayAt, StemSway, SwayField};
 
 /// Angular step used for the finite-difference normal around a ring.
 const NORMAL_DA: f32 = 0.01;
@@ -20,6 +20,8 @@ pub struct Mesh {
     pub weathering: Vec<f32>,
     /// Per vertex, the wood it hangs off, for the renderer to sway in the wind.
     pub sway: Vec<Sway>,
+    /// Per vertex, the same told by stem, for an engine that keeps a table of stems.
+    pub sway_at: Vec<SwayAt>,
     pub indices: Vec<u32>,
 }
 
@@ -449,6 +451,7 @@ impl MeshSink {
         self.mesh.uvs.push(uv);
         self.mesh.weathering.push(self.weathering);
         self.mesh.sway.push(self.sway.at(arc));
+        self.mesh.sway_at.push(self.sway.place(arc));
     }
 
     fn vertex_offset(&self) -> u32 {

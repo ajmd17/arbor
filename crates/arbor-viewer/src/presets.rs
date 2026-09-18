@@ -1,8 +1,9 @@
 //! The presets the panel offers: the species compiled into the binary, and the ones
 //! saved from the panel itself.
 //!
-//! A saved preset is a species file like any other, written in full — every value,
-//! the seed included — so picking it again grows exactly the tree that was saved. It
+//! A saved preset is a species file like any other, written in full — every value and
+//! every range, the seed included — so picking it again grows exactly the tree that was
+//! saved, and the species it came from at any other seed. It
 //! is read from disk every time it is picked rather than once at startup, which means
 //! one edited by hand takes effect on the next pick, with no rebuild. That is unlike
 //! the built-ins, which are `include_str!`-ed and so only change when the viewer is
@@ -10,8 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
-use arbor_core::species::{builtin_presets, parse_species};
-use arbor_core::SpeciesParams;
+use arbor_core::species::{builtin_presets, parse_template};
+use arbor_core::SpeciesTemplate;
 
 pub enum Source {
     Builtin(&'static str),
@@ -30,13 +31,13 @@ impl Preset {
         matches!(self.source, Source::Saved(_))
     }
 
-    pub fn load(&self) -> Result<SpeciesParams, String> {
+    pub fn load(&self) -> Result<SpeciesTemplate, String> {
         match &self.source {
-            Source::Builtin(src) => parse_species(src),
+            Source::Builtin(src) => parse_template(src),
             Source::Saved(path) => {
                 let text = std::fs::read_to_string(path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                parse_species(&text)
+                parse_template(&text)
             }
         }
     }
@@ -118,7 +119,7 @@ pub fn path_for(dir: &Path, name: &str) -> Result<PathBuf, String> {
 /// Writes `params` as a preset called `name` into `dir`, replacing one of that name if
 /// there is one, and returns where it went. The species takes the name as it was typed,
 /// so the file says what it is when read on its own.
-pub fn save(dir: &Path, name: &str, params: &SpeciesParams) -> Result<PathBuf, String> {
+pub fn save(dir: &Path, name: &str, params: &SpeciesTemplate) -> Result<PathBuf, String> {
     let path = path_for(dir, name)?;
     let mut species = params.clone();
     species.name = name.trim().to_string();
@@ -126,8 +127,9 @@ pub fn save(dir: &Path, name: &str, params: &SpeciesParams) -> Result<PathBuf, S
         .map_err(|e| format!("cannot write the species as RON: {e}"))?;
     let text = format!(
         "// Saved from the arbor viewer. Every value is written out, the seed included, so\n\
-         // this grows exactly the tree that was saved. It is read afresh each time it is\n\
-         // picked, so edits here show up on the next pick without a rebuild.\n{body}\n"
+         // this grows exactly the tree that was saved. A pair is a range each tree lands\n\
+         // in, decided by its seed. It is read afresh each time it is picked, so edits\n\
+         // here show up on the next pick without a rebuild.\n{body}\n"
     );
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -146,6 +148,7 @@ pub fn delete(preset: &Preset) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbor_core::Ranged;
 
     /// A directory of its own under the system temp, emptied when the test is done.
     struct Scratch(PathBuf);
@@ -170,10 +173,10 @@ mod tests {
     #[test]
     fn a_saved_preset_comes_back_as_the_tree_that_was_saved() {
         let scratch = Scratch::new("roundtrip");
-        let mut params = parse_species(builtin_presets()[1].1).unwrap();
+        let mut params = parse_template(builtin_presets()[1].1).unwrap();
         params.seed = 4242;
-        params.trunk.length *= 1.3;
-        params.wind.flutter = 0.9;
+        params.trunk.length = Ranged::Between(14.0, 19.5);
+        params.wind.flutter = Ranged::Fixed(0.9);
 
         let path = save(&scratch.0, "My Oak", &params).unwrap();
         assert_eq!(path.file_name().unwrap(), "my_oak.ron");
@@ -183,8 +186,10 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name, "my_oak");
         let back = saved[0].load().unwrap();
-        // Everything that was saved, the seed included; only the name is the new one.
+        // Everything that was saved, the seed and the range included; only the name is
+        // the new one.
         assert_eq!(back.name, "My Oak");
+        assert_eq!(back.trunk.length, Ranged::Between(14.0, 19.5));
         params.name = "My Oak".to_string();
         assert_eq!(back, params);
     }
@@ -192,7 +197,7 @@ mod tests {
     #[test]
     fn saving_under_a_name_already_taken_replaces_it() {
         let scratch = Scratch::new("overwrite");
-        let mut params = parse_species(builtin_presets()[0].1).unwrap();
+        let mut params = parse_template(builtin_presets()[0].1).unwrap();
         save(&scratch.0, "tall", &params).unwrap();
         params.seed = 99;
         save(&scratch.0, "Tall", &params).unwrap();
@@ -205,7 +210,7 @@ mod tests {
     #[test]
     fn deleting_a_saved_preset_takes_it_off_the_list() {
         let scratch = Scratch::new("delete");
-        let params = parse_species(builtin_presets()[0].1).unwrap();
+        let params = parse_template(builtin_presets()[0].1).unwrap();
         save(&scratch.0, "gone", &params).unwrap();
         let all = list(&scratch.0);
         let gone = all.iter().find(|p| p.name == "gone").unwrap();

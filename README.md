@@ -25,6 +25,32 @@ rebuild. Both tools find them by name: `--species <name>` in the viewer,
 `_normal.png` and `_roughness.png`, with the key coming from the species
 (`bark_texture: "bark_oak"`, `leaves.texture: "leaf_oak"`).
 
+### Ranges
+
+Any number in a species can be a range instead of a value, so a species describes a
+kind of tree rather than one tree:
+
+```ron
+trunk: (
+    length: (12.0, 18.0),
+    ...
+),
+envelope_scale: (0.85, 1.15),
+```
+
+Each tree lands somewhere in each range, and its seed decides where: the same seed
+always gives the same tree, and the next seed gives a different one. Each range is
+drawn on its own, so adding a range to one number never moves where the others land.
+This is not the same as `length_variance` and the other variances, which spread the
+stems *within* one tree; a range is drawn once for the whole tree. A trunk-length
+range also takes the crown envelope with it, which the trunk's `length_variance`
+does not.
+
+In the viewer, the **±** beside a slider turns it into a range with two handles, and
+the second one reports where the tree on screen landed. Pressing **±** again folds the
+range back to that value. Export **Variations** lands every range afresh for each
+tree. The CLI prints each landing under the seed.
+
 ## Running it
 
 The viewer reads textures from `assets/textures` relative to the working
@@ -110,18 +136,32 @@ Moss, light through the leaves, and the viewer's coverage-preserving leaf mipmap
 don't carry over. Expect distant canopies to thin a little in engines that build
 ordinary mips.
 
-`--wind-data` (the **Wind data** box in the viewer) adds what the viewer's wind shader
-reads, as custom vertex attributes:
+`--wind-data` (the **Wind data** box in the viewer) adds what an engine needs to sway
+the tree as the viewer does. The tree bends as a set of stems. A stem is a limb, a
+branch, or all the twigs off one point of a branch, and each one bends about where it's
+attached. Each stem is written once, in a table. Each vertex names the finest stem it
+bends with in `TEXCOORD_1`:
 
-| Attribute | On | Holds |
-| --- | --- | --- |
-| `_WIND_1` | bark, leaves | Limb order: the pivot it bends about (xyz), and how far a point there swings per unit of flexibility, in metres (w). |
-| `_WIND_2` | bark, leaves | The same for the branch order. |
-| `_WIND_3` | bark, leaves | The same for twigs and everything finer. |
-| `_LEAF_ORIGIN` | leaves | The twig point a card hangs from, which it flutters about. |
+| `TEXCOORD_1` | Holds |
+| --- | --- |
+| x | The stem's row in the table, as a float. Row 0 is the trunk, which bends by height alone. |
+| y | How far out along that stem the vertex sits, 0 at its pivot to 1 at its reach. Every corner of a leaf card carries its origin's value. |
 
-An order a vertex doesn't belong to has w = 0. The species' wind settings (flexibility
-per order, frequency, flutter) go in the root node's `extras.arbor.wind`.
+The rest goes in the `ARBOR_tree_wind` extension on every primitive:
+
+| Key | Holds |
+| --- | --- |
+| `branches` | Accessor, `VEC4`, two per row: the pivot (xyz) and reach in metres (w), then the carrying stem's row, how far out along it this stem leaves (0–1), and the order (0 limb, 1 branch, 2 twigs and finer). Row 0 is all zeros. |
+| `leafOrigins` | Leaves only. Accessor, `VEC3` per vertex: the twig point a card hangs from, which it flutters about. |
+| `flexibility` | How far the trunk, limbs, branches and twigs bend in a full gale. |
+| `frequency` | How fast the trunk sways, in hertz. |
+| `flutter` | How far a leaf card flutters, in radians. |
+| `height` | The tree's height in metres. The trunk's bend is shaped over it, from the foot at the origin. |
+
+To sway a vertex, start at its row with its `t`. The stem there swings the vertex about
+its pivot by `reach × cantilever(t) × flexibility[order + 1]` metres, where
+`cantilever(x) = x²(6 − 4x + x²)/3`. Then move to the carrying stem's row and its
+`t`, and repeat until row 0.
 
 ## Tools
 

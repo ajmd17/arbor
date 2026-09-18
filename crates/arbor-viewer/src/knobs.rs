@@ -12,12 +12,17 @@
 //! panel draws — which is what egui's default does, and what once grew a 52 m douglas
 //! fir as a 32 m one under a crown based at 25 m. What the range still decides is
 //! whether the handle can reach the preset's own value, so it has to cover every one.
+//!
+//! Every number here may also be a range: the ± beside a slider splits it into two
+//! handles, and each tree lands somewhere between them, where being decided by its
+//! seed. The panel edits the species, ranges and all, and says under each range where
+//! the tree on screen landed.
 
 use arbor_core::species::{BarkIrregularity, ChildParams, ChildPattern, LeafParams, MeshParams, StemParams, WindParams};
-use arbor_core::{EnvelopeParams, SpeciesParams};
+use arbor_core::{EnvelopeParams, Ranged, SpeciesParams, SpeciesTemplate};
 use eframe::egui;
 
-/// One continuous control over a field of `T`.
+/// One continuous control over a field of `T`, which may be a range.
 pub struct Knob<T> {
     pub label: &'static str,
     pub range: (f32, f32),
@@ -25,7 +30,7 @@ pub struct Knob<T> {
     /// by difference: a radius of 2 mm against 4 mm is as big a change as 2 m against 4.
     pub log: bool,
     pub help: &'static str,
-    pub get: fn(&mut T) -> &mut f32,
+    pub get: fn(&mut T) -> &mut Ranged,
 }
 
 /// One whole-number control over a field of `T`.
@@ -46,7 +51,7 @@ const fn knob<T>(
     label: &'static str,
     range: (f32, f32),
     help: &'static str,
-    get: fn(&mut T) -> &mut f32,
+    get: fn(&mut T) -> &mut Ranged,
 ) -> Knob<T> {
     Knob { label, range, log: false, help, get }
 }
@@ -55,7 +60,7 @@ const fn log_knob<T>(
     label: &'static str,
     range: (f32, f32),
     help: &'static str,
-    get: fn(&mut T) -> &mut f32,
+    get: fn(&mut T) -> &mut Ranged,
 ) -> Knob<T> {
     Knob { label, range, log: true, help, get }
 }
@@ -65,7 +70,7 @@ const fn log_knob<T>(
 
 /// Crown shape and the multipliers that act on every level at once. These are the
 /// quick controls, shown open at the top of the panel.
-pub static SHAPE: &[Knob<SpeciesParams>] = &[
+pub static SHAPE: &[Knob<SpeciesTemplate>] = &[
     knob("Trunk length", (2.0, 60.0), "Declared length of the trunk, in metres. The crown envelope stretches along it, so the crown stays on the tree; it does not get wider, which is what Envelope scale is for.", |p| &mut p.trunk.length),
     knob("Envelope scale", (0.4, 2.5), "Scales the crown envelope that steers and prunes every branch.", |p| &mut p.envelope_scale),
     knob("Gravity", (0.0, 4.0), "Multiplies every level's gravity at once.", |p| &mut p.gravity_multiplier),
@@ -74,14 +79,14 @@ pub static SHAPE: &[Knob<SpeciesParams>] = &[
 
 pub const BRANCH_LEVELS: (u32, u32) = (1, 6);
 
-pub static SPLIT_DEPTH: Count<SpeciesParams> = Count {
+pub static SPLIT_DEPTH: Count<SpeciesTemplate> = Count {
     label: "Fork depth",
     range: (0, 5),
     help: "How many times a stem may fork and its forks fork again. Zero turns forking off everywhere.",
     get: |p| &mut p.max_split_depth,
 };
 
-pub static ENVELOPE: Group<EnvelopeParams> = Group {
+pub static ENVELOPE: Group<EnvelopeParams<Ranged>> = Group {
     title: "Crown envelope",
     knobs: &[
         log_knob("Falloff", (0.01, 1.0), "How soft the envelope's edge is. Small is a hard wall; large lets branches thin out gradually toward it.", |e| &mut e.falloff),
@@ -95,7 +100,7 @@ pub static ENVELOPE: Group<EnvelopeParams> = Group {
 // ---------------------------------------------------------------------------------
 // One level's growth
 
-pub static STEM: &[Group<StemParams>] = &[
+pub static STEM: &[Group<StemParams<Ranged>>] = &[
     Group {
         title: "Length & thickness",
         knobs: &[
@@ -150,7 +155,7 @@ pub const DENSITY: (f32, f32) = (0.05, 40.0);
 pub const WHORL_EVERY: (u32, u32) = (1, 12);
 pub const WHORL_COUNT: (u32, u32) = (1, 16);
 
-pub static CHILDREN: &[Group<ChildParams>] = &[
+pub static CHILDREN: &[Group<ChildParams<Ranged>>] = &[
     Group {
         title: "Placement",
         knobs: &[
@@ -196,7 +201,7 @@ pub static CHILDREN: &[Group<ChildParams>] = &[
 // ---------------------------------------------------------------------------------
 // Foliage
 
-pub static FOLIAGE: &[Knob<LeafParams>] = &[
+pub static FOLIAGE: &[Knob<LeafParams<Ranged>>] = &[
     log_knob("Leaves per metre", (0.5, 60.0), "Cluster anchors per metre of twig.", |l| &mut l.density),
     log_knob("Leaf length", (0.03, 2.0), "Card length, in metres.", |l| &mut l.card_length),
     log_knob("Leaf width", (0.02, 2.0), "Card width, in metres.", |l| &mut l.card_width),
@@ -206,7 +211,7 @@ pub static FOLIAGE: &[Knob<LeafParams>] = &[
 
 pub const LEAF_MIN_LEVEL: (u32, u32) = (0, 6);
 
-pub static FOLIAGE_MORE: &[Group<LeafParams>] = &[
+pub static FOLIAGE_MORE: &[Group<LeafParams<Ranged>>] = &[
     Group {
         title: "Placement",
         knobs: &[
@@ -254,7 +259,7 @@ pub static FOLIAGE_MORE: &[Group<LeafParams>] = &[
 // ---------------------------------------------------------------------------------
 // Bark and roots
 
-pub static BARK: &[Group<MeshParams>] = &[
+pub static BARK: &[Group<MeshParams<Ranged>>] = &[
     Group {
         title: "Roots & flare",
         knobs: &[
@@ -314,7 +319,7 @@ pub static BARK: &[Group<MeshParams>] = &[
     },
 ];
 
-pub static IRREGULARITY: &[Group<BarkIrregularity>] = &[
+pub static IRREGULARITY: &[Group<BarkIrregularity<Ranged>>] = &[
     Group {
         title: "Flutes & swelling",
         knobs: &[
@@ -347,7 +352,7 @@ pub static IRREGULARITY: &[Group<BarkIrregularity>] = &[
 
 /// How the species gives to the wind. None of these regrow the tree: they are read by
 /// the shaders every frame, so the panel must not mark the tree dirty for them.
-pub static WIND: Group<WindParams> = Group {
+pub static WIND: Group<WindParams<Ranged>> = Group {
     title: "How this species gives",
     knobs: &[
         knob("Trunk flex", (0.0, 0.3), "How far the trunk bends in a full gale, in radians. The whole tree leans and sways on it.", |w| &mut w.flexibility[0]),
@@ -371,12 +376,73 @@ fn slider<'a>(value: &'a mut f32, knob_range: (f32, f32), log: bool) -> egui::Sl
         .clamping(egui::SliderClamping::Edits)
 }
 
-/// Draws one continuous control, reporting whether the user changed it.
-pub fn knob_ui<T>(ui: &mut egui::Ui, target: &mut T, knob: &Knob<T>) -> bool {
-    let value = (knob.get)(target);
-    ui.add(slider(value, knob.range, knob.log).text(knob.label))
-        .on_hover_text(knob.help)
-        .changed()
+/// A number short enough to sit in a label, to about three figures.
+fn short(v: f32) -> String {
+    let decimals = match v.abs() {
+        m if m >= 100.0 => 0,
+        m if m >= 10.0 => 1,
+        m if m >= 1.0 => 2,
+        m if m >= 0.1 => 3,
+        _ => 4,
+    };
+    format!("{v:.decimals$}")
+}
+
+/// Draws one number that may be a range, reporting whether the user changed it.
+///
+/// The ± in front turns a single value into a range: a second handle appears under
+/// the first, and each tree lands somewhere between the two, where being decided by
+/// its seed. `landed` is where the tree on screen landed, which the second handle's
+/// label reports. Pressing ± again folds the range back to that one value, so the tree
+/// on screen stays as it is.
+pub fn ranged_ui(
+    ui: &mut egui::Ui,
+    value: &mut Ranged,
+    landed: f32,
+    knob_range: (f32, f32),
+    log: bool,
+    label: &str,
+    help: &str,
+) -> bool {
+    let mut changed = false;
+    let mut indent = 0.0;
+    ui.horizontal(|ui| {
+        let ranged = value.is_range();
+        let toggle = ui.selectable_label(ranged, "±").on_hover_text(if ranged {
+            "Fold the range back to one value: the one this tree landed on."
+        } else {
+            "Give this a range. Every tree lands somewhere in it, decided by its seed."
+        });
+        indent = toggle.rect.width() + ui.spacing().item_spacing.x;
+        if toggle.clicked() {
+            *value = match *value {
+                Ranged::Fixed(v) => Ranged::Between(v, v),
+                Ranged::Between(..) => Ranged::Fixed(landed),
+            };
+            changed = true;
+        }
+        let first = match value {
+            Ranged::Fixed(v) | Ranged::Between(v, _) => v,
+        };
+        changed |= ui.add(slider(first, knob_range, log).text(label)).on_hover_text(help).changed();
+    });
+    if let Ranged::Between(_, hi) = value {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            changed |= ui
+                .add(slider(hi, knob_range, log).text(format!("to · this tree {}", short(landed))))
+                .on_hover_text(help)
+                .changed();
+        });
+    }
+    changed
+}
+
+/// Draws one continuous control, reporting whether the user changed it. `landed` is
+/// the same kind of thing as `target` with every number where this tree landed.
+pub fn knob_ui<T>(ui: &mut egui::Ui, target: &mut T, landed: &mut T, knob: &Knob<T>) -> bool {
+    let at = (knob.get)(landed).lo();
+    ranged_ui(ui, (knob.get)(target), at, knob.range, knob.log, knob.label, knob.help)
 }
 
 pub fn count_ui<T>(ui: &mut egui::Ui, target: &mut T, count: &Count<T>) -> bool {
@@ -390,10 +456,10 @@ pub fn count_ui<T>(ui: &mut egui::Ui, target: &mut T, count: &Count<T>) -> bool 
     .changed()
 }
 
-pub fn knobs_ui<T>(ui: &mut egui::Ui, target: &mut T, knobs: &[Knob<T>]) -> bool {
+pub fn knobs_ui<T>(ui: &mut egui::Ui, target: &mut T, landed: &mut T, knobs: &[Knob<T>]) -> bool {
     let mut changed = false;
     for knob in knobs {
-        changed |= knob_ui(ui, target, knob);
+        changed |= knob_ui(ui, target, landed, knob);
     }
     changed
 }
@@ -404,13 +470,14 @@ pub fn group_ui<T>(
     ui: &mut egui::Ui,
     salt: impl std::hash::Hash,
     target: &mut T,
+    landed: &mut T,
     group: &Group<T>,
 ) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new(group.title)
         .id_salt((salt, group.title))
         .show(ui, |ui| {
-            changed |= knobs_ui(ui, target, group.knobs);
+            changed |= knobs_ui(ui, target, landed, group.knobs);
             for count in group.counts {
                 changed |= count_ui(ui, target, count);
             }
@@ -420,7 +487,12 @@ pub fn group_ui<T>(
 
 /// How children are laid along their parent: not at all, in whorls, or at a steady
 /// rate per metre. Density is the main lever on how bushy a level comes out.
-pub fn pattern_ui(ui: &mut egui::Ui, salt: impl std::hash::Hash, pattern: &mut ChildPattern) -> bool {
+pub fn pattern_ui(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash,
+    pattern: &mut ChildPattern<Ranged>,
+    landed: &ChildPattern<Ranged>,
+) -> bool {
     let mut changed = false;
     let current = match pattern {
         ChildPattern::None => 0,
@@ -440,7 +512,7 @@ pub fn pattern_ui(ui: &mut egui::Ui, salt: impl std::hash::Hash, pattern: &mut C
     if picked != current {
         *pattern = match picked {
             1 => ChildPattern::Whorl { every: 2, count: 4 },
-            2 => ChildPattern::Continuous { density: 2.0 },
+            2 => ChildPattern::Continuous { density: Ranged::Fixed(2.0) },
             _ => ChildPattern::None,
         };
         changed = true;
@@ -466,17 +538,27 @@ pub fn pattern_ui(ui: &mut egui::Ui, salt: impl std::hash::Hash, pattern: &mut C
                 .changed();
         }
         ChildPattern::Continuous { density } => {
-            changed |= ui
-                .add(slider(density, DENSITY, true).text("Density"))
-                .on_hover_text("Children per metre of the parent.")
-                .changed();
+            // Just switched to, the tree on screen has no density of its own yet.
+            let at = match landed {
+                ChildPattern::Continuous { density: d } => d.lo(),
+                _ => density.lo(),
+            };
+            changed |= ranged_ui(
+                ui,
+                density,
+                at,
+                DENSITY,
+                true,
+                "Density",
+                "Children per metre of the parent.",
+            );
         }
     }
     changed
 }
 
 /// The growth parameters of stem level `level`, 0 being the trunk.
-pub fn stem_mut(params: &mut SpeciesParams, level: usize) -> Option<&mut StemParams> {
+pub fn stem_mut<V>(params: &mut SpeciesParams<V>, level: usize) -> Option<&mut StemParams<V>> {
     if level == 0 {
         Some(&mut params.trunk)
     } else {
@@ -486,7 +568,7 @@ pub fn stem_mut(params: &mut SpeciesParams, level: usize) -> Option<&mut StemPar
 
 /// The parameters that spawn stem level `level` off the one above it. The trunk is
 /// not spawned by anything.
-pub fn spawn_mut(params: &mut SpeciesParams, level: usize) -> Option<&mut ChildParams> {
+pub fn spawn_mut<V>(params: &mut SpeciesParams<V>, level: usize) -> Option<&mut ChildParams<V>> {
     if level == 0 {
         None
     } else {
@@ -495,28 +577,34 @@ pub fn spawn_mut(params: &mut SpeciesParams, level: usize) -> Option<&mut ChildP
 }
 
 /// Stem levels the panel offers: the trunk and every branch level the species declares.
-pub fn level_count(params: &SpeciesParams) -> usize {
+pub fn level_count<V>(params: &SpeciesParams<V>) -> usize {
     params.branch_levels.len() + 1
 }
 
 /// Everything about one level: how it is born off its parent, then how it grows.
-pub fn level_ui(ui: &mut egui::Ui, params: &mut SpeciesParams, level: usize) -> bool {
+/// `landed` must be the same species with every number where this tree landed.
+pub fn level_ui(
+    ui: &mut egui::Ui,
+    params: &mut SpeciesTemplate,
+    landed: &mut SpeciesTemplate,
+    level: usize,
+) -> bool {
     let mut changed = false;
-    if let Some(spawn) = spawn_mut(params, level) {
+    if let (Some(spawn), Some(spawn_at)) = (spawn_mut(params, level), spawn_mut(landed, level)) {
         let parent = if level == 1 { "trunk".to_string() } else { format!("level {}", level - 1) };
         egui::CollapsingHeader::new(format!("Spawning off {parent}"))
             .id_salt((level, "spawning"))
             .default_open(true)
             .show(ui, |ui| {
-                changed |= pattern_ui(ui, level, &mut spawn.pattern);
+                changed |= pattern_ui(ui, level, &mut spawn.pattern, &spawn_at.pattern);
                 for group in CHILDREN {
-                    changed |= group_ui(ui, (level, "spawn"), spawn, group);
+                    changed |= group_ui(ui, (level, "spawn"), spawn, spawn_at, group);
                 }
             });
     }
-    if let Some(stem) = stem_mut(params, level) {
+    if let (Some(stem), Some(stem_at)) = (stem_mut(params, level), stem_mut(landed, level)) {
         for group in STEM {
-            changed |= group_ui(ui, (level, "stem"), stem, group);
+            changed |= group_ui(ui, (level, "stem"), stem, stem_at, group);
         }
     }
     changed

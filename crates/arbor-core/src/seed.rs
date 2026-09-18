@@ -36,6 +36,26 @@ fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// Where the tree grown from `seed` lands in the range declared at `key`, from 0 to 1.
+///
+/// Drawn from the key itself rather than from one stream shared by every range, so
+/// each range is drawn on its own: giving one number a range, or taking it away, leaves
+/// every other number landing exactly where it did, and dragging one end of a range
+/// slides the tree through it instead of reshuffling the whole tree. Salted apart from
+/// the growth streams, which a range must never disturb — a species with no ranges in
+/// it grows the same tree it always did.
+pub fn land(seed: u64, key: &str) -> f32 {
+    const LAND_SALT: u64 = 0x5EED_1A2D_0F7A_11E5;
+    // FNV-1a, which is all a short ASCII path needs.
+    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+    for b in key.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01B3);
+    }
+    let z = mix(mix(seed ^ LAND_SALT) ^ h);
+    (z >> 40) as f32 / (1u64 << 24) as f32
+}
+
 pub fn range_f32(rng: &mut SmallRng, lo: f32, hi: f32) -> f32 {
     if hi <= lo {
         return lo;

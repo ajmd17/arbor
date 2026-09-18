@@ -18,12 +18,14 @@
 //! through the leaves, and the coverage-preserving mip chain that keeps a distant
 //! canopy from thinning — an engine builds its own mips.
 //!
-//! With `wind` set, each vertex also carries the wood it hangs off, as the custom
-//! attributes `_WIND_1` to `_WIND_3` (one per branch order: the pivot that order bends
-//! about in xyz, and how far a point there swings for a unit of flexibility in w, in
-//! metres), and every leaf vertex `_LEAF_ORIGIN`, the twig point its card hangs from.
-//! That is what the viewer's wind shader reads, so an engine can sway the tree the same
-//! way. The species' wind settings go in the root node's `extras`.
+//! With `wind` set, every primitive also carries the `ARBOR_tree_wind` extension, which
+//! is enough for an engine to sway the tree as the viewer does: a table of the stems the
+//! tree bends as (`branches`, two VEC4s a stem: its pivot and reach, then the row of the
+//! stem carrying it, how far out along that one it leaves, and its order; row 0 is the
+//! trunk and empty), the species' `flexibility` per order, `frequency`, `flutter` and the
+//! tree's `height`, and on leaves `leafOrigins`, the twig point each card hangs from.
+//! Each vertex names its row and how far out along it it sits in `TEXCOORD_1`. The tree's
+//! foot is at the origin, which the trunk's bend is reckoned from.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -34,8 +36,10 @@ use crate::cluster::Bitmap;
 use crate::leaves::LeafMesh;
 use crate::math::ortho_of;
 use crate::mesh::Mesh;
-use crate::species::SpeciesParams;
+use crate::skeleton::Skeleton;
+use crate::species::{SpeciesParams, SpeciesTemplate};
 use crate::textures;
+use crate::wind::{SwayAt, SwayField, SwayStem};
 
 /// The viewer's alpha test on leaf cards.
 pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
@@ -60,12 +64,16 @@ const LINEAR_MIPMAP_LINEAR: u32 = 9987;
 const REPEAT: u32 = 10497;
 const CLAMP_TO_EDGE: u32 = 33071;
 
+/// The extension the wind data goes in.
+pub const TREE_WIND_EXTENSION: &str = "ARBOR_tree_wind";
+
 /// What goes into an export besides the geometry.
 #[derive(Clone, Debug, Default)]
 pub struct ExportOptions {
     /// Where the texture maps are read from. `None` writes the materials without any.
     pub textures: Option<PathBuf>,
-    /// Also write each vertex's wind data as custom attributes.
+    /// Also write what an engine needs to sway the tree, in the `ARBOR_tree_wind`
+    /// extension.
     pub wind: bool,
 }
 
@@ -204,10 +212,12 @@ impl Exporter {
     }
 
     /// Writes one tree to `path`, as a `.glb` or a `.gltf` by its extension. `params`
-    /// has to be the species the exporter was made for; only the seed may differ.
+    /// has to be the species the exporter was made for; only the seed may differ. The
+    /// mesh and leaves have to be the ones built from `skeleton`.
     pub fn write(
         &mut self,
         path: &Path,
+        skeleton: &Skeleton,
         mesh: &Mesh,
         leaves: &LeafMesh,
         params: &SpeciesParams,
@@ -225,7 +235,8 @@ impl Exporter {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         let images = self.shared_images.clone().unwrap_or_else(|| stem.clone());
-        let doc = build(format, &stem, &images, mesh, leaves, params, &self.textures, self.wind);
+        let tree = Tree { skeleton, mesh, leaves, params };
+        let doc = build(format, &stem, &images, &tree, &self.textures, self.wind);
         let mut report = ExportReport::default();
         let mut write = |path: PathBuf, bytes: &[u8]| -> Result<(), String> {
             std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -253,26 +264,29 @@ impl Exporter {
 /// Writes the tree to `path`, as a `.glb` or a `.gltf` by its extension.
 pub fn export(
     path: &Path,
+    skeleton: &Skeleton,
     mesh: &Mesh,
     leaves: &LeafMesh,
     params: &SpeciesParams,
     options: &ExportOptions,
 ) -> Result<ExportReport, String> {
     let mut exporter = Exporter::new(params, options)?;
-    let mut report = exporter.write(path, mesh, leaves, params)?;
+    let mut report = exporter.write(path, skeleton, mesh, leaves, params)?;
     report.warnings = exporter.textures.warnings;
     Ok(report)
 }
 
 /// The tree as one `.glb`, in memory.
 pub fn to_glb(
+    skeleton: &Skeleton,
     mesh: &Mesh,
     leaves: &LeafMesh,
     params: &SpeciesParams,
     options: &ExportOptions,
 ) -> Result<Vec<u8>, String> {
     let exporter = Exporter::new(params, options)?;
-    let doc = build(Format::Glb, "tree", "tree", mesh, leaves, params, &exporter.textures, options.wind);
+    let tree = Tree { skeleton, mesh, leaves, params };
+    let doc = build(Format::Glb, "tree", "tree", &tree, &exporter.textures, options.wind);
     Ok(doc.glb())
 }
 
@@ -299,9 +313,12 @@ pub fn batch_file(stem: &str, format: Format, seed: u64, count: u32) -> String {
     }
 }
 
-/// Grows and writes `count` trees of one species into `dir`: the one `params`
-/// describes, and then the same species from each seed after its own. The textures are
-/// prepared once, and a batch of `.gltf` shares one set of image files, `<stem>_*.png`.
+/// Grows and writes `count` trees of one species into `dir`: the one `species` grows at
+/// its own seed, and then one from each seed after it, every range in the species
+/// landing afresh for each. The textures are prepared once, from the first tree, and a
+/// batch of `.gltf` shares one set of image files, `<stem>_*.png` — so a range on a
+/// colour that is baked into an image, the bark tint and the dead-wood colour, varies
+/// between batches but not within one.
 ///
 /// `progress` hears how many trees are done after each one; returning false from it
 /// stops the batch there.
@@ -309,13 +326,13 @@ pub fn export_batch(
     dir: &Path,
     stem: &str,
     format: Format,
-    params: &SpeciesParams,
+    species: &SpeciesTemplate,
     count: u32,
     options: &ExportOptions,
     mut progress: impl FnMut(u32) -> bool,
 ) -> Result<BatchReport, String> {
     let count = count.max(1);
-    let mut exporter = Exporter::new(params, options)?;
+    let mut exporter = Exporter::new(&species.instance(), options)?;
     if count > 1 {
         exporter.share_images(stem);
     }
@@ -324,13 +341,14 @@ pub fn export_batch(
         ..Default::default()
     };
     for i in 0..count {
-        let mut species = params.clone();
-        species.seed = params.seed.wrapping_add(u64::from(i));
-        let skeleton = crate::grow(&species);
-        let mesh = crate::build_mesh(&skeleton, &species);
-        let leaves = crate::build_leaves(&skeleton, &species);
-        let path = dir.join(batch_file(stem, format, species.seed, count));
-        let written = exporter.write(&path, &mesh, &leaves, &species)?;
+        let mut at_seed = species.clone();
+        at_seed.seed = species.seed.wrapping_add(u64::from(i));
+        let tree = at_seed.instance();
+        let skeleton = crate::grow(&tree);
+        let mesh = crate::build_mesh(&skeleton, &tree);
+        let leaves = crate::build_leaves(&skeleton, &tree);
+        let path = dir.join(batch_file(stem, format, tree.seed, count));
+        let written = exporter.write(&path, &skeleton, &mesh, &leaves, &tree)?;
         report.bytes += written.bytes;
         report.trees.push(path);
         if !progress(i + 1) && i + 1 < count {
@@ -378,26 +396,26 @@ impl Document {
     }
 }
 
+/// One grown tree, everything an export reads.
+struct Tree<'a> {
+    skeleton: &'a Skeleton,
+    mesh: &'a Mesh,
+    leaves: &'a LeafMesh,
+    params: &'a SpeciesParams,
+}
+
 /// The document for one tree. `stem` names a `.gltf`'s buffer file and `images` its
 /// image files.
-#[allow(clippy::too_many_arguments)]
-fn build(
-    format: Format,
-    stem: &str,
-    images: &str,
-    mesh: &Mesh,
-    leaves: &LeafMesh,
-    params: &SpeciesParams,
-    textures: &Textures,
-    wind: bool,
-) -> Document {
+fn build(format: Format, stem: &str, images: &str, tree: &Tree, textures: &Textures, wind: bool) -> Document {
+    let Tree { mesh, leaves, params, .. } = *tree;
     let mut doc = Builder::new(format, stem, images);
+    let wind = wind.then(|| TreeWind::new(&mut doc, tree));
 
     let mut children = Vec::new();
     if !mesh.positions.is_empty() {
         let dead = mesh.weathering.iter().any(|&w| w > 0.5);
         let materials = bark_materials(&mut doc, params, textures, dead);
-        let m = bark_mesh(&mut doc, mesh, params, materials, wind);
+        let m = bark_mesh(&mut doc, mesh, params, materials, wind.as_ref());
         children.push(doc.node(r#""name":"bark""#, m));
     }
     if !leaves.is_empty() {
@@ -406,7 +424,7 @@ fn build(
         let last = cols * rows - 1;
         let two_faced = lp.atlas_front.min(last) != lp.atlas_back.min(last);
         let material = leaf_material(&mut doc, textures, two_faced);
-        let m = leaf_mesh(&mut doc, leaves, params, material, two_faced, wind);
+        let m = leaf_mesh(&mut doc, leaves, params, material, two_faced, wind.as_ref());
         children.push(doc.node(r#""name":"leaves""#, m));
     }
 
@@ -415,16 +433,6 @@ fn build(
         json_str(&params.name),
         params.seed
     );
-    if wind {
-        let w = &params.wind;
-        let _ = write!(
-            extras,
-            r#","wind":{{"flexibility":{},"frequency":{},"flutter":{},"attributes":{{"_WIND_1":"limbs","_WIND_2":"branches","_WIND_3":"twigs and finer","xyz":"pivot the order bends about","w":"metres a point there swings per unit of flexibility"}}}}"#,
-            floats(&w.flexibility),
-            num(w.frequency),
-            num(w.flutter)
-        );
-    }
     extras.push('}');
     let child_list = children.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
     let root = doc.nodes.len();
@@ -541,7 +549,7 @@ fn bark_mesh(
     mesh: &Mesh,
     params: &SpeciesParams,
     (living, dead): (usize, Option<usize>),
-    wind: bool,
+    wind: Option<&TreeWind>,
 ) -> usize {
     let n = mesh.positions.len();
     let normals: Vec<[f32; 3]> = mesh.normals.iter().map(|&v| unit_or(v, [0.0, 1.0, 0.0])).collect();
@@ -574,13 +582,12 @@ fn bark_mesh(
             .collect();
         attrs.push(("COLOR_0", doc.floats(&flat(&shade), 3, false)));
     }
-    if wind && mesh.sway.len() == n {
-        for (o, name) in ["_WIND_1", "_WIND_2", "_WIND_3"].into_iter().enumerate() {
-            let order: Vec<[f32; 4]> = mesh.sway.iter().map(|s| s[o]).collect();
-            attrs.push((name, doc.floats(&flat(&order), 4, false)));
-        }
+    let wind = wind.filter(|_| mesh.sway_at.len() == n);
+    if let Some(wind) = wind {
+        attrs.push(("TEXCOORD_1", wind.places(doc, &mesh.sway_at)));
     }
     let attrs = attributes(&attrs);
+    let extension = wind.map_or(String::new(), |w| w.extension(None));
 
     let (mut alive, mut gone) = (Vec::new(), Vec::new());
     for tri in mesh.indices.chunks_exact(3) {
@@ -591,7 +598,9 @@ fn bark_mesh(
     for (indices, material) in [(alive, Some(living)), (gone, dead)] {
         if let (false, Some(material)) = (indices.is_empty(), material) {
             let idx = doc.indices(&indices, n);
-            primitives.push(format!(r#"{{"attributes":{attrs},"indices":{idx},"material":{material}}}"#));
+            primitives.push(format!(
+                r#"{{"attributes":{attrs},"indices":{idx},"material":{material}{extension}}}"#
+            ));
         }
     }
     doc.mesh("bark", &primitives)
@@ -604,7 +613,7 @@ fn leaf_mesh(
     params: &SpeciesParams,
     material: usize,
     two_faced: bool,
-    wind: bool,
+    wind: Option<&TreeWind>,
 ) -> usize {
     let lp = &params.leaves;
     let n = leaves.positions.len();
@@ -638,12 +647,11 @@ fn leaf_mesh(
     let position = doc.floats(&flat(&leaves.positions), 3, true);
     let color = doc.floats(&flat(&tints), 3, false);
     let mut shared = vec![("POSITION", position), ("COLOR_0", color)];
-    if wind && leaves.sway.len() == n && leaves.origins.len() == n {
-        for (o, name) in ["_WIND_1", "_WIND_2", "_WIND_3"].into_iter().enumerate() {
-            let order: Vec<[f32; 4]> = leaves.sway.iter().map(|s| s[o]).collect();
-            shared.push((name, doc.floats(&flat(&order), 4, false)));
-        }
-        shared.push(("_LEAF_ORIGIN", doc.floats(&flat(&leaves.origins), 3, false)));
+    let mut extension = String::new();
+    if let Some(wind) = wind.filter(|_| leaves.sway_at.len() == n && leaves.origins.len() == n) {
+        shared.push(("TEXCOORD_1", wind.places(doc, &leaves.sway_at)));
+        let origins = doc.data(&flat(&leaves.origins), 3);
+        extension = wind.extension(Some(origins));
     }
 
     let mut primitives = Vec::new();
@@ -653,7 +661,7 @@ fn leaf_mesh(
         attrs.push(("TEXCOORD_0", doc.floats(&flat(uvs), 2, false)));
         let idx = doc.indices(indices, n);
         primitives.push(format!(
-            r#"{{"attributes":{},"indices":{idx},"material":{material}}}"#,
+            r#"{{"attributes":{},"indices":{idx},"material":{material}{extension}}}"#,
             attributes(&attrs)
         ));
     };
@@ -668,6 +676,80 @@ fn leaf_mesh(
         side(doc, &flipped, &uvs_for(cell(lp.atlas_back)), &reversed);
     }
     doc.mesh("leaves", &primitives)
+}
+
+/// The tree's `ARBOR_tree_wind` data, shared by every primitive: the table of stems,
+/// written once, and the species' wind settings.
+struct TreeWind {
+    /// The accessor holding the table.
+    branches: usize,
+    /// Row of the table each stem is in, by its first node.
+    rows: std::collections::HashMap<u32, u32>,
+    settings: String,
+}
+
+impl TreeWind {
+    /// Writes the table of every stem a vertex of the tree bends with, and every stem
+    /// carrying those, into the document.
+    fn new(doc: &mut Builder, tree: &Tree) -> Self {
+        let stems: std::collections::HashMap<u32, SwayStem> = SwayField::new(tree.skeleton)
+            .stems()
+            .into_iter()
+            .map(|s| (s.first, s))
+            .collect();
+        let mut used = std::collections::BTreeSet::new();
+        for at in tree.mesh.sway_at.iter().chain(&tree.leaves.sway_at) {
+            let mut stem = at.stem;
+            while let Some(first) = stem.filter(|&f| used.insert(f)) {
+                stem = stems.get(&first).and_then(|s| s.carrier.stem);
+            }
+        }
+        // First nodes come in growth order, so a stem's carrier always has the lower row.
+        let rows: std::collections::HashMap<u32, u32> =
+            used.iter().filter(|f| stems.contains_key(f)).zip(1u32..).map(|(&f, row)| (f, row)).collect();
+        let mut table = vec![[0.0f32; 4]; 2 * (rows.len() + 1)];
+        for (first, &row) in &rows {
+            let stem = &stems[first];
+            let carrier = stem.carrier.stem.and_then(|c| rows.get(&c)).copied().unwrap_or(0);
+            let at = 2 * row as usize;
+            table[at] = [stem.pivot.x, stem.pivot.y, stem.pivot.z, stem.reach];
+            table[at + 1] = [carrier as f32, stem.carrier.t, f32::from(stem.order), 0.0];
+        }
+        let branches = doc.data(&flat(&table), 4);
+
+        let w = &tree.params.wind;
+        let settings = format!(
+            r#""flexibility":{},"frequency":{},"flutter":{},"height":{}"#,
+            floats(&w.flexibility),
+            num(w.frequency),
+            num(w.flutter),
+            num(tree.skeleton.stats().height)
+        );
+        doc.uses(TREE_WIND_EXTENSION);
+        Self { branches, rows, settings }
+    }
+
+    /// Each vertex's row in the table and how far out along that stem it sits, as a
+    /// `TEXCOORD_1` accessor.
+    fn places(&self, doc: &mut Builder, at: &[SwayAt]) -> usize {
+        let places: Vec<[f32; 2]> = at
+            .iter()
+            .map(|a| match a.stem.and_then(|s| self.rows.get(&s)) {
+                Some(&row) => [row as f32, a.t],
+                None => [0.0, 0.0],
+            })
+            .collect();
+        doc.floats(&flat(&places), 2, false)
+    }
+
+    /// The extension as it goes on a primitive, with a leaf primitive's card origins.
+    fn extension(&self, leaf_origins: Option<usize>) -> String {
+        let origins = leaf_origins.map_or(String::new(), |a| format!(r#","leafOrigins":{a}"#));
+        format!(
+            r#","extensions":{{"{TREE_WIND_EXTENSION}":{{"branches":{}{origins},{}}}}}"#,
+            self.branches, self.settings
+        )
+    }
 }
 
 /// Dead wood as the viewer draws it at full weathering: toward `dead` in hue and tone,
@@ -746,6 +828,7 @@ struct Builder {
     meshes: Vec<String>,
     nodes: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
+    extensions: Vec<&'static str>,
 }
 
 impl Builder {
@@ -764,6 +847,7 @@ impl Builder {
             meshes: Vec::new(),
             nodes: Vec::new(),
             files: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 
@@ -785,8 +869,17 @@ impl Builder {
 
     /// A float attribute of `width` components per vertex. Positions need their bounds.
     fn floats(&mut self, data: &[f32], width: usize, bounds: bool) -> usize {
+        self.accessor(data, width, bounds, Some(ARRAY_BUFFER))
+    }
+
+    /// Floats an extension reads, rather than the vertices.
+    fn data(&mut self, data: &[f32], width: usize) -> usize {
+        self.accessor(data, width, false, None)
+    }
+
+    fn accessor(&mut self, data: &[f32], width: usize, bounds: bool, target: Option<u32>) -> usize {
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let view = self.view(&bytes, Some(ARRAY_BUFFER));
+        let view = self.view(&bytes, target);
         let count = data.len() / width;
         let kind = match width {
             1 => "SCALAR",
@@ -871,6 +964,13 @@ impl Builder {
         self.meshes.len() - 1
     }
 
+    /// Names an extension in `extensionsUsed`.
+    fn uses(&mut self, extension: &'static str) {
+        if !self.extensions.contains(&extension) {
+            self.extensions.push(extension);
+        }
+    }
+
     fn node(&mut self, fields: &str, mesh: usize) -> usize {
         self.nodes.push(format!(r#"{{{fields},"mesh":{mesh}}}"#));
         self.nodes.len() - 1
@@ -885,9 +985,12 @@ impl Builder {
                 self.bin.len()
             ),
         };
-        let mut json = String::from(
-            r#"{"asset":{"version":"2.0","generator":"arbor"},"scene":0,"scenes":["#,
-        );
+        let mut json = String::from(r#"{"asset":{"version":"2.0","generator":"arbor"}"#);
+        if !self.extensions.is_empty() {
+            let used: Vec<String> = self.extensions.iter().map(|e| json_str(e)).collect();
+            let _ = write!(json, r#","extensionsUsed":[{}]"#, used.join(","));
+        }
+        json.push_str(r#","scene":0,"scenes":["#);
         json.push_str(&scene);
         json.push(']');
         for (key, items) in [
@@ -994,10 +1097,11 @@ mod tests {
     use crate::species::{parse_species, OAK_RON, PINE_RON};
     use ron::Value;
 
-    fn grown(src: &str) -> (Mesh, LeafMesh, SpeciesParams) {
+    fn grown(src: &str) -> (Skeleton, Mesh, LeafMesh, SpeciesParams) {
         let params = parse_species(src).unwrap();
         let sk = crate::grow(&params);
-        (crate::build_mesh(&sk, &params), crate::build_leaves(&sk, &params), params)
+        let (mesh, leaves) = (crate::build_mesh(&sk, &params), crate::build_leaves(&sk, &params));
+        (sk, mesh, leaves, params)
     }
 
     /// The JSON chunk and the buffer chunk of a `.glb`, having checked the container.
@@ -1120,6 +1224,22 @@ mod tests {
         out
     }
 
+    /// The floats an accessor holds.
+    fn read_floats(doc: &Value, bin: &[u8], accessor: usize) -> Vec<f32> {
+        let a = &seq(get(doc, "accessors"))[accessor];
+        let view = &seq(get(doc, "bufferViews"))[int(get(a, "bufferView"))];
+        let at = int(get(view, "byteOffset"));
+        let width = match text(get(a, "type")).as_str() {
+            "SCALAR" => 1,
+            "VEC2" => 2,
+            "VEC3" => 3,
+            _ => 4,
+        };
+        (0..int(get(a, "count")) * width)
+            .map(|i| f32::from_le_bytes(bin[at + i * 4..at + i * 4 + 4].try_into().unwrap()))
+            .collect()
+    }
+
     fn material_names(doc: &Value, prims: &[Value]) -> Vec<String> {
         let materials = seq(get(doc, "materials"));
         prims
@@ -1130,8 +1250,8 @@ mod tests {
 
     #[test]
     fn a_glb_is_one_well_formed_scene_of_bark_and_leaves() {
-        let (mesh, leaves, params) = grown(PINE_RON);
-        let glb = to_glb(&mesh, &leaves, &params, &ExportOptions::default()).unwrap();
+        let (sk, mesh, leaves, params) = grown(PINE_RON);
+        let glb = to_glb(&sk, &mesh, &leaves, &params, &ExportOptions::default()).unwrap();
         let (doc, bin) = chunks(&glb);
         let meshes = validate(&doc, bin);
         let names: Vec<&str> = meshes.iter().map(|(n, _)| n.as_str()).collect();
@@ -1152,9 +1272,9 @@ mod tests {
     fn dead_wood_is_its_own_material() {
         // The pine's dead band is bleached silver in the viewer; a single bark material
         // would export it as living bark.
-        let (mesh, leaves, params) = grown(PINE_RON);
+        let (sk, mesh, leaves, params) = grown(PINE_RON);
         assert!(params.mesh.dead_wood_weathering > 0.0);
-        let glb = to_glb(&mesh, &leaves, &params, &ExportOptions::default()).unwrap();
+        let glb = to_glb(&sk, &mesh, &leaves, &params, &ExportOptions::default()).unwrap();
         let (doc, bin) = chunks(&glb);
         let meshes = validate(&doc, bin);
         assert_eq!(material_names(&doc, &meshes[0].1), ["bark", "dead_wood"]);
@@ -1164,8 +1284,8 @@ mod tests {
     fn a_card_with_a_different_underside_is_exported_from_both_sides() {
         // The oak shows the pale underside of its leaf from behind. glTF cannot pick a
         // texture by which face is seen, so it takes a back-facing copy of every card.
-        let (mesh, leaves, params) = grown(OAK_RON);
-        let glb = to_glb(&mesh, &leaves, &params, &ExportOptions::default()).unwrap();
+        let (sk, mesh, leaves, params) = grown(OAK_RON);
+        let glb = to_glb(&sk, &mesh, &leaves, &params, &ExportOptions::default()).unwrap();
         let (doc, bin) = chunks(&glb);
         let meshes = validate(&doc, bin);
         let materials = seq(get(&doc, "materials"));
@@ -1174,8 +1294,8 @@ mod tests {
         assert!(!has(&materials[int(get(&prims[0], "material"))], "doubleSided"));
 
         // The pine's cards read one cell from either side, so they stay single.
-        let (mesh, leaves, params) = grown(PINE_RON);
-        let glb = to_glb(&mesh, &leaves, &params, &ExportOptions::default()).unwrap();
+        let (sk, mesh, leaves, params) = grown(PINE_RON);
+        let glb = to_glb(&sk, &mesh, &leaves, &params, &ExportOptions::default()).unwrap();
         let (doc, bin) = chunks(&glb);
         let meshes = validate(&doc, bin);
         let materials = seq(get(&doc, "materials"));
@@ -1186,29 +1306,82 @@ mod tests {
 
     #[test]
     fn wind_data_goes_in_only_when_asked_for() {
-        let (mesh, leaves, params) = grown(PINE_RON);
-        let attribute_names = |wind: bool| -> Vec<String> {
+        let (sk, mesh, leaves, params) = grown(PINE_RON);
+        let export = |wind: bool| {
             let options = ExportOptions {
                 wind,
                 ..Default::default()
             };
-            let glb = to_glb(&mesh, &leaves, &params, &options).unwrap();
+            let glb = to_glb(&sk, &mesh, &leaves, &params, &options).unwrap();
             let (doc, bin) = chunks(&glb);
-            let mut names = Vec::new();
-            for (_, prims) in validate(&doc, bin) {
-                for p in prims {
-                    if let Value::Map(m) = get(&p, "attributes") {
-                        names.extend(m.keys().map(text));
+            let prims: Vec<Value> = validate(&doc, bin).into_iter().flat_map(|(_, p)| p).collect();
+            (doc, prims)
+        };
+        let (doc, prims) = export(false);
+        assert!(!has(&doc, "extensionsUsed"));
+        for p in &prims {
+            assert!(!has(p, "extensions") && !has(get(p, "attributes"), "TEXCOORD_1"));
+        }
+        let (doc, prims) = export(true);
+        assert!(seq(get(&doc, "extensionsUsed")).iter().any(|e| text(e) == TREE_WIND_EXTENSION));
+        for p in &prims {
+            assert!(has(get(p, "attributes"), "TEXCOORD_1"));
+            let wind = get(get(p, "extensions"), TREE_WIND_EXTENSION);
+            for key in ["branches", "flexibility", "frequency", "flutter", "height"] {
+                assert!(has(wind, key), "no {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_wind_table_gives_back_every_vertex_s_sway() {
+        // What an engine reading the extension does: walk each vertex up the table of
+        // stems. It has to come to the sway the viewer draws the vertex with.
+        use crate::wind::{cantilever, SWAY_ORDERS};
+        let (sk, mesh, leaves, params) = grown(OAK_RON);
+        let options = ExportOptions {
+            wind: true,
+            ..Default::default()
+        };
+        let glb = to_glb(&sk, &mesh, &leaves, &params, &options).unwrap();
+        let (doc, bin) = chunks(&glb);
+        for (name, prims) in validate(&doc, bin) {
+            let expected = if name == "bark" { &mesh.sway } else { &leaves.sway };
+            for p in &prims {
+                let wind = get(get(p, "extensions"), TREE_WIND_EXTENSION);
+                let table = read_floats(&doc, bin, int(get(wind, "branches")));
+                assert!(table[..8].iter().all(|&v| v == 0.0), "row 0 is the trunk's, and empty");
+                let places = read_floats(&doc, bin, int(get(get(p, "attributes"), "TEXCOORD_1")));
+                assert_eq!(places.len(), expected.len() * 2);
+                for (v, sway) in expected.iter().enumerate() {
+                    let mut walked = [[0.0f32; 4]; SWAY_ORDERS];
+                    let (mut row, mut t) = (places[v * 2] as usize, places[v * 2 + 1]);
+                    for _ in 0..SWAY_ORDERS {
+                        if row == 0 {
+                            break;
+                        }
+                        let stem = &table[row * 8..row * 8 + 8];
+                        walked[stem[6] as usize] = [stem[0], stem[1], stem[2], stem[3] * cantilever(t)];
+                        (row, t) = (stem[4] as usize, stem[5]);
+                    }
+                    assert_eq!(row, 0, "{name} vertex {v}: the walk never reached the trunk");
+                    for o in 0..SWAY_ORDERS {
+                        assert!(
+                            (walked[o][3] - sway[o][3]).abs() < 1e-4,
+                            "{name} vertex {v}, order {o}: swings {} by the table and {} in the viewer",
+                            walked[o][3],
+                            sway[o][3]
+                        );
+                        if sway[o][3] > 0.0 {
+                            assert_eq!(walked[o][..3], sway[o][..3], "{name} vertex {v} bends order {o} about another pivot");
+                        }
                     }
                 }
+                if name == "leaves" {
+                    let origins = read_floats(&doc, bin, int(get(wind, "leafOrigins")));
+                    assert_eq!(origins, flat(&leaves.origins));
+                }
             }
-            names
-        };
-        let without = attribute_names(false);
-        assert!(without.iter().all(|a| !a.starts_with('_')), "{without:?}");
-        let with = attribute_names(true);
-        for a in ["_WIND_1", "_WIND_2", "_WIND_3", "_LEAF_ORIGIN"] {
-            assert!(with.iter().any(|w| w == a), "no {a} in {with:?}");
         }
     }
 
@@ -1218,12 +1391,12 @@ mod tests {
         dir
     }
 
-    fn fir_open() -> SpeciesParams {
+    fn fir_open() -> SpeciesTemplate {
         let (_, src) = crate::species::builtin_presets()
             .into_iter()
             .find(|(name, _)| *name == "fir_open")
             .expect("the open-grown fir is a built-in");
-        parse_species(src).unwrap()
+        crate::species::parse_template(src).unwrap()
     }
 
     #[test]
@@ -1302,14 +1475,14 @@ mod tests {
 
     #[test]
     fn a_gltf_names_its_buffer_and_textures_as_files_beside_it() {
-        let (mesh, leaves, params) = grown(PINE_RON);
+        let (sk, mesh, leaves, params) = grown(PINE_RON);
         let dir = std::env::temp_dir().join(format!("arbor-gltf-test-{}", std::process::id()));
         let path = dir.join("my pine.gltf");
         let options = ExportOptions {
             textures: Some(PathBuf::from("../../assets/textures")),
             wind: false,
         };
-        let report = export(&path, &mesh, &leaves, &params, &options).unwrap();
+        let report = export(&path, &sk, &mesh, &leaves, &params, &options).unwrap();
         let doc: Value = ron::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(text(get(&seq(get(&doc, "buffers"))[0], "uri")), "my%20pine.bin");
         let images = seq(get(&doc, "images"));

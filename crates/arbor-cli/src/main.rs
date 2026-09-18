@@ -1,5 +1,5 @@
 use arbor_core::gltf::{self, ExportOptions};
-use arbor_core::species::{builtin_presets, parse_species, CUSTOM_PRESET_DIR};
+use arbor_core::species::{builtin_presets, parse_template, CUSTOM_PRESET_DIR};
 use arbor_core::textures::TEXTURE_DIR;
 use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
 
@@ -83,16 +83,19 @@ fn main() {
         }),
     };
 
-    let mut params = parse_species(&ron_text).unwrap_or_else(|e| {
+    let mut species = parse_template(&ron_text).unwrap_or_else(|e| {
         eprintln!("species parse error: {e}");
         std::process::exit(1);
     });
+    // The seed goes on the species rather than the tree, since it decides where every
+    // range in the species lands as well as how the tree grows.
     if let Some(seed) = seed_override {
-        params.seed = seed;
+        species.seed = seed;
     }
     if no_leaves {
-        params.leaves.enabled = false;
+        species.leaves.enabled = false;
     }
+    let params = species.instance();
 
     let t = std::time::Instant::now();
     let skeleton = grow(&params);
@@ -103,6 +106,9 @@ fn main() {
 
     println!("species: {}", params.name);
     println!("seed:    {}", params.seed);
+    for (key, range, landed) in species.landings() {
+        println!("  {key} = {landed:.4} (of {} to {})", range.lo(), range.hi());
+    }
     println!("{stats:#?}");
     println!("verts:   {}", mesh.vertex_count());
     println!("tris:    {}", mesh.triangle_count());
@@ -133,7 +139,7 @@ fn main() {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("tree");
         // The batch grows each tree again, which for the one already grown above is the
         // same tree: growth is deterministic.
-        let report = gltf::export_batch(dir, stem, format, &params, variations, &options, |done| {
+        let report = gltf::export_batch(dir, stem, format, &species, variations, &options, |done| {
             if variations > 1 {
                 eprint!("\rexporting {done}/{variations}");
             }
@@ -263,8 +269,10 @@ fn print_usage() {
     println!("--glb writes one self-contained glTF binary, textures and all.");
     println!("--gltf writes glTF JSON, with its buffer and textures as files beside it.");
     println!("  Textures are read from {TEXTURE_DIR} unless --textures says otherwise;");
-    println!("  --no-textures leaves them out. --wind-data adds each vertex's sway pivots");
-    println!("  and weights as custom attributes, for driving wind in an engine.");
+    println!("  --no-textures leaves them out. --wind-data adds what an engine needs to sway");
+    println!("  the tree, in the ARBOR_tree_wind extension.");
     println!("  --variations N writes N trees, from the seed and each one after it, each");
     println!("  named for its seed: out_seed7.glb, out_seed8.glb, and so on.");
+    println!("Any number in a species may be a range, `length: (12.0, 18.0)`: each seed lands");
+    println!("somewhere in it, and the landings are printed with the stats.");
 }

@@ -18,7 +18,9 @@ use glam::{Mat4, Vec3};
 
 use arbor_core::gltf::{self, ExportOptions, Format};
 use arbor_core::species::{LeafClusterParams, CUSTOM_PRESET_DIR};
-use arbor_core::{build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
+use arbor_core::{
+    build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams, SpeciesTemplate,
+};
 
 use gpu::{
     ColorPass, DepthPass, GpuGround, GpuLeaves, GpuLines, GpuMesh, GpuSky, GroundDrawParams,
@@ -147,14 +149,15 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Grows `count` trees from `params` — its own seed, then each one after — and writes
-/// them into `dir` named after `name`, returning the line the panel reports it with.
+/// Grows `count` trees of `params` — its own seed, then each one after, every range
+/// landing afresh for each — and writes them into `dir` named after `name`, returning
+/// the line the panel reports it with.
 /// `progress` hears how many are done after each; returning false stops the batch.
 fn export_trees(
     dir: &Path,
     name: &str,
     format: Format,
-    params: &SpeciesParams,
+    params: &SpeciesTemplate,
     count: u32,
     options: &ExportOptions,
     progress: impl FnMut(u32) -> bool,
@@ -195,7 +198,7 @@ struct ExportJob {
 /// What the save field offers for a preset once it is loaded: a saved one's own name,
 /// so saving again replaces it, and a variant name for a built-in, which cannot be
 /// saved over.
-fn save_name_for(preset: &presets::Preset, params: &SpeciesParams) -> String {
+fn save_name_for(preset: &presets::Preset, params: &SpeciesTemplate) -> String {
     if !preset.is_saved() {
         return format!("{}_custom", preset.name);
     }
@@ -311,7 +314,11 @@ struct App {
     /// window it belongs to is to hand.
     browse_requested: bool,
     export_job: Option<ExportJob>,
-    params: SpeciesParams,
+    /// The species the panel edits and saves, ranges and all.
+    params: SpeciesTemplate,
+    /// What the tree on screen was grown from: `params` with every range landed where
+    /// the seed puts it. Everything drawn reads this rather than `params`.
+    grown: SpeciesParams,
     skeleton: Skeleton,
     stats: SkeletonStats,
     mesh_stats: (usize, usize),
@@ -376,12 +383,13 @@ impl App {
         if let Some(seed) = startup.seed {
             params.seed = seed;
         }
-        let skeleton = grow(&params);
-        let mesh = build_mesh(&skeleton, &params);
+        let grown = params.instance();
+        let skeleton = grow(&grown);
+        let mesh = build_mesh(&skeleton, &grown);
         let aabb = mesh.aabb();
         let mesh_stats = (mesh.vertex_count(), mesh.triangle_count());
 
-        let leaves = build_leaves(&skeleton, &params);
+        let leaves = build_leaves(&skeleton, &grown);
         let leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
 
         let mut mesh_gpu = GpuMesh::new(&gl);
@@ -395,10 +403,10 @@ impl App {
         let color_pass = ColorPass::new(&gl);
         let sky_pass = GpuSky::new(&gl);
         let ground_pass = GpuGround::new(&gl);
-        let loaded_bark = params.mesh.bark_texture.clone();
-        let loaded_leaf = (params.leaves.texture.clone(), params.leaves.cluster.clone());
+        let loaded_bark = grown.mesh.bark_texture.clone();
+        let loaded_leaf = (grown.leaves.texture.clone(), grown.leaves.cluster.clone());
         let bark_material = unsafe { gpu::load_material(&gl, TEXTURE_DIR, &loaded_bark) };
-        let leaf_material = unsafe { gpu::load_leaf_material(&gl, TEXTURE_DIR, &params.leaves) };
+        let leaf_material = unsafe { gpu::load_leaf_material(&gl, TEXTURE_DIR, &grown.leaves) };
 
         let mut app = Self {
             gl: Arc::clone(&gl),
@@ -426,6 +434,7 @@ impl App {
             browse_requested: false,
             export_job: None,
             params,
+            grown,
             skeleton,
             stats: SkeletonStats::default(),
             mesh_stats,
@@ -537,12 +546,13 @@ impl App {
 
     fn regenerate(&mut self) {
         let t = std::time::Instant::now();
-        self.skeleton = grow(&self.params);
-        let mesh = build_mesh(&self.skeleton, &self.params);
+        self.grown = self.params.instance();
+        self.skeleton = grow(&self.grown);
+        let mesh = build_mesh(&self.skeleton, &self.grown);
         self.aabb = mesh.aabb();
         self.mesh_stats = (mesh.vertex_count(), mesh.triangle_count());
         self.mesh_gpu.lock().unwrap().upload(&self.gl, &mesh);
-        let leaves = build_leaves(&self.skeleton, &self.params);
+        let leaves = build_leaves(&self.skeleton, &self.grown);
         self.leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
         self.leaves_gpu.lock().unwrap().upload(&self.gl, &leaves);
         self.sync_materials();
@@ -558,15 +568,15 @@ impl App {
     /// Textures follow the species, so a preset switch has to swap them and hand the
     /// old ones back rather than keep loading new ones on top.
     fn sync_materials(&mut self) {
-        if self.params.mesh.bark_texture != self.loaded_bark {
+        if self.grown.mesh.bark_texture != self.loaded_bark {
             self.bark_material.delete(&self.gl);
-            self.loaded_bark = self.params.mesh.bark_texture.clone();
+            self.loaded_bark = self.grown.mesh.bark_texture.clone();
             self.bark_material =
                 unsafe { gpu::load_material(&self.gl, TEXTURE_DIR, &self.loaded_bark) };
         }
         let leaf_key = (
-            self.params.leaves.texture.clone(),
-            self.params.leaves.cluster.clone(),
+            self.grown.leaves.texture.clone(),
+            self.grown.leaves.cluster.clone(),
         );
         if leaf_key != self.loaded_leaf {
             if let Some(old) = self.leaf_material.take() {
@@ -574,7 +584,7 @@ impl App {
             }
             self.loaded_leaf = leaf_key;
             self.leaf_material =
-                unsafe { gpu::load_leaf_material(&self.gl, TEXTURE_DIR, &self.params.leaves) };
+                unsafe { gpu::load_leaf_material(&self.gl, TEXTURE_DIR, &self.grown.leaves) };
         }
     }
 
@@ -792,8 +802,9 @@ impl App {
                  (name_seed7.glb), so any of them can be grown again.",
             );
             ui.checkbox(&mut self.export_wind, "Wind data").on_hover_text(
-                "Also write each vertex's sway pivots and weights as custom attributes \
-                 (_WIND_1 to _WIND_3, and _LEAF_ORIGIN on leaves), for driving wind in an engine.",
+                "Also write what an engine needs to sway the tree as the viewer does: a table \
+                 of the stems it bends as, and where each vertex sits on them (the \
+                 ARBOR_tree_wind extension).",
             );
         });
         ui.horizontal(|ui| {
@@ -950,9 +961,15 @@ impl App {
             }
         });
 
+        // Where this seed lands in every range, for the panel to say under each one.
+        // Taken from the panel's own species rather than from the tree on screen, so it
+        // is never a level short of what the panel is drawing, and a range being dragged
+        // reports where the tree is about to land.
+        let mut landed = self.params.instance().template();
+
         ui.separator();
         ui.label("Shape");
-        self.dirty |= knobs::knobs_ui(ui, &mut self.params, knobs::SHAPE);
+        self.dirty |= knobs::knobs_ui(ui, &mut self.params, &mut landed, knobs::SHAPE);
 
         let mut levels = u32::from(self.params.max_levels);
         if ui
@@ -968,7 +985,13 @@ impl App {
             self.dirty = true;
         }
         self.dirty |= knobs::count_ui(ui, &mut self.params, &knobs::SPLIT_DEPTH);
-        self.dirty |= knobs::group_ui(ui, "envelope", &mut self.params.envelope, &knobs::ENVELOPE);
+        self.dirty |= knobs::group_ui(
+            ui,
+            "envelope",
+            &mut self.params.envelope,
+            &mut landed.envelope,
+            &knobs::ENVELOPE,
+        );
 
         ui.separator();
         ui.label("Branching");
@@ -981,7 +1004,7 @@ impl App {
             egui::CollapsingHeader::new(title)
                 .id_salt(("level", level))
                 .show(ui, |ui| {
-                    self.dirty |= knobs::level_ui(ui, &mut self.params, level);
+                    self.dirty |= knobs::level_ui(ui, &mut self.params, &mut landed, level);
                 });
         }
 
@@ -1054,8 +1077,11 @@ impl App {
         ui.add(egui::Slider::new(&mut self.wind_direction, 0.0..=360.0).text("Direction"))
             .on_hover_text("Bearing the wind blows toward, in degrees, measured like the sun's azimuth.");
         // These are the species' own and are saved with it, but nothing about them
-        // changes what grows, so they never mark the tree for regrowing.
-        knobs::group_ui(ui, "wind", &mut self.params.wind, &knobs::WIND);
+        // changes what grows, so they never mark the tree for regrowing — only the sway
+        // the tree on screen is drawn with has to follow.
+        if knobs::group_ui(ui, "wind", &mut self.params.wind, &mut landed.wind, &knobs::WIND) {
+            self.grown.wind = self.params.instance().wind;
+        }
 
         ui.separator();
         ui.label("Foliage");
@@ -1065,7 +1091,8 @@ impl App {
             leaves.enabled = leafy;
             self.dirty = true;
         }
-        self.dirty |= knobs::knobs_ui(ui, &mut self.params.leaves, knobs::FOLIAGE);
+        self.dirty |=
+            knobs::knobs_ui(ui, &mut self.params.leaves, &mut landed.leaves, knobs::FOLIAGE);
         let mut min_level = u32::from(self.params.leaves.min_level);
         if ui
             .add(
@@ -1080,16 +1107,24 @@ impl App {
             self.dirty = true;
         }
         for group in knobs::FOLIAGE_MORE {
-            self.dirty |= knobs::group_ui(ui, "foliage", &mut self.params.leaves, group);
+            self.dirty |=
+                knobs::group_ui(ui, "foliage", &mut self.params.leaves, &mut landed.leaves, group);
         }
 
         ui.separator();
         ui.label("Bark & roots");
         for group in knobs::BARK {
-            self.dirty |= knobs::group_ui(ui, "bark", &mut self.params.mesh, group);
+            self.dirty |=
+                knobs::group_ui(ui, "bark", &mut self.params.mesh, &mut landed.mesh, group);
         }
         for group in knobs::IRREGULARITY {
-            self.dirty |= knobs::group_ui(ui, "bark", &mut self.params.mesh.irregularity, group);
+            self.dirty |= knobs::group_ui(
+                ui,
+                "bark",
+                &mut self.params.mesh.irregularity,
+                &mut landed.mesh.irregularity,
+                group,
+            );
         }
 
         ui.separator();
@@ -1253,7 +1288,7 @@ impl eframe::App for App {
                 let tree_height = self.stats.height.max(1.0);
                 let wind = if self.wind_on {
                     WindUniforms::new(
-                        &self.params.wind,
+                        &self.grown.wind,
                         self.wind_clock,
                         self.wind_direction,
                         self.wind_strength,
@@ -1265,9 +1300,9 @@ impl eframe::App for App {
                 };
                 let bark_material = self.bark_material;
                 let leaf_material = self.leaf_material;
-                let bark_look = gpu::BarkLook::from_species(&self.params.mesh);
+                let bark_look = gpu::BarkLook::from_species(&self.grown.mesh);
                 let mut leaf_params =
-                    LeafMaterialParams::from_species(&self.params.leaves, self.leaf_translucency);
+                    LeafMaterialParams::from_species(&self.grown.leaves, self.leaf_translucency);
                 leaf_params.coverage_lod = self.coverage_lod;
                 let draw_leaves = self.show_leaves && leaf_material.is_some();
                 let cam = self.camera;
@@ -1462,7 +1497,8 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbor_core::species::{builtin_presets, parse_species, ChildPattern};
+    use arbor_core::species::{builtin_presets, parse_template, ChildPattern};
+    use arbor_core::Ranged;
 
     #[test]
     fn an_export_writes_its_trees_and_says_where() {
@@ -1471,7 +1507,7 @@ mod tests {
             .into_iter()
             .find(|(name, _)| *name == "fir_open")
             .expect("the open-grown fir is a built-in");
-        let mut params = parse_species(src).unwrap();
+        let mut params = parse_template(src).unwrap();
         params.seed = 7;
         let dir = std::env::temp_dir().join(format!("arbor-viewer-export-{}", std::process::id()));
         let options = ExportOptions {
@@ -1506,17 +1542,22 @@ mod tests {
     /// and checks every level each preset declares. See the note at the top of
     /// `knobs`: the sliders no longer write a clamped value back over the species, but a
     /// range that does not reach a preset's value leaves a slider that cannot return to
-    /// it once touched.
+    /// it once touched. A number the preset gives as a range has both its ends checked,
+    /// since each has a handle of its own.
     #[test]
     fn species_values_fit_their_sliders() {
         use knobs::{Count, Group, Knob};
 
+        fn check_value(bad: &mut Vec<String>, at: &str, v: Ranged, (lo, hi): (f32, f32)) {
+            for end in [v.lo(), v.hi()] {
+                if !(end >= lo && end <= hi) {
+                    bad.push(format!("{at}: {end} outside {lo}..={hi}"));
+                }
+            }
+        }
         fn check_knobs<T>(bad: &mut Vec<String>, at: &str, target: &mut T, knobs: &[Knob<T>]) {
             for k in knobs {
-                let v = *(k.get)(target);
-                if !(v >= k.range.0 && v <= k.range.1) {
-                    bad.push(format!("{at} {}: {v} outside {}..={}", k.label, k.range.0, k.range.1));
-                }
+                check_value(bad, &format!("{at} {}", k.label), *(k.get)(target), k.range);
             }
         }
         fn check_counts<T>(bad: &mut Vec<String>, at: &str, target: &mut T, counts: &[Count<T>]) {
@@ -1542,7 +1583,7 @@ mod tests {
 
         let mut bad = Vec::new();
         for (name, src) in builtin_presets() {
-            let mut p = parse_species(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut p = parse_template(src).unwrap_or_else(|e| panic!("{name}: {e}"));
             check_knobs(&mut bad, name, &mut p, knobs::SHAPE);
             check_counts(&mut bad, name, &mut p, std::slice::from_ref(&knobs::SPLIT_DEPTH));
             within(&mut bad, &format!("{name} max_levels"), u32::from(p.max_levels), knobs::BRANCH_LEVELS);
@@ -1557,10 +1598,8 @@ mod tests {
                             within(&mut bad, &format!("{at} per whorl"), *count, knobs::WHORL_COUNT);
                         }
                         ChildPattern::Continuous { density } => {
-                            let (lo, hi) = knobs::DENSITY;
-                            if !(*density >= lo && *density <= hi) {
-                                bad.push(format!("{at} density: {density} outside {lo}..={hi}"));
-                            }
+                            let at = format!("{at} density");
+                            check_value(&mut bad, &at, *density, knobs::DENSITY);
                         }
                     }
                     check_groups(&mut bad, &format!("{at} spawn"), spawn, knobs::CHILDREN);

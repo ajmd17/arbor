@@ -23,7 +23,7 @@ use crate::math::{ortho_of, ortho_unit, transport};
 use crate::seed::{range_f32, TreeRng};
 use crate::skeleton::Skeleton;
 use crate::species::{LeafParams, SpeciesParams};
-use crate::wind::{StemSway, Sway, SwayField};
+use crate::wind::{StemSway, Sway, SwayAt, SwayField};
 
 /// Ceiling on card count, so a dense preset cannot allocate without bound.
 const MAX_LEAVES: usize = 400_000;
@@ -51,6 +51,8 @@ pub struct LeafMesh {
     /// under it, for the renderer to sway. A card rides that point rigidly, so all
     /// four corners carry the sway of the origin rather than of where they are.
     pub sway: Vec<Sway>,
+    /// Per vertex, the same told by stem, for an engine that keeps a table of stems.
+    pub sway_at: Vec<SwayAt>,
     pub indices: Vec<u32>,
 }
 
@@ -87,6 +89,7 @@ struct Card {
     atlas_v: f32,
     /// How the twig carrying the card sways where the card hangs from it.
     sway: Sway,
+    sway_at: SwayAt,
 }
 
 pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
@@ -143,6 +146,7 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
     mesh.tints.reserve(cards.len() * 4);
     mesh.origins.reserve(cards.len() * 4);
     mesh.sway.reserve(cards.len() * 4);
+    mesh.sway_at.reserve(cards.len() * 4);
     mesh.indices.reserve(cards.len() * 6);
     for card in &cards {
         emit_card(&mut mesh, card, lp, center, radius);
@@ -232,6 +236,7 @@ fn place_on_stem(
             // The walk starts where the twig leaves its parent, as the sway does, so
             // the distance walked is the distance the sway is read off at.
             let hang = sway.at(walked + travelled);
+            let hang_at = sway.place(walked + travelled);
             // Every card in a cluster shares one anchor and one base direction, and
             // fans out from it, so the canopy reads as tufts rather than a uniform
             // spray of evenly spaced leaves.
@@ -274,6 +279,7 @@ fn place_on_stem(
                     variant.min(variants - 1) as f32 / variants as f32,
                 );
                 card.sway = hang;
+                card.sway_at = hang_at;
                 out.push(card);
             }
         }
@@ -337,6 +343,7 @@ fn make_card(
         hue: range_f32(rng, -1.0, 1.0),
         atlas_v,
         sway: Sway::default(),
+        sway_at: SwayAt::default(),
     }
 }
 
@@ -397,6 +404,7 @@ fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, ra
         mesh.tints.push(tint);
         mesh.origins.push(card.origin.to_array());
         mesh.sway.push(card.sway);
+        mesh.sway_at.push(card.sway_at);
     }
     mesh.indices
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

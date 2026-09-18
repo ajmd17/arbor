@@ -1344,7 +1344,8 @@ fn da_vinci_exp(params: &SpeciesParams, level: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{parse_species, BIRCH_RON, OAK_RON, PINE_RON, SPRUCE_RON};
+    use crate::ranged::Ranged;
+    use crate::species::{parse_species, parse_template, BIRCH_RON, OAK_RON, PINE_RON, SPRUCE_RON};
 
     /// Every stem in the skeleton, as (level, length, children it carries, the
     /// fraction along its parent where it attaches).
@@ -2760,22 +2761,26 @@ mod tests {
             "limbs that only just died kept only {high_cut:.1} m of {high_full:.1} m"
         );
     }
+
+    /// The share of the tree's height above its highest living branch: the leader
+    /// standing bare over its own crown.
+    fn bare_tip(params: &SpeciesParams) -> f32 {
+        let sk = grow(params);
+        let height = sk.stats().height;
+        let top = sk
+            .nodes
+            .iter()
+            .filter(|n| n.level > 0 && !n.dead)
+            .map(|n| n.position.y)
+            .fold(0.0f32, f32::max);
+        (height - top) / height
+    }
+
     #[test]
     fn the_crown_stretches_with_the_trunk() {
         // The envelope is drawn in metres for one trunk length. Declared longer, the
         // trunk used to climb out of the top of it and come out as a bare spike over
         // the old crown; with `for_trunk_length` set the crown stretches to follow.
-        let bare_tip = |params: &SpeciesParams| -> f32 {
-            let sk = grow(params);
-            let height = sk.stats().height;
-            let top = sk
-                .nodes
-                .iter()
-                .filter(|n| n.level > 0 && !n.dead)
-                .map(|n| n.position.y)
-                .fold(0.0f32, f32::max);
-            (height - top) / height
-        };
         let mut params = parse_species(PINE_RON).unwrap();
         assert!(
             params.envelope.for_trunk_length > 0.0,
@@ -2800,6 +2805,56 @@ mod tests {
              out bare, but the bare tip is {:.0}% against {:.0}% stretched",
             absolute * 100.0,
             taller * 100.0
+        );
+    }
+
+    #[test]
+    fn a_trunk_given_a_range_grows_each_tree_its_own_height_under_its_own_crown() {
+        // What a range is for: one species, trees of different heights. Each seed lands
+        // its own trunk length, and the crown climbs with it, because the envelope is
+        // stretched by the length the tree landed on. That is the difference from
+        // `length_variance`, which the leader draws for itself as it grows and the crown
+        // never hears about.
+        let mut species = parse_template(PINE_RON).unwrap();
+        let declared = species.trunk.length.lo();
+        let at_preset = bare_tip(&species.instance());
+        species.trunk.length = Ranged::Between(declared * 0.7, declared * 1.3);
+        species.trunk.length_variance = Ranged::Fixed(0.0);
+
+        let mut trees = Vec::new();
+        for seed in 1..=8 {
+            species.seed = seed;
+            let tree = species.instance();
+            let landed = tree.trunk.length;
+            assert!(
+                (declared * 0.7..=declared * 1.3).contains(&landed),
+                "seed {seed} landed {landed:.1} m, outside the range"
+            );
+            let bare = bare_tip(&tree);
+            assert!(
+                bare < at_preset + 0.05,
+                "seed {seed} landed a {landed:.1} m trunk and left {:.0}% of it bare over the \
+                 crown, against {:.0}% at the preset's own length",
+                bare * 100.0,
+                at_preset * 100.0
+            );
+            trees.push((landed, grow(&tree).stats().height));
+        }
+        trees.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (short, tall) = (trees[0], trees[trees.len() - 1]);
+        assert!(
+            tall.0 - short.0 > declared * 0.25,
+            "eight seeds should spread across the range, but landed only {:.1} to {:.1} m",
+            short.0,
+            tall.0
+        );
+        assert!(
+            tall.1 - short.1 > (tall.0 - short.0) * 0.6,
+            "the trunk landed {:.1} and {:.1} m but the trees stand {:.1} and {:.1} m",
+            short.0,
+            tall.0,
+            short.1,
+            tall.1
         );
     }
     #[test]

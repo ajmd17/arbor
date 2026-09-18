@@ -1,6 +1,6 @@
 use arbor_core::species::{
-    parse_species, BIRCH_RON, DOUGLAS_FIR_OPEN_RON, DOUGLAS_FIR_RON, OAK_RON, PINE_RON,
-    SPRUCE_RON,
+    parse_species, parse_template, BIRCH_RON, DOUGLAS_FIR_OPEN_RON, DOUGLAS_FIR_RON, OAK_RON,
+    PINE_RON, SPRUCE_RON,
 };
 use arbor_core::grow;
 
@@ -681,11 +681,11 @@ fn stems_arc_without_curling_round_on_themselves() {
         ("fir", DOUGLAS_FIR_RON),
         ("fir_open", DOUGLAS_FIR_OPEN_RON),
     ] {
-        let params = parse_species(ron).unwrap();
+        let species = parse_template(ron).unwrap();
         for seed in 1..=8u64 {
-            let mut params = params.clone();
-            params.seed = seed;
-            let sk = grow(&params);
+            let mut species = species.clone();
+            species.seed = seed;
+            let sk = grow(&species.instance());
             let (turn, straightness) = worst_stem_turn(&sk);
             // A limb may sweep from upright to below the horizontal on its way out —
             // that is the whole shape of an oak limb — but it may not come round.
@@ -708,8 +708,9 @@ fn stems_arc_without_curling_round_on_themselves() {
 #[test]
 fn pine_carries_its_dead_limbs_under_a_living_crown() {
     for seed in 1..=4u64 {
-        let mut params = parse_species(PINE_RON).unwrap();
-        params.seed = seed;
+        let mut species = parse_template(PINE_RON).unwrap();
+        species.seed = seed;
+        let params = species.instance();
         let sk = grow(&params);
         let height = sk.stats().height;
 

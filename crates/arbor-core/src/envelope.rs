@@ -1,6 +1,8 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::ranged::{key, Scalar};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EnvelopeVolume {
     Ellipsoid {
@@ -145,18 +147,21 @@ fn smoothstep(x: f32) -> f32 {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct EnvelopeParams {
+#[serde(
+    default = "EnvelopeParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct EnvelopeParams<V = f32> {
     pub volumes: Vec<EnvelopeVolume>,
-    pub falloff: f32,
-    pub kill_threshold: f32,
+    pub falloff: V,
+    pub kill_threshold: V,
     /// How hard the crown turns a stem that is on its way out of it, in radians per
     /// metre grown. Per metre rather than per segment, so a level with short segments
     /// is not steered several times harder than one with long segments for the same
     /// setting. Only a stem heading outward is turned at all: a pull that keeps
     /// acting once the stem has come back round is a fixed force toward a fixed
     /// point, which curls the stem into a loop rather than settling it.
-    pub pull_strength: f32,
+    pub pull_strength: V,
     /// The trunk length the volumes were drawn for, in metres. Zero means they are
     /// absolute and stay where they are whatever the trunk does.
     ///
@@ -167,7 +172,7 @@ pub struct EnvelopeParams {
     /// stretch along the trunk by the ratio of the two lengths and the crown keeps its
     /// place on the tree. Only the heights stretch — a taller tree is not, by that
     /// alone, a wider one — so the width stays with `envelope_scale`.
-    pub for_trunk_length: f32,
+    pub for_trunk_length: V,
 }
 
 impl Default for EnvelopeParams {
@@ -181,6 +186,24 @@ impl Default for EnvelopeParams {
             kill_threshold: 0.03,
             pull_strength: 0.6,
             for_trunk_length: 0.0,
+        }
+    }
+}
+
+impl<V: Scalar> EnvelopeParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        EnvelopeParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> EnvelopeParams<W> {
+        EnvelopeParams {
+            volumes: self.volumes.clone(),
+            falloff: f(&key(at, "falloff"), self.falloff),
+            kill_threshold: f(&key(at, "kill_threshold"), self.kill_threshold),
+            pull_strength: f(&key(at, "pull_strength"), self.pull_strength),
+            for_trunk_length: f(&key(at, "for_trunk_length"), self.for_trunk_length),
         }
     }
 }

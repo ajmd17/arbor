@@ -30,7 +30,7 @@ mod lighting;
 mod mipmap;
 
 use arbor_core::cluster::{bake_cluster, Bitmap, LeafMaps};
-use arbor_core::species::{builtin_presets, parse_species, LeafParams};
+use arbor_core::species::{builtin_presets, parse_template, LeafParams};
 use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
 use glam::{Mat4, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::{Rgb, RgbImage};
@@ -179,10 +179,11 @@ fn main() {
         .find(|(n, _)| *n == name)
         .map(|(_, s)| s.to_string())
         .unwrap_or_else(|| std::fs::read_to_string(&name).expect("read species"));
-    let mut params: SpeciesParams = parse_species(&src).expect("parse species");
+    let mut species = parse_template(&src).expect("parse species");
     if let Some(seed) = flag("--seed").and_then(|s| s.parse().ok()) {
-        params.seed = seed;
+        species.seed = seed;
     }
+    let mut params: SpeciesParams = species.instance();
     params.leaves.enabled &= want_leaves;
 
     let sk = grow(&params);

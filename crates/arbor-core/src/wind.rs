@@ -12,6 +12,12 @@
 //!
 //! The trunk needs no data of its own: its bend is a function of height alone, and the
 //! renderer has the height.
+//!
+//! The same thing can be told by stem instead of by pivot, for an engine that would
+//! rather keep a table than three pivots on every vertex: each stem once, with its pivot,
+//! its reach and where it leaves the stem carrying it (`SwayField::stems`), and on each
+//! vertex only the finest stem it bends with and how far out along it (`SwayAt`).
+//! Walking the carriers from there gives back exactly the vertex's `Sway`.
 
 use glam::Vec3;
 
@@ -25,6 +31,31 @@ pub const SWAY_ORDERS: usize = 3;
 /// An order the vertex does not reach — the trunk has none, a limb has only the first
 /// — carries zero weight, and its pivot means nothing.
 pub type Sway = [[f32; 4]; SWAY_ORDERS];
+
+/// Where a point sits on the wood that sways it, told by stem: the finest stem it bends
+/// with, named by that stem's first node, and how far out along it the point is carried
+/// from, as a fraction of its reach. `stem` is `None` on the trunk.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SwayAt {
+    pub stem: Option<u32>,
+    pub t: f32,
+}
+
+/// Everything that bends as one about one pivot, in one order: a limb with its forks, a
+/// branch with its, or all the twigs and finer off one point of a branch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SwayStem {
+    /// Its first node, which is what a `SwayAt` names it by.
+    pub first: u32,
+    /// Where it is attached, which it bends about.
+    pub pivot: Vec3,
+    /// How far out along it anything reaches, in metres.
+    pub reach: f32,
+    /// 0 for a limb, 1 for a branch, 2 for twigs and finer.
+    pub order: u8,
+    /// Where it leaves the coarser stem carrying it. A limb's is the trunk, `None`.
+    pub carrier: SwayAt,
+}
 
 /// Whether a stem at `level` bends as part of `order`. The last order takes every level
 /// from its own down, because twigs, sprigs and the shoots on them are too short against
@@ -109,6 +140,39 @@ impl SwayField {
         Self { nodes, reach }
     }
 
+    /// Every stem the tree sways as, in the order of their first nodes, so a stem always
+    /// comes after the one carrying it.
+    pub fn stems(&self) -> Vec<SwayStem> {
+        let mut out = Vec::new();
+        for (i, hangs) in self.nodes.iter().enumerate() {
+            let first = i as u32;
+            // A node starts at most one stem: the one of the order its level bends in.
+            let Some(order) = hangs.iter().position(|h| h.root == Some(first)) else {
+                continue;
+            };
+            out.push(SwayStem {
+                first,
+                pivot: hangs[order].pivot,
+                reach: self.reach[i],
+                order: order as u8,
+                carrier: self.place(&hangs[..order]),
+            });
+        }
+        out
+    }
+
+    /// Where a point hanging as `hangs` says sits: on the finest order of them it reaches.
+    fn place(&self, hangs: &[Hang]) -> SwayAt {
+        hangs
+            .iter()
+            .rev()
+            .find_map(|h| {
+                let root = h.root?;
+                Some(SwayAt { stem: Some(root), t: fraction(h.arc, self.reach[root as usize]) })
+            })
+            .unwrap_or_default()
+    }
+
     /// The sway of node `i` itself.
     pub fn node(&self, i: usize) -> Sway {
         let mut out = [[0.0; 4]; SWAY_ORDERS];
@@ -130,6 +194,7 @@ impl SwayField {
                 let Some(root) = hang.root else { continue };
                 let grows = in_order(o, node.level);
                 *out = OrderSway {
+                    root: Some(root),
                     pivot: hang.pivot,
                     start: if grows { hang.arc - seg } else { hang.arc },
                     grows,
@@ -155,8 +220,20 @@ fn weight(arc: f32, reach: f32) -> f32 {
     }
 }
 
+/// How far out along a stem of the given reach `arc` is, 0 to 1. The weight is the reach
+/// times the cantilever of this, and the cantilever clamps anyway.
+fn fraction(arc: f32, reach: f32) -> f32 {
+    if reach <= 1e-6 {
+        0.0
+    } else {
+        (arc / reach).clamp(0.0, 1.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct OrderSway {
+    /// First node of the stem of this order, `None` where the stem does not reach it.
+    root: Option<u32>,
     pivot: Vec3,
     /// Arc of this order at the stem's attachment.
     start: f32,
@@ -184,6 +261,19 @@ impl StemSway {
             out[o] = [s.pivot.x, s.pivot.y, s.pivot.z, weight(arc, s.reach)];
         }
         out
+    }
+
+    /// The same point as `at`, told by stem.
+    pub fn place(&self, along: f32) -> SwayAt {
+        self.orders
+            .iter()
+            .rev()
+            .find_map(|s| {
+                let stem = s.root?;
+                let arc = s.start + if s.grows { along.max(0.0) } else { 0.0 };
+                Some(SwayAt { stem: Some(stem), t: fraction(arc, s.reach) })
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -259,6 +349,65 @@ mod tests {
                 checked += 1;
             }
             assert!(checked > 100, "{}: only {checked} junctions", params.name);
+        }
+    }
+
+    /// A point's sway worked out the way an engine keeping a table of stems does it.
+    fn walk(stems: &std::collections::HashMap<u32, SwayStem>, mut at: SwayAt) -> Sway {
+        let mut out = [[0.0; 4]; SWAY_ORDERS];
+        while let Some(first) = at.stem {
+            let stem = stems[&first];
+            let o = usize::from(stem.order);
+            out[o] = [stem.pivot.x, stem.pivot.y, stem.pivot.z, stem.reach * cantilever(at.t)];
+            at = stem.carrier;
+        }
+        out
+    }
+
+    #[test]
+    fn a_table_of_stems_gives_back_every_point_s_sway() {
+        for src in [OAK_RON, PINE_RON] {
+            let params = parse_species(src).unwrap();
+            let sk = crate::grow(&params);
+            let field = SwayField::new(&sk);
+            let stems: std::collections::HashMap<u32, SwayStem> =
+                field.stems().into_iter().map(|s| (s.first, s)).collect();
+            for stem in stems.values() {
+                if let Some(carrier) = stem.carrier.stem {
+                    assert!(
+                        stems[&carrier].order < stem.order,
+                        "stem {} is carried by one no coarser",
+                        stem.first
+                    );
+                }
+            }
+            let mut checked = 0;
+            for run in sk.stem_runs() {
+                let first = run[0] as usize;
+                let sway = field.stem(&sk, first);
+                let length: f32 = run
+                    .windows(2)
+                    .map(|w| (sk.nodes[w[1] as usize].position - sk.nodes[w[0] as usize].position).length())
+                    .sum();
+                for k in 0..=4 {
+                    let along = length * k as f32 / 4.0;
+                    let (direct, walked) = (sway.at(along), walk(&stems, sway.place(along)));
+                    for o in 0..SWAY_ORDERS {
+                        assert!(
+                            (direct[o][3] - walked[o][3]).abs() < 1e-4,
+                            "{}: stem at node {first}, {along} m out, order {o}: {} from the vertex, {} from the table",
+                            params.name,
+                            direct[o][3],
+                            walked[o][3]
+                        );
+                        if direct[o][3] > 0.0 {
+                            assert_eq!(direct[o][..3], walked[o][..3], "order {o} bends about another pivot");
+                        }
+                    }
+                    checked += 1;
+                }
+            }
+            assert!(checked > 500, "{}: only {checked} points", params.name);
         }
     }
 
