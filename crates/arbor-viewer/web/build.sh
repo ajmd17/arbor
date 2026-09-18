@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Builds the viewer for the web into target/web: the page, the wasm, and the texture
-# maps the built-in species draw with. Put that folder on any static host, or try it
-# locally:
+# Builds the viewer for the web into docs/: the page, the wasm, and the texture maps
+# the built-in species draw with. GitHub Pages serves that folder straight from the
+# branch; any other static host takes it as it is. To try it locally:
 #
 #   bash crates/arbor-viewer/web/build.sh
-#   python -m http.server 8080 -d target/web      # then open http://localhost:8080
+#   python -m http.server 8080 -d docs      # then open http://localhost:8080
 #
 # Needs the wasm32-unknown-unknown target, and wasm-bindgen-cli at the same version as
 # the wasm-bindgen crate in Cargo.lock (`cargo tree -i wasm-bindgen --target
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-out="$root/target/web"
+out="$root/docs"
 cd "$root"
 
 if ! command -v wasm-bindgen >/dev/null; then
@@ -28,6 +28,8 @@ mkdir -p "$out"
 wasm-bindgen --target web --no-typescript --out-dir "$out" --out-name arbor \
     target/wasm32-unknown-unknown/release/arbor-viewer.wasm
 cp crates/arbor-viewer/web/index.html "$out/"
+# Served as it is, not run through Jekyll first.
+touch "$out/.nojekyll"
 
 # The page fetches a species' maps from beside it as the species is picked. Only the
 # sets the built-in species name are taken: the rest of the folder is source art.

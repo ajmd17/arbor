@@ -91,12 +91,13 @@ The viewer also builds for the web, on WebGL2:
 
 ```bash
 bash crates/arbor-viewer/web/build.sh
-python -m http.server 8080 -d target/web
+python -m http.server 8080 -d docs
 ```
 
-Then open http://localhost:8080. `target/web` is the whole site: the page, the wasm,
-and the texture maps the built-in species use (about 55 MB, most of it the spruce
-bark). It works on any static host.
+Then open http://localhost:8080. `docs/` is the whole site: the page, the wasm, and
+the texture maps the built-in species use (about 55 MB, most of it the spruce bark).
+GitHub Pages serves it from the branch (**Settings → Pages → Deploy from a branch**,
+folder `/docs`), and it works on any other static host.
 
 The build needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli`. The CLI's
 version has to match the `wasm-bindgen` crate in `Cargo.lock`, which

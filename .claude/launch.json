@@ -4,7 +4,7 @@
     {
       "name": "arbor-web",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8080", "-d", "target/web"],
+      "runtimeArgs": ["-m", "http.server", "8080", "-d", "docs"],
       "port": 8080
     }
   ]
