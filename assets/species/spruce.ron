@@ -300,10 +300,9 @@
         texture: "needle_conifer",
     ),
     wind: (
-        strength: 0.3,
-        gustiness: 0.35,
         flutter: 0.4,
         flexibility: (0.04, 0.12, 0.3, 0.75),
+        frequency: 0.28,
     ),
     mesh: (
         // Spruce bark is thinner and scalier than a pine's, in small flaking plates

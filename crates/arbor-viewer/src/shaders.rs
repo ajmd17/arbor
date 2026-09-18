@@ -73,12 +73,140 @@ vec3 present(vec3 color) {
 }
 "#;
 
-pub const MESH_VS: &str = r#"#version 150
-in vec3 a_pos;
+/// GLSL every vertex shader that draws the tree shares, so the tree, its shadow and
+/// its wireframe all sway as one.
+///
+/// Each vertex arrives knowing, for the limb, the branch and the twigs it belongs to,
+/// where that stem is attached and how far a point there swings (`a_wind1..3`: pivot in
+/// xyz, weight in metres in w). Each order is bent about its own attachment, finest
+/// first, and then the whole tree about its foot, so a twig rides its branch and the
+/// branch its limb. A bend keeps only the part of a push square to the arm it acts on,
+/// and the arm keeps its length, so wood swings rather than stretches — and a limb
+/// pointing straight downwind is not shoved along its own length.
+pub const WIND_GLSL: &str = r#"
+uniform float u_time;
+// xy: the way the wind blows, on the ground (x, z). z: strength, 1 a full gale.
+// w: gustiness. A strength of zero is still air, and everything below is skipped.
+uniform vec4 u_wind;
+// How far the trunk, the limbs, the branches and the twigs bend in a full gale.
+uniform vec4 u_wind_flex;
+// x: how fast the trunk sways, in hertz. y: how far a leaf flutters, in radians.
+uniform vec2 u_wind_motion;
+uniform float u_tree_height;
+
+const float WIND_TAU = 6.28318531;
+
+float wind_hash(vec3 p) {
+    return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+vec3 wind_down() { return vec3(u_wind.x, 0.0, u_wind.y); }
+vec3 wind_across() { return vec3(-u_wind.y, 0.0, u_wind.x); }
+
+// How hard the wind is blowing at `p` just now. Gusts are slow swells and lulls that
+// travel downwind, so the near side of a crown takes one a moment before the far side.
+float wind_strength(vec3 p) {
+    float t = u_time - dot(p.xz, u_wind.xy) / 8.0;
+    float g = 0.5 + 0.26 * sin(t * 0.53) + 0.16 * sin(t * 1.31 + 1.7) + 0.08 * sin(t * 3.1 + 0.4);
+    return u_wind.z * max(1.0 + u_wind.w * (2.0 * g - 1.0), 0.0);
+}
+
+// A cantilever's deflection under an even load, 0 at the root and 1 at the tip.
+float wind_cantilever(float x) {
+    x = clamp(x, 0.0, 1.0);
+    return x * x * (6.0 - 4.0 * x + x * x) / 3.0;
+}
+
+vec3 wind_bend(vec3 p, vec3 pivot, vec3 push) {
+    vec3 arm = p - pivot;
+    float len = length(arm);
+    if (len < 1e-4) {
+        return p;
+    }
+    return pivot + normalize(arm + push) * len;
+}
+
+// One order of wood: pushed downwind, bobbing up and down and swinging across, each
+// stem on its own phase and at its own pace so no two limbs move in step.
+vec3 wind_order(vec3 p, vec4 anchor, float flex, float pace) {
+    if (anchor.w <= 0.0 || flex <= 0.0) {
+        return p;
+    }
+    float h = wind_hash(anchor.xyz);
+    float phase = h * WIND_TAU;
+    float omega = WIND_TAU * u_wind_motion.x * pace * (0.8 + 0.4 * fract(h * 7.31));
+    float t = u_time;
+    vec3 push = wind_down() * (0.55 + 0.45 * sin(omega * t + phase))
+        + vec3(0.0, 0.6 * sin(omega * 1.37 * t + phase * 1.9), 0.0)
+        + wind_across() * (0.35 * sin(omega * 0.73 * t + phase * 2.7));
+    return wind_bend(p, anchor.xyz, push * (wind_strength(anchor.xyz) * flex * anchor.w));
+}
+
+// The whole tree about its foot: a lean that follows the gusts, and a sway about it at
+// the trunk's own pace that the turbulence keeps going.
+vec3 wind_trunk(vec3 p) {
+    float height = max(u_tree_height, 1.0);
+    float w = height * wind_cantilever(p.y / height);
+    if (w <= 0.0) {
+        return p;
+    }
+    float omega = WIND_TAU * u_wind_motion.x;
+    float t = u_time;
+    float sway = u_wind.z * (0.2 + 0.4 * u_wind.w);
+    vec3 push = wind_down() * (wind_strength(vec3(0.0)) + sway * sin(omega * t))
+        + wind_across() * (sway * 0.35 * sin(omega * 0.81 * t + 1.1));
+    return wind_bend(p, vec3(0.0), push * (u_wind_flex.x * w));
+}
+
+vec3 wind_displace(vec3 p, vec4 w1, vec4 w2, vec4 w3) {
+    if (u_wind.z <= 0.0) {
+        return p;
+    }
+    p = wind_order(p, w3, u_wind_flex.w, 4.6);
+    p = wind_order(p, w2, u_wind_flex.z, 3.0);
+    p = wind_order(p, w1, u_wind_flex.y, 1.9);
+    return wind_trunk(p);
+}
+
+vec3 wind_rotate(vec3 v, vec3 axis, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+
+// A leaf card rides the point of the twig it hangs from, rigidly, and flutters about
+// it. The normal turns with the card, which is what makes a canopy shimmer.
+vec3 wind_leaf(vec3 pos, inout vec3 normal, vec3 origin, vec4 w1, vec4 w2, vec4 w3) {
+    if (u_wind.z <= 0.0) {
+        return pos;
+    }
+    vec3 local = pos - origin;
+    if (u_wind_motion.y > 0.0) {
+        float h = wind_hash(origin);
+        float omega = WIND_TAU * (3.5 + 3.0 * h);
+        float t = u_time;
+        float angle = u_wind_motion.y * wind_strength(origin)
+            * (0.7 * sin(omega * t + h * WIND_TAU) + 0.3 * sin(omega * 2.3 * t + h * 17.0));
+        // Mostly about a level axis, so a leaf flaps and twists rather than spinning
+        // flat, each on its own heading.
+        float a = fract(h * 13.7) * WIND_TAU;
+        vec3 axis = normalize(wind_across() * cos(a) + wind_down() * sin(a)
+            + vec3(0.0, 0.35 * (fract(h * 5.3) - 0.5), 0.0));
+        local = wind_rotate(local, axis, angle);
+        normal = wind_rotate(normal, axis, angle);
+    }
+    return wind_displace(origin, w1, w2, w3) + local;
+}
+"#;
+
+const MESH_VS_BODY: &str = r#"in vec3 a_pos;
 in vec3 a_normal;
 in vec2 a_uv;
 in vec4 a_tangent;
 in float a_weathering;
+in vec4 a_wind1;
+in vec4 a_wind2;
+in vec4 a_wind3;
 uniform mat4 u_view_proj;
 uniform mat4 u_light_view_proj;
 uniform float u_normal_bias;
@@ -89,7 +217,8 @@ out vec4 v_tangent;
 out vec4 v_shadow;
 out float v_weathering;
 void main() {
-    v_world = a_pos;
+    vec3 pos = wind_displace(a_pos, a_wind1, a_wind2, a_wind3);
+    v_world = pos;
     v_normal = a_normal;
     v_uv = a_uv;
     v_tangent = a_tangent;
@@ -97,9 +226,19 @@ void main() {
     // Looked up a little along the normal rather than at the surface itself. With a
     // low sun the light grazes everything, and that is where plain depth bias either
     // stripes the bark with acne or lifts the shadow off its caster.
-    v_shadow = u_light_view_proj * vec4(a_pos + a_normal * u_normal_bias, 1.0);
-    gl_Position = u_view_proj * vec4(a_pos, 1.0);
+    v_shadow = u_light_view_proj * vec4(pos + a_normal * u_normal_bias, 1.0);
+    gl_Position = u_view_proj * vec4(pos, 1.0);
 }"#;
+
+/// Every vertex shader that sways puts the wind ahead of its own body.
+fn with_wind(body: &str) -> String {
+    format!("#version 150
+{WIND_GLSL}{body}")
+}
+
+pub fn mesh_vs() -> String {
+    with_wind(MESH_VS_BODY)
+}
 
 const MESH_FS_BODY: &str = r#"in vec3 v_world;
 in vec3 v_normal;
@@ -256,12 +395,20 @@ pub fn mesh_fs() -> String {
 {SKY_GLSL}{MESH_FS_BODY}")
 }
 
-pub const DEPTH_VS: &str = r#"#version 150
-in vec3 a_pos;
+/// Bark into the shadow map, swayed exactly as the colour pass sways it, or the tree
+/// would move through a shadow that stands still.
+const DEPTH_VS_BODY: &str = r#"in vec3 a_pos;
+in vec4 a_wind1;
+in vec4 a_wind2;
+in vec4 a_wind3;
 uniform mat4 u_light_view_proj;
 void main() {
-    gl_Position = u_light_view_proj * vec4(a_pos, 1.0);
+    gl_Position = u_light_view_proj * vec4(wind_displace(a_pos, a_wind1, a_wind2, a_wind3), 1.0);
 }"#;
+
+pub fn depth_vs() -> String {
+    with_wind(DEPTH_VS_BODY)
+}
 
 pub const DEPTH_FS: &str = r#"#version 150
 out vec4 out_color;
@@ -269,12 +416,30 @@ void main() {
     out_color = vec4(1.0);
 }"#;
 
-pub const COLOR_VS: &str = r#"#version 150
-in vec3 a_pos;
+/// The wireframe, swayed with what it outlines. Bark and leaf cards both come
+/// through here, told apart by `u_leaf`, because a card rides its origin rather than
+/// bending where its corners happen to be.
+const COLOR_VS_BODY: &str = r#"in vec3 a_pos;
+in vec4 a_wind1;
+in vec4 a_wind2;
+in vec4 a_wind3;
+in vec3 a_leaf_origin;
 uniform mat4 u_view_proj;
+uniform int u_leaf;
 void main() {
-    gl_Position = u_view_proj * vec4(a_pos, 1.0);
+    vec3 pos;
+    if (u_leaf == 1) {
+        vec3 normal = vec3(0.0, 1.0, 0.0);
+        pos = wind_leaf(a_pos, normal, a_leaf_origin, a_wind1, a_wind2, a_wind3);
+    } else {
+        pos = wind_displace(a_pos, a_wind1, a_wind2, a_wind3);
+    }
+    gl_Position = u_view_proj * vec4(pos, 1.0);
 }"#;
+
+pub fn color_vs() -> String {
+    with_wind(COLOR_VS_BODY)
+}
 
 pub const COLOR_FS: &str = r#"#version 150
 uniform vec4 u_color;
@@ -300,13 +465,17 @@ void main() {
     out_color = vec4(v_col, 1.0);
 }"#;
 
-pub const LEAF_VS: &str = r#"#version 150
-in vec3 a_pos;
+const LEAF_VS_BODY: &str = r#"in vec3 a_pos;
 in vec3 a_normal;
 in vec2 a_uv;
 in vec4 a_tint;
 // Offset down the atlas to the cluster arrangement this card draws.
 in float a_atlas_v;
+in vec4 a_wind1;
+in vec4 a_wind2;
+in vec4 a_wind3;
+// The point of its twig the card hangs from, which it rides and flutters about.
+in vec3 a_leaf_origin;
 uniform mat4 u_view_proj;
 uniform mat4 u_light_view_proj;
 uniform float u_normal_bias;
@@ -317,14 +486,20 @@ out vec4 v_tint;
 out vec4 v_shadow;
 out float v_atlas_v;
 void main() {
-    v_world = a_pos;
-    v_normal = a_normal;
+    vec3 normal = a_normal;
+    vec3 pos = wind_leaf(a_pos, normal, a_leaf_origin, a_wind1, a_wind2, a_wind3);
+    v_world = pos;
+    v_normal = normal;
     v_card_uv = a_uv;
     v_tint = a_tint;
     v_atlas_v = a_atlas_v;
-    v_shadow = u_light_view_proj * vec4(a_pos + a_normal * u_normal_bias, 1.0);
-    gl_Position = u_view_proj * vec4(a_pos, 1.0);
+    v_shadow = u_light_view_proj * vec4(pos + normal * u_normal_bias, 1.0);
+    gl_Position = u_view_proj * vec4(pos, 1.0);
 }"#;
+
+pub fn leaf_vs() -> String {
+    with_wind(LEAF_VS_BODY)
+}
 
 const LEAF_FS_BODY: &str = r#"in vec3 v_world;
 in vec3 v_normal;
@@ -529,18 +704,28 @@ pub fn leaf_fs() -> String {
 {SKY_GLSL}{LEAF_FS_BODY}")
 }
 
-pub const LEAF_DEPTH_VS: &str = r#"#version 150
-in vec3 a_pos;
+const LEAF_DEPTH_VS_BODY: &str = r#"in vec3 a_pos;
+in vec3 a_normal;
 in vec2 a_uv;
 in float a_atlas_v;
+in vec4 a_wind1;
+in vec4 a_wind2;
+in vec4 a_wind3;
+in vec3 a_leaf_origin;
 uniform mat4 u_light_view_proj;
 out vec2 v_card_uv;
 out float v_atlas_v;
 void main() {
     v_card_uv = a_uv;
     v_atlas_v = a_atlas_v;
-    gl_Position = u_light_view_proj * vec4(a_pos, 1.0);
+    vec3 normal = a_normal;
+    vec3 pos = wind_leaf(a_pos, normal, a_leaf_origin, a_wind1, a_wind2, a_wind3);
+    gl_Position = u_light_view_proj * vec4(pos, 1.0);
 }"#;
+
+pub fn leaf_depth_vs() -> String {
+    with_wind(LEAF_DEPTH_VS_BODY)
+}
 
 pub const LEAF_DEPTH_FS: &str = r#"#version 150
 in vec2 v_card_uv;

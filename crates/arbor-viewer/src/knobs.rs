@@ -13,7 +13,7 @@
 //! fir as a 32 m one under a crown based at 25 m. What the range still decides is
 //! whether the handle can reach the preset's own value, so it has to cover every one.
 
-use arbor_core::species::{BarkIrregularity, ChildParams, ChildPattern, LeafParams, MeshParams, StemParams};
+use arbor_core::species::{BarkIrregularity, ChildParams, ChildPattern, LeafParams, MeshParams, StemParams, WindParams};
 use arbor_core::{EnvelopeParams, SpeciesParams};
 use eframe::egui;
 
@@ -187,6 +187,7 @@ pub static CHILDREN: &[Group<ChildParams>] = &[
             knob("Scale variance", (0.0, 1.0), "Symmetric spread of that share between siblings.", |c| &mut c.scale_variance),
             knob("Dominance", (0.0, 1.0), "How unequally siblings share the drive. High gives a few long winners and many suppressed stems.", |c| &mut c.dominance),
             knob("Acrotony", (-1.0, 1.0), "Positive favours children near the parent's tip; negative favours those near its base.", |c| &mut c.acrotony),
+            knob("Tip reach", (0.0, 4.0), "Longest a child (side branch or fork) may grow, as a multiple of the parent still to come past it, so children near the parent's tip stay short. Zero uses the default: 1 off a branch, no limit off the trunk.", |c| &mut c.tip_reach),
         ],
         counts: &[],
     },
@@ -340,6 +341,24 @@ pub static IRREGULARITY: &[Group<BarkIrregularity>] = &[
         counts: &[],
     },
 ];
+
+// ---------------------------------------------------------------------------------
+// Wind
+
+/// How the species gives to the wind. None of these regrow the tree: they are read by
+/// the shaders every frame, so the panel must not mark the tree dirty for them.
+pub static WIND: Group<WindParams> = Group {
+    title: "How this species gives",
+    knobs: &[
+        knob("Trunk flex", (0.0, 0.3), "How far the trunk bends in a full gale, in radians. The whole tree leans and sways on it.", |w| &mut w.flexibility[0]),
+        knob("Limb flex", (0.0, 1.0), "How far the limbs off the trunk bend in a full gale, in radians, about where they leave it.", |w| &mut w.flexibility[1]),
+        knob("Branch flex", (0.0, 1.5), "How far the branches off the limbs bend in a full gale, in radians.", |w| &mut w.flexibility[2]),
+        knob("Twig flex", (0.0, 2.0), "How far everything finer bends in a full gale, in radians. Twigs are whippy, so this is the largest.", |w| &mut w.flexibility[3]),
+        knob("Leaf flutter", (0.0, 2.0), "How far a leaf card flutters about where it hangs, in radians in a full gale. Low for needle tufts, high for a broad leaf on a long stalk.", |w| &mut w.flutter),
+        log_knob("Sway frequency", (0.05, 3.0), "How fast the trunk sways, in hertz; each finer order swings faster than the one carrying it. Tall conifers are slow, a birch quick.", |w| &mut w.frequency),
+    ],
+    counts: &[],
+};
 
 // ---------------------------------------------------------------------------------
 // Drawing

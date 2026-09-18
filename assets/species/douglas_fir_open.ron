@@ -460,10 +460,10 @@
         texture: "needle_fir3",
     ),
     wind: (
-        strength: 0.28,
-        gustiness: 0.35,
         flutter: 0.38,
         flexibility: (0.03, 0.1, 0.28, 0.72),
+        // Thirty metres rather than fifty, so a little quicker than the forest fir.
+        frequency: 0.3,
     ),
     mesh: (
         // Douglas fir bark is the thickest of any tree — on an old one it is a hand

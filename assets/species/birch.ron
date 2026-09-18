@@ -311,10 +311,10 @@
         texture: "leaf_oak",
     ),
     wind: (
-        strength: 0.5,
-        gustiness: 0.5,
         flutter: 0.7,
         flexibility: (0.08, 0.25, 0.5, 0.9),
+        // A small, whippy tree: quick.
+        frequency: 0.55,
     ),
     mesh: (
         // Birch bark is smooth, so almost none of the relief the oak carries applies

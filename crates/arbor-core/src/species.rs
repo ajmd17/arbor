@@ -10,6 +10,12 @@ pub const DOUGLAS_FIR_RON: &str = include_str!("../../../assets/species/douglas_
 pub const DOUGLAS_FIR_OPEN_RON: &str =
     include_str!("../../../assets/species/douglas_fir_open.ron");
 
+/// Where presets saved from the viewer are kept, relative to the repository root —
+/// which is where the viewer and the CLI both expect to be run from. Unlike the
+/// built-in presets these are read from disk every time they are picked, so an edit to
+/// one takes effect without a rebuild.
+pub const CUSTOM_PRESET_DIR: &str = "assets/species/custom";
+
 pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
     vec![
         ("pine", PINE_RON),
@@ -536,6 +542,21 @@ pub struct ChildParams {
     /// trunk. Each dead limb tilts rigidly about its attachment by a share of this,
     /// skewed so most settle a little and a few settle hard. Zero leaves them as grown.
     pub dead_sag_deg: f32,
+    /// Longest a branch leaving this stem may grow, as a multiple of the stem still to
+    /// come past the point it leaves. Holds side branches and forks alike.
+    ///
+    /// A side shoot is no older than the length its parent went on to grow past it — the
+    /// bud was set when the tip was there — and grows no faster than the axis it comes
+    /// off, so it cannot be longer than what lies ahead of it. It is the same from the
+    /// other side: out towards the tip there is less and less branch to carry a child's
+    /// weight, and a long limb hanging off the last metre of a branch reads as one the
+    /// branch could never have held up. At 1 nothing outgrows the stem ahead of it;
+    /// higher lets children near the tip run longer, lower draws them in further.
+    ///
+    /// Zero uses the model's default: 1 off a branch, and no limit off the trunk, whose
+    /// limbs the crown envelope shapes instead — a broadleaf's limbs rightly outreach the
+    /// leader above them.
+    pub tip_reach: f32,
 }
 
 impl Default for ChildParams {
@@ -559,6 +580,7 @@ impl Default for ChildParams {
             shade_blend: 0.0,
             shade_keep: 1.0,
             dead_sag_deg: 0.0,
+            tip_reach: 0.0,
         }
     }
 }
@@ -836,22 +858,35 @@ impl Default for LeafParams {
     }
 }
 
+/// How a species gives to the wind.
+///
+/// Only the tree's side of it lives here. How hard the wind blows, from where and how
+/// gustily is the weather, which belongs to the scene the tree stands in rather than to
+/// the tree, and the renderer sets it. A species file that still carries `strength` or
+/// `gustiness` from before the two were split parses as it always did; the fields are
+/// ignored.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindParams {
-    pub strength: f32,
-    pub gustiness: f32,
-    pub flutter: f32,
+    /// How far each order of wood bends in a full gale, in radians: the trunk, the limbs
+    /// off it, the branches off those, and every finer twig as one. Finer wood is
+    /// whippier, so these climb.
     pub flexibility: [f32; 4],
+    /// How far a leaf card flutters about where it hangs from its twig, in radians in a
+    /// full gale.
+    pub flutter: f32,
+    /// How fast the trunk sways, in hertz. Each finer order swings faster than the one
+    /// carrying it. A tall conifer is slow — a fifty-metre fir goes back and forth about
+    /// once every five seconds — and a birch several times quicker.
+    pub frequency: f32,
 }
 
 impl Default for WindParams {
     fn default() -> Self {
         Self {
-            strength: 0.35,
-            gustiness: 0.4,
-            flutter: 0.5,
             flexibility: [0.05, 0.15, 0.35, 0.8],
+            flutter: 0.5,
+            frequency: 0.4,
         }
     }
 }
@@ -890,7 +925,20 @@ mod tests {
     #[test]
     fn wind_array_parses() {
         let w: WindParams =
-            ron::from_str("(strength: 0.35, flexibility: (0.1, 0.2, 0.3, 0.4))").unwrap();
+            ron::from_str("(frequency: 0.3, flexibility: (0.1, 0.2, 0.3, 0.4))").unwrap();
         assert_eq!(w.flexibility[1], 0.2);
+        assert_eq!(w.frequency, 0.3);
+    }
+
+    #[test]
+    fn a_species_saved_before_the_weather_moved_out_still_parses() {
+        // The wind's strength and gustiness used to be written into every species, and
+        // a preset saved then must keep loading.
+        let w: WindParams = ron::from_str(
+            "(strength: 0.35, gustiness: 0.4, flutter: 0.7, flexibility: (0.1, 0.2, 0.3, 0.4))",
+        )
+        .unwrap();
+        assert_eq!(w.flutter, 0.7);
+        assert_eq!(w.frequency, WindParams::default().frequency);
     }
 }

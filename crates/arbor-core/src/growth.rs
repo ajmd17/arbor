@@ -58,18 +58,27 @@ const LATERAL_MAX_SHARE: f32 = 0.8;
 /// Where along a stem a lateral starts being held down by how little is left in front
 /// of it, as a share of the stem's length.
 ///
-/// A branch is subordinate to the axis it grows off, and out near the tip there is
-/// hardly any axis left to be subordinate to: a full-length limb hanging off the last
-/// few centimetres of a tapering branch reads as weight the branch could not hold, and
-/// it is where the long thin whips come from too. Inside this much of the tip the
-/// allowance ramps to nothing; behind it nothing changes, which is deliberate — every
-/// preset here was tuned against the unrestricted figure and the fault being fixed is
-/// only ever at the end of a stem.
+/// A gentle ramp, and all the trunk answers to by default: its limbs are shaped by the
+/// crown envelope. Anything leaving a branch answers to `tip_reach` as well, which is
+/// much stricter.
 const LATERAL_TIP_SHARE: f32 = 0.35;
-/// Shortest the ramp above may make a lateral, as a share of the stem it leaves. A
-/// lateral allowed to reach zero is a stem with no segments, which the mesher cannot
-/// sweep; a twig at the very tip should be small, not absent.
+/// Shortest the ramp above may make a lateral, as a share of the stem it leaves.
 const LATERAL_MIN_SHARE: f32 = 0.08;
+/// What `tip_reach` means when a branch level leaves it at zero: a child is never longer
+/// than the branch still to come past it. See `ChildParams::tip_reach`.
+const TIP_REACH: f32 = 1.0;
+/// How far below `tip_reach` a lateral's allowance may be drawn, as a share of it.
+/// Siblings leaving one node all see the same length ahead of them, so a hard cap would
+/// pin every one it binds to the same number and grow them as a wheel of identical
+/// spokes.
+const TIP_REACH_SPREAD: f32 = 0.3;
+/// Salt for the draw above. Taken from a hash of the stem's path rather than from its
+/// random stream, so it does not move a single other draw in the tree.
+const AHEAD_SALT: u64 = 0xA4EA_D5A1_7E57_0001;
+/// Bare wood a fork needs past it on the stem it leaves, in the stem's own segments.
+/// A lateral needs one: a stem's last season carries no side shoots yet. A fork needs
+/// two, because one segment past a fork is not a stem carrying on but a stub beside it.
+const FORK_BARE_SEGMENTS: f32 = 2.0;
 /// Most children one node of a parent may carry, so a runaway rate cannot spend the
 /// whole node budget at one point on one stem.
 const MAX_CHILDREN_PER_NODE: u32 = 8;
@@ -116,7 +125,9 @@ const MAX_DRIVE: f32 = 1.15;
 /// Everything about the child is decided at the moment the parent reaches it, so the
 /// random stream is the same as if it were grown there and then; only the growing
 /// waits. What it waits for is the one thing the parent cannot know while it is still
-/// climbing — how long it actually turned out to be.
+/// climbing — how long it actually turned out to be. That decides both how long the
+/// child may grow and whether it is grown at all: a stem the crown or its own vigor
+/// stopped short may have settled on children at what turned out to be its tip.
 struct Pending {
     attach: u32,
     /// How far along the parent it leaves, in metres of the parent actually grown.
@@ -126,6 +137,18 @@ struct Pending {
     level: u8,
     path: u64,
     spray: Vec3,
+    /// Set when the child is a fork rather than a lateral.
+    fork: Option<PendingFork>,
+}
+
+/// What a fork carries away from the stem it divides, beyond what a lateral does.
+struct PendingFork {
+    split_depth: u32,
+    /// The parent's unspent turning where it left; see `grow_stem`'s `budget`.
+    budget: f32,
+    /// The parent's `split_evenness`, which decides how far the fork is held to what
+    /// the parent had left.
+    evenness: f32,
 }
 
 struct GrowCtx<'a> {
@@ -744,9 +767,12 @@ fn grow_stem(
         // not dividing, and holding each half to what the trunk had left would cost the
         // tree its crown. `split_evenness` already says which of the two a fork is, so
         // it is what moves the cap between them.
+        //
+        // This is the cap as it stands while the stem is still growing, measured against
+        // what it set out to grow; the fork is held back with the laterals and measured
+        // again against what the stem actually reached before it is grown.
         let evenness = sp.split_evenness.clamp(0.0, 1.0);
-        let remaining = stem_len - grown_len;
-        let fork_max = (remaining + (max_len - remaining) * evenness).min(max_len);
+        let fork_max = fork_cap(stem_len - grown_len, max_len, evenness);
         if can_spawn
             && split_depth < ctx.params.max_split_depth
             && sp.split_probability > 0.0
@@ -765,28 +791,30 @@ fn grow_stem(
             let crotch = spread * range_f32(&mut rng, 0.7, 1.3);
             let split_dir = child_dir(cur_dir, frame, az, crotch);
             let p = child_path(path, slot);
-            let fork_stem = skeleton.nodes.len() as u32;
             // How the two halves divide what the stem had. A leader keeps the larger
             // share and the fork is a side branch; at full evenness they come away
             // equal and the stem stops being a leader at all, which is how a broadleaf
             // trades a single trunk for a crown of co-dominant limbs.
             let fork_share = SPLIT_VIGOR + (SPLIT_EVEN - SPLIT_VIGOR) * evenness;
             let keep_share = SPLIT_KEEP + (SPLIT_EVEN - SPLIT_KEEP) * evenness;
-            grow_stem(
-                ctx,
-                skeleton,
-                tree_rng,
-                cur,
-                split_dir,
-                v * fork_share,
+            // Held back like a lateral, because the stem may yet stop within a segment
+            // or two of here — the crown prunes it, or it runs out of vigor — and a
+            // fork taken at what turns out to be the tip is not a fork at all but a
+            // branch sprouting out of the end of another.
+            pending.push(Pending {
+                attach: cur,
+                at_len: grown_len,
+                dir: split_dir,
+                vigor: v * fork_share,
                 level,
-                p,
-                split_depth + 1,
-                fork_stem,
+                path: p,
                 spray,
-                turn_budget,
-                fork_max,
-            );
+                fork: Some(PendingFork {
+                    split_depth: split_depth + 1,
+                    budget: turn_budget,
+                    evenness,
+                }),
+            });
             // The parent gives up part of its drive to the fork instead of both
             // halves carrying on at full strength.
             v *= keep_share;
@@ -802,10 +830,51 @@ fn grow_stem(
     // reached rather than what it intended. A limb the crown cut off at a third of its
     // length would otherwise hand its twigs a cap drawn from the other two thirds, and
     // they come out longer than the branch carrying them.
+    //
+    // It also decides which of them are grown at all. Every stem ends in a bare
+    // stretch: its last season, which has not put out side shoots yet. `end_fraction`
+    // says where that starts, but it was only ever measured against the length the
+    // stem set out to grow, so a stem the crown pruned, or one that ran out of vigor,
+    // kept every child it had settled on up to the node it stopped at, and put out
+    // branches straight from its own tip. Measured again here against what it reached,
+    // and never less than one of its own segments.
+    let tip_room = seg_len * 0.999;
+    let end_at = grown_len * (sp.children.end_fraction + 1e-4);
+    let reach = tip_reach(sp, level);
     for child in pending {
         if skeleton.nodes.len() >= MAX_NODES {
             return;
         }
+        let ahead = grown_len - child.at_len;
+        let (split_depth, budget, cap) = match &child.fork {
+            Some(fork) => {
+                let mut cap = fork_cap(ahead, max_len, fork.evenness);
+                // Even a co-dominant fork is held to this. Two equal halves are twins,
+                // and the other half is the stem carrying on past the fork: an "even"
+                // fork that outgrows it is not even, it is a limb sprouting out of the
+                // end of a branch. The trunk is let off by default, because an oak
+                // trading its leader for a crown of limbs is exactly that.
+                if let Some(reach) = reach {
+                    cap = cap.min(ahead * reach);
+                }
+                if ahead < FORK_BARE_SEGMENTS * tip_room
+                    || cap < sp.segment_length * FORK_BARE_SEGMENTS
+                {
+                    continue;
+                }
+                (fork.split_depth, fork.budget, cap)
+            }
+            None => {
+                if ahead < tip_room || child.at_len > end_at {
+                    continue;
+                }
+                let share = reach.map(|reach| {
+                    let u = hash_unit(ctx.params.seed ^ AHEAD_SALT, child.path);
+                    reach * (1.0 - TIP_REACH_SPREAD * u)
+                });
+                (0, MAX_STEM_TURN, lateral_cap(grown_len, child.at_len, share))
+            }
+        };
         let child_stem = skeleton.nodes.len() as u32;
         grow_stem(
             ctx,
@@ -816,12 +885,43 @@ fn grow_stem(
             child.vigor,
             child.level,
             child.path,
-            0,
+            split_depth,
             child_stem,
             child.spray,
-            MAX_STEM_TURN,
-            lateral_cap(grown_len, child.at_len),
+            budget,
+            cap,
         );
+    }
+}
+
+/// How far past the length still ahead of it a child of a stem at `level` may run; see
+/// `ChildParams::tip_reach`. None is no limit, which is the trunk's default: the crown
+/// envelope shapes its limbs.
+fn tip_reach(sp: &StemParams, level: u8) -> Option<f32> {
+    if sp.children.tip_reach > 0.0 {
+        Some(sp.children.tip_reach)
+    } else if level > 0 {
+        Some(TIP_REACH)
+    } else {
+        None
+    }
+}
+
+/// The longest a fork may grow, with `ahead` metres of the stem it divides still to
+/// come past it and `max_len` the most that stem was allowed.
+///
+/// A subordinate fork divides what the stem has left; a co-dominant one is the axis
+/// starting again and answers only to what the stem itself answered to. `evenness`
+/// moves between the two. Written out rather than as one lerp, because the trunk's
+/// `max_len` is infinite and infinity times a zero evenness is not zero but NaN — which
+/// `min` then quietly discarded, so every subordinate fork off a conifer's leader grew
+/// as though it were co-dominant.
+fn fork_cap(ahead: f32, max_len: f32, evenness: f32) -> f32 {
+    let ahead = ahead.max(0.0).min(max_len);
+    if evenness <= 0.0 {
+        ahead
+    } else {
+        (ahead + (max_len - ahead) * evenness).min(max_len)
     }
 }
 
@@ -901,6 +1001,7 @@ fn spawn_children(
             level: child_level,
             path: child_path(stem_path, *slot),
             spray: child_spray,
+            fork: None,
         });
     };
 
@@ -1035,16 +1136,20 @@ fn steer(
 
 /// The longest a lateral leaving `at` along a stem of `grown` may be.
 ///
-/// Flat at `LATERAL_MAX_SHARE` of the stem for most of its length, then ramping to
-/// nothing over the last `LATERAL_TIP_SHARE` of it, where there is progressively less
-/// axis left for a branch to be subordinate to.
-fn lateral_cap(grown: f32, at: f32) -> f32 {
+/// Never more than `LATERAL_MAX_SHARE` of the stem, ramping down over the last
+/// `LATERAL_TIP_SHARE` of it, and never more than `ahead_share` times the stem still to
+/// come past it when that is given.
+fn lateral_cap(grown: f32, at: f32, ahead_share: Option<f32>) -> f32 {
     if !grown.is_finite() || grown <= 0.0 {
         return f32::INFINITY;
     }
     let beyond = (grown - at).max(0.0);
     let held = (beyond / (grown * LATERAL_TIP_SHARE)).clamp(0.0, 1.0);
-    grown * (LATERAL_MAX_SHARE * held).max(LATERAL_MIN_SHARE)
+    let cap = grown * (LATERAL_MAX_SHARE * held).max(LATERAL_MIN_SHARE);
+    match ahead_share {
+        Some(share) => cap.min(beyond * share),
+        None => cap,
+    }
 }
 
 /// Rotates `dir` toward `goal` by `angle` radians, stopping at `goal` rather than
@@ -1483,7 +1588,10 @@ mod tests {
                 // `at` misses the first segment, which belongs to the parent's run but
                 // is measured from the grandparent; that makes the bound generous by one
                 // segment rather than wrong.
-                let cap = lateral_cap(theirs, at);
+                // The loosest allowance the draw can give.
+                let reach = stem_params(&params, parent.level)
+                    .and_then(|sp| tip_reach(sp, parent.level));
+                let cap = lateral_cap(theirs, at, reach);
                 assert!(
                     mine <= cap + 1e-3,
                     "{}: a level {} stem ran {mine:.2} m off a level {} stem of                      {theirs:.2} m, {at:.2} m along it, where the most it may be is                      {cap:.2} m",
@@ -1526,7 +1634,7 @@ mod tests {
             }
             worst
         };
-        let loose = worst_turn(0.40);
+        let loose = worst_turn(0.60);
         let tight = worst_turn(0.08);
         assert!(
             loose > 75.0,

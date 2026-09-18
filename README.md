@@ -1,10 +1,7 @@
 # Arbor
 
-Procedural tree generation in Rust: a growth simulation that produces a branch
-skeleton, a mesher that sweeps bark tubes over it, textured leaf cards for the
-canopy, and a real-time viewer to tune it all in.
-
-![The Arbor viewer, showing the pine preset](docs/viewer.png)
+Procedural tree model generator in Rust.
+![screenshot](docs/screenshot.png)
 
 ## Layout
 
@@ -14,8 +11,12 @@ canopy, and a real-time viewer to tune it all in.
 | `arbor-viewer` | An OpenGL viewer (eframe/egui + glow) with live parameter sliders. |
 | `arbor-cli` | Grows a tree from the terminal, prints stats, optionally writes an OBJ. |
 
-Species are plain RON files in `assets/species`; `pine` and `oak` are compiled in
-as presets. Textures live in `assets/textures`, named `<key>_albedo.png`,
+Species are plain RON files in `assets/species`, compiled in as the built-in
+presets. Presets saved from the viewer's panel (**Save as**) go to
+`assets/species/custom/<name>.ron`, are listed under *Saved* in the preset menu, and
+are read from disk each time they are picked, so a hand edit shows up without a
+rebuild. Both tools find them by name: `--species <name>` in the viewer,
+`arbor-cli <name>` headless. Textures live in `assets/textures`, named `<key>_albedo.png`,
 `_normal.png` and `_roughness.png`, with the key coming from the species
 (`bark_texture: "bark_oak"`, `leaves.texture: "leaf_oak"`).
 
@@ -37,7 +38,12 @@ cargo run --release -p arbor-viewer -- --species oak --seed 7 --time 17.2 --scre
 `--species`, `--seed`, `--no-leaves`, `--wireframe`, `--no-shadows`,
 `--translucency`, `--time`, `--sun-elevation`, `--sun-azimuth`,
 `--sun-intensity`, `--yaw`, `--pitch`, `--distance`, `--target-y`,
-`--coverage-lod`, and `--screenshot <path> [--settle N]`.
+`--coverage-lod`, `--wind <strength>`, `--gustiness`, `--wind-dir <degrees>`,
+`--wind-time <seconds>`, and `--screenshot <path> [--settle N]`.
+
+A screenshot is taken in still air unless `--wind` asks otherwise, and then on a
+stopped clock (`--wind-time`, default 0), so the same command always gives the same
+frame.
 
 Headless, from the CLI:
 
@@ -78,6 +84,17 @@ ambient is the dome projected into spherical harmonics, wrapped diffuse with
 backlit transmission through leaves, and coverage-preserving mips so the canopy
 does not thin out with distance.
 
+**Wind** (`wind.rs` in core, `WIND_GLSL` in the viewer) is hierarchical vertex
+sway in the SpeedTree manner. Every bark vertex and leaf card records, for the
+limb, the branch and the twigs it belongs to, where that stem is attached and how
+far a point there swings (a cantilever curve over the stem's reach). The vertex
+shader bends each order about its own attachment, finest first, then the whole tree
+about its foot by height, and flutters each leaf card rigidly about the point it
+hangs from. Every pass — colour, both shadow passes and the wireframe — runs the
+same code, so the shadow moves with the tree. The species says how it gives
+(`wind.flexibility` per order, `flutter`, `frequency`); the scene says how hard,
+how gustily and from where it blows (the panel's *Wind* section).
+
 ## Tools
 
 ```bash
@@ -99,5 +116,5 @@ cargo test
 
 ## Status
 
-Wind parameters parse (`WindParams` in a species file) but nothing animates them
-yet — foliage is static.
+The OBJ export and the offline `preview` are of the tree in still air; wind is
+applied only in the viewer's shaders.

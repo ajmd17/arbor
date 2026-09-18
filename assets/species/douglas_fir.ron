@@ -389,10 +389,10 @@
         texture: "needle_conifer",
     ),
     wind: (
-        strength: 0.28,
-        gustiness: 0.35,
         flutter: 0.38,
         flexibility: (0.03, 0.1, 0.28, 0.72),
+        // Fifty metres of bole sways slowly, about once every four or five seconds.
+        frequency: 0.22,
     ),
     mesh: (
         // Douglas fir bark is the thickest of any tree — on an old one it is a hand

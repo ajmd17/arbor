@@ -1,4 +1,4 @@
-use arbor_core::species::{builtin_presets, parse_species};
+use arbor_core::species::{builtin_presets, parse_species, CUSTOM_PRESET_DIR};
 use arbor_core::{build_leaves, build_mesh, grow, LeafMesh, Mesh, SpeciesParams};
 
 fn main() {
@@ -35,8 +35,14 @@ fn main() {
     }
 
     let src = species_src.unwrap_or_else(|| "pine".to_string());
+    // A built-in by name, then a preset saved from the viewer by name, then a path.
+    let saved = std::path::Path::new(CUSTOM_PRESET_DIR).join(format!("{src}.ron"));
     let ron_text = match builtin_presets().into_iter().find(|(n, _)| *n == src) {
         Some((_, text)) => text.to_string(),
+        None if saved.is_file() => std::fs::read_to_string(&saved).unwrap_or_else(|e| {
+            eprintln!("cannot read {}: {e}", saved.display());
+            std::process::exit(1);
+        }),
         None => std::fs::read_to_string(&src).unwrap_or_else(|e| {
             eprintln!("cannot read species '{src}': {e}");
             std::process::exit(1);
@@ -159,9 +165,10 @@ fn print_usage() {
     // usage line quietly out of date.
     let names: Vec<&str> = builtin_presets().into_iter().map(|(n, _)| n).collect();
     println!(
-        "arbor-cli <{}|path/to/species.ron> [--seed N] [--obj out.obj] [--no-leaves]",
+        "arbor-cli <{}|saved-preset|path/to/species.ron> [--seed N] [--obj out.obj] [--no-leaves]",
         names.join("|")
     );
     println!("Grows a tree, builds bark and leaf meshes, prints stats.");
+    println!("A saved preset is one saved from the viewer, found by name in {CUSTOM_PRESET_DIR}.");
     println!("--obj writes a triangle OBJ with separate `bark` and `leaves` groups.");
 }

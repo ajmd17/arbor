@@ -4,8 +4,10 @@ mod gpu;
 mod knobs;
 mod lighting;
 mod mipmap;
+mod presets;
 mod shaders;
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -13,13 +15,13 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
-use arbor_core::species::{builtin_presets, parse_species, LeafClusterParams};
+use arbor_core::species::{LeafClusterParams, CUSTOM_PRESET_DIR};
 use arbor_core::{build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams};
 
 use gpu::{
     ColorPass, DepthPass, GpuGround, GpuLeaves, GpuLines, GpuMesh, GpuSky, GroundDrawParams,
     LeafDepthPass, LeafDrawParams, LeafMaterialParams, MaterialTextures, MeshDrawParams,
-    ShadowTarget,
+    ShadowTarget, WindUniforms,
 };
 use lighting::{light_view_proj, SkyParams};
 
@@ -62,10 +64,20 @@ struct Startup {
     distance: Option<f32>,
     target_y: Option<f32>,
     coverage_lod: Option<f32>,
+    wind: Option<f32>,
+    gustiness: Option<f32>,
+    wind_direction: Option<f32>,
+    wind_time: Option<f32>,
 }
 
 /// The hour the viewer opens at: the low, warm light of just after sunrise.
 const DEFAULT_HOUR: f32 = 6.32;
+
+/// The wind the viewer opens in: a steady breeze with some gust in it, blowing across
+/// the default view so the sway reads side-on rather than toward the camera.
+const DEFAULT_WIND: f32 = 0.3;
+const DEFAULT_GUSTINESS: f32 = 0.5;
+const DEFAULT_WIND_DIRECTION: f32 = 150.0;
 
 /// Elevation and azimuth of the sun at a given hour, on a day roughly like a temperate
 /// equinox: up a little after six, down a little before eight, and swinging through
@@ -107,6 +119,10 @@ fn main() -> eframe::Result<()> {
         distance: num("--distance"),
         target_y: num("--target-y"),
         coverage_lod: num("--coverage-lod"),
+        wind: num("--wind"),
+        gustiness: num("--gustiness"),
+        wind_direction: num("--wind-dir"),
+        wind_time: num("--wind-time"),
     };
 
     let options = eframe::NativeOptions {
@@ -123,6 +139,20 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, startup)))),
     )
+}
+
+/// What the save field offers for a preset once it is loaded: a saved one's own name,
+/// so saving again replaces it, and a variant name for a built-in, which cannot be
+/// saved over.
+fn save_name_for(preset: &presets::Preset, params: &SpeciesParams) -> String {
+    if !preset.is_saved() {
+        return format!("{}_custom", preset.name);
+    }
+    // The name as it was typed, when it still leads back to this file.
+    match presets::key_for(&params.name) {
+        Ok(key) if key == preset.name => params.name.clone(),
+        _ => preset.name.clone(),
+    }
 }
 
 /// Writes an egui screenshot out as a PNG.
@@ -210,8 +240,16 @@ struct App {
     /// Texture name and cluster arrangement the leaf material was built from.
     /// Both go in the key, because changing either has to rebuild the atlas.
     loaded_leaf: (String, Option<LeafClusterParams>),
-    presets: Vec<(&'static str, &'static str)>,
-    preset_index: usize,
+    presets: Vec<presets::Preset>,
+    /// The preset the panel was last loaded from or saved to. None once that preset
+    /// has been deleted: the tree stays on screen with nothing behind it until saved.
+    preset: Option<usize>,
+    /// Name typed for the next save.
+    save_name: String,
+    /// Outcome of the last load, save or delete, and whether it was a failure.
+    status: Option<(String, bool)>,
+    /// Delete has been clicked once and is waiting to be confirmed.
+    confirm_delete: bool,
     params: SpeciesParams,
     skeleton: Skeleton,
     stats: SkeletonStats,
@@ -240,19 +278,40 @@ struct App {
     frames: u32,
     /// Mip level where soft leaf coverage gives way to a hard cutoff.
     coverage_lod: f32,
+    /// The weather. How the tree gives to it is the species' business and lives in
+    /// `params.wind`.
+    wind_on: bool,
+    wind_strength: f32,
+    wind_gustiness: f32,
+    /// Bearing the wind blows toward, in degrees, measured like the sun's azimuth.
+    wind_direction: f32,
+    /// Seconds on the wind's own clock. It only advances while the wind is running, so
+    /// pausing holds the pose and resuming carries on from it without a jump.
+    wind_clock: f32,
+    wind_paused: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         let gl = cc.gl.clone().expect("eframe must run with the glow renderer");
-        let presets = builtin_presets();
-        let preset_index = startup
+        let presets = presets::list(Path::new(CUSTOM_PRESET_DIR));
+        let mut status = None;
+        let asked = startup
             .species
             .as_deref()
-            .and_then(|want| presets.iter().position(|(n, _)| *n == want))
-            .unwrap_or(0);
-        let mut params =
-            parse_species(presets[preset_index].1).expect("embedded preset parses");
+            .and_then(|want| presets.iter().position(|p| p.name == want));
+        if let (Some(want), None) = (startup.species.as_deref(), asked) {
+            status = Some((format!("no preset called {want}"), true));
+        }
+        let (preset_index, mut params) = match asked.map(|i| (i, presets[i].load())) {
+            Some((i, Ok(p))) => (i, p),
+            Some((i, Err(e))) => {
+                status = Some((format!("{}: {e}", presets[i].name), true));
+                (0, presets[0].load().expect("embedded preset parses"))
+            }
+            None => (0, presets[0].load().expect("embedded preset parses")),
+        };
+        let save_name = save_name_for(&presets[preset_index], &params);
         if let Some(seed) = startup.seed {
             params.seed = seed;
         }
@@ -296,7 +355,10 @@ impl App {
             loaded_bark,
             loaded_leaf,
             presets,
-            preset_index,
+            preset: Some(preset_index),
+            save_name,
+            status,
+            confirm_delete: false,
             params,
             skeleton,
             stats: SkeletonStats::default(),
@@ -332,7 +394,33 @@ impl App {
             capture: startup.capture,
             frames: 0,
             coverage_lod: 9.0,
+            wind_on: true,
+            wind_strength: DEFAULT_WIND,
+            wind_gustiness: DEFAULT_GUSTINESS,
+            wind_direction: DEFAULT_WIND_DIRECTION,
+            wind_clock: 0.0,
+            wind_paused: false,
         };
+        // A capture is a measurement, so it is taken in still air unless it asks for
+        // wind, and on a stopped clock when it does, so one command gives one frame.
+        if app.capture.is_some() {
+            app.wind_on = false;
+            app.wind_paused = true;
+        }
+        if let Some(v) = startup.wind {
+            app.wind_on = v > 0.0;
+            app.wind_strength = v;
+        }
+        if let Some(v) = startup.gustiness {
+            app.wind_gustiness = v;
+        }
+        if let Some(v) = startup.wind_direction {
+            app.wind_direction = v;
+        }
+        if let Some(t) = startup.wind_time {
+            app.wind_clock = t;
+            app.wind_paused = true;
+        }
         if let Some(v) = startup.leaves {
             app.show_leaves = v;
             app.params.leaves.enabled = v;
@@ -447,36 +535,139 @@ impl App {
         Vec3::new(az.cos() * el.cos(), el.sin(), az.sin() * el.cos())
     }
 
+    /// Loads preset `i` over whatever the panel holds.
+    ///
+    /// A built-in keeps the seed being browsed, so flicking between species compares
+    /// like with like. A saved preset brings its own, because the seed is part of the
+    /// tree that was saved.
+    fn pick_preset(&mut self, i: usize) {
+        self.confirm_delete = false;
+        let preset = &self.presets[i];
+        match preset.load() {
+            Ok(mut p) => {
+                if !preset.is_saved() {
+                    p.seed = self.params.seed;
+                }
+                self.save_name = save_name_for(preset, &p);
+                self.params = p;
+                self.preset = Some(i);
+                self.dirty = true;
+                self.status = None;
+            }
+            Err(e) => self.status = Some((format!("{}: {e}", preset.name), true)),
+        }
+    }
+
+    fn save_preset(&mut self) {
+        self.confirm_delete = false;
+        let dir = Path::new(CUSTOM_PRESET_DIR);
+        match presets::save(dir, &self.save_name, &self.params) {
+            Ok(path) => {
+                self.params.name = self.save_name.trim().to_string();
+                self.presets = presets::list(dir);
+                let key = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                self.preset = self.presets.iter().position(|p| p.is_saved() && p.name == key);
+                self.status = Some((format!("saved {}", path.display()), false));
+            }
+            Err(e) => self.status = Some((e, true)),
+        }
+    }
+
+    fn delete_preset(&mut self, i: usize) {
+        self.confirm_delete = false;
+        match presets::delete(&self.presets[i]) {
+            Ok(()) => {
+                self.status = Some((format!("deleted {}", self.presets[i].name), false));
+                self.presets = presets::list(Path::new(CUSTOM_PRESET_DIR));
+                // The tree on screen stays as it is; it just has no preset behind it now.
+                self.preset = None;
+            }
+            Err(e) => self.status = Some((e, true)),
+        }
+    }
+
+    /// Picking, saving and deleting presets.
+    fn presets_ui(&mut self, ui: &mut egui::Ui) {
+        let mut picked = None;
+        let current = self
+            .preset
+            .map_or_else(|| "(unsaved)".to_string(), |i| self.presets[i].name.clone());
+        egui::ComboBox::from_label("Preset")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                let mut saved_heading = false;
+                for (i, preset) in self.presets.iter().enumerate() {
+                    if preset.is_saved() && !saved_heading {
+                        ui.separator();
+                        ui.weak("Saved");
+                        saved_heading = true;
+                    }
+                    if ui.selectable_label(self.preset == Some(i), &preset.name).clicked() {
+                        picked = Some(i);
+                    }
+                }
+            });
+        if let Some(i) = picked {
+            self.pick_preset(i);
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Save as");
+            ui.add(egui::TextEdit::singleline(&mut self.save_name).desired_width(150.0));
+            let target = presets::path_for(Path::new(CUSTOM_PRESET_DIR), &self.save_name);
+            let taken = target.as_ref().is_ok_and(|p| p.exists());
+            let button = ui.add_enabled(
+                target.is_ok(),
+                egui::Button::new(if taken { "Overwrite" } else { "Save" }),
+            );
+            let button = match &target {
+                Ok(path) => button.on_hover_text(format!(
+                    "Write the species as it stands, every value and the seed included, to {}.{}",
+                    path.display(),
+                    if taken { " A preset of that name is already there and will be replaced." } else { "" }
+                )),
+                Err(why) => button.on_disabled_hover_text(why),
+            };
+            if button.clicked() {
+                self.save_preset();
+            }
+        });
+
+        if let Some(i) = self.preset.filter(|&i| self.presets[i].is_saved()) {
+            let name = self.presets[i].name.clone();
+            if self.confirm_delete {
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::YELLOW, format!("Delete {name} for good?"));
+                    if ui.button("Delete").clicked() {
+                        self.delete_preset(i);
+                    }
+                    if ui.button("Keep").clicked() {
+                        self.confirm_delete = false;
+                    }
+                });
+            } else if ui
+                .button(format!("Delete {name}"))
+                .on_hover_text("Remove this saved preset's file. Asks first. The tree on screen stays.")
+                .clicked()
+            {
+                self.confirm_delete = true;
+            }
+        }
+
+        if let Some((message, failed)) = &self.status {
+            if *failed {
+                ui.colored_label(egui::Color32::LIGHT_RED, message);
+            } else {
+                ui.weak(message);
+            }
+        }
+    }
+
     fn controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Arbor");
         ui.separator();
 
-        let mut preset_changed = false;
-        egui::ComboBox::from_label("Preset")
-            .selected_text(self.presets[self.preset_index].0)
-            .show_ui(ui, |ui| {
-                for (i, (name, _)) in self.presets.iter().enumerate() {
-                    if ui
-                        .selectable_value(&mut self.preset_index, i, *name)
-                        .changed()
-                    {
-                        preset_changed = true;
-                    }
-                }
-            });
-        if preset_changed {
-            let src = self.presets[self.preset_index].1;
-            match parse_species(src) {
-                Ok(mut p) => {
-                    p.seed = self.params.seed;
-                    self.params = p;
-                    self.dirty = true;
-                }
-                Err(e) => {
-                    ui.colored_label(egui::Color32::RED, format!("preset error: {e}"));
-                }
-            }
-        }
+        self.presets_ui(ui);
 
         ui.horizontal(|ui| {
             ui.label("Seed");
@@ -495,15 +686,12 @@ impl App {
 
         ui.horizontal(|ui| {
             if ui
-                .button("Reset")
-                .on_hover_text("Reload the preset, dropping every change made in the panel.")
+                .add_enabled(self.preset.is_some(), egui::Button::new("Reset"))
+                .on_hover_text("Reload the preset, dropping every change made in the panel. A saved preset is read from disk again, seed and all.")
                 .clicked()
+                && let Some(i) = self.preset
             {
-                if let Ok(mut p) = parse_species(self.presets[self.preset_index].1) {
-                    p.seed = self.params.seed;
-                    self.params = p;
-                    self.dirty = true;
-                }
+                self.pick_preset(i);
             }
             if ui
                 .button("Copy as RON")
@@ -605,6 +793,24 @@ impl App {
         ui.add(egui::Slider::new(&mut self.sun_elevation, -8.0..=85.0).text("Sun elevation"));
         ui.add(egui::Slider::new(&mut self.sun_intensity, 0.1..=3.0).text("Sun intensity"));
         ui.checkbox(&mut self.show_ground, "Ground");
+
+        ui.separator();
+        ui.label("Wind");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.wind_on, "Wind")
+                .on_hover_text("Sway the tree. Off is still air: the tree exactly as it was grown.");
+            ui.checkbox(&mut self.wind_paused, "Pause")
+                .on_hover_text("Hold the tree where the wind has it, to look at one pose.");
+        });
+        ui.add(egui::Slider::new(&mut self.wind_strength, 0.0..=1.5).text("Strength"))
+            .on_hover_text("How hard it blows. About 0.2 is a breeze, 0.5 a fresh wind, 1 a full gale.");
+        ui.add(egui::Slider::new(&mut self.wind_gustiness, 0.0..=1.0).text("Gustiness"))
+            .on_hover_text("How far the wind swells and lulls about its strength. Gusts travel downwind, so they cross a crown rather than arriving everywhere at once.");
+        ui.add(egui::Slider::new(&mut self.wind_direction, 0.0..=360.0).text("Direction"))
+            .on_hover_text("Bearing the wind blows toward, in degrees, measured like the sun's azimuth.");
+        // These are the species' own and are saved with it, but nothing about them
+        // changes what grows, so they never mark the tree for regrowing.
+        knobs::group_ui(ui, "wind", &mut self.params.wind, &knobs::WIND);
 
         ui.separator();
         ui.label("Foliage");
@@ -757,6 +963,12 @@ impl eframe::App for App {
             self.dirty = false;
         }
 
+        if self.wind_on && !self.wind_paused {
+            // Held to a tenth of a second so a stall — a regrow, a dragged window —
+            // does not throw the tree forward a whole gust in one frame.
+            self.wind_clock += ctx.input(|i| i.stable_dt).min(0.1);
+        }
+
         egui::SidePanel::left("controls")
             .default_width(320.0)
             .show(ctx, |ui| {
@@ -790,6 +1002,18 @@ impl eframe::App for App {
                 sky.sun_color *= self.sun_intensity;
                 let show_ground = self.show_ground;
                 let tree_height = self.stats.height.max(1.0);
+                let wind = if self.wind_on {
+                    WindUniforms::new(
+                        &self.params.wind,
+                        self.wind_clock,
+                        self.wind_direction,
+                        self.wind_strength,
+                        self.wind_gustiness,
+                        tree_height,
+                    )
+                } else {
+                    WindUniforms::default()
+                };
                 let bark_material = self.bark_material;
                 let leaf_material = self.leaf_material;
                 let bark_look = gpu::BarkLook::from_species(&self.params.mesh);
@@ -798,7 +1022,13 @@ impl eframe::App for App {
                 leaf_params.coverage_lod = self.coverage_lod;
                 let draw_leaves = self.show_leaves && leaf_material.is_some();
                 let cam = self.camera;
-                let aabb = self.aabb;
+                // The shadow is fitted to the tree, so it has to be fitted to where the
+                // wind can take it, or a swaying crown runs off the edge of its own map.
+                let aabb = {
+                    let (lo, hi) = self.aabb;
+                    let r = wind.reach();
+                    ([lo[0] - r, lo[1], lo[2] - r], [hi[0] + r, hi[1] + r, hi[2] + r])
+                };
                 let sun_dir = self.sun_dir();
                 let shadows = self.shadows;
                 let wire = self.wireframe;
@@ -866,6 +1096,7 @@ impl eframe::App for App {
                                     false,
                                     &lvp.to_cols_array(),
                                 );
+                                wind.bind(gl, depth_pass.program);
                                 mesh_gpu.bind_and_draw(gl);
                                 gl.use_program(None);
                                 // Leaves need their own alpha-tested depth pass or
@@ -877,6 +1108,7 @@ impl eframe::App for App {
                                         lvp,
                                         &leaf_mat,
                                         leaf_params,
+                                        &wind,
                                     );
                                 }
                             }
@@ -926,6 +1158,7 @@ impl eframe::App for App {
                                 use_normal_map,
                                 material: &bark_material,
                                 shadow_depth: shadow.depth,
+                                wind: &wind,
                             };
                             mesh_gpu.draw(gl, &draw_params);
 
@@ -944,6 +1177,7 @@ impl eframe::App for App {
                                         material: &leaf_mat,
                                         shadow_depth: shadow.depth,
                                         leaf: leaf_params,
+                                        wind: &wind,
                                     },
                                 );
                             }
@@ -955,6 +1189,7 @@ impl eframe::App for App {
                                     draw_leaves.then_some(&*leaves_gpu),
                                     view_proj,
                                     [0.02, 0.02, 0.03, 1.0],
+                                    &wind,
                                 );
                             }
 
@@ -978,7 +1213,7 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbor_core::species::{parse_species, ChildPattern};
+    use arbor_core::species::{builtin_presets, parse_species, ChildPattern};
 
     /// Every preset has to fit the panel that edits it.
     ///
@@ -1053,6 +1288,7 @@ mod tests {
             within(&mut bad, &format!("{name} leaf min_level"), u32::from(p.leaves.min_level), knobs::LEAF_MIN_LEVEL);
             check_groups(&mut bad, &format!("{name} bark"), &mut p.mesh, knobs::BARK);
             check_groups(&mut bad, &format!("{name} bark"), &mut p.mesh.irregularity, knobs::IRREGULARITY);
+            check_groups(&mut bad, &format!("{name} wind"), &mut p.wind, std::slice::from_ref(&knobs::WIND));
         }
         assert!(bad.is_empty(), "preset values the panel cannot reach:
   {}", bad.join("

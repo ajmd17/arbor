@@ -46,6 +46,142 @@ pub unsafe fn compile_program(
     }
 }
 
+/// Bark vertex attributes, in the order the mesh vertex array binds them. The colour
+/// pass, the shadow pass and the wireframe all draw from that one array.
+const MESH_ATTRIBS: [&str; 8] = [
+    "a_pos",
+    "a_normal",
+    "a_uv",
+    "a_tangent",
+    "a_weathering",
+    "a_wind1",
+    "a_wind2",
+    "a_wind3",
+];
+
+/// The wireframe draws both vertex arrays, so it names the bark's layout with the leaf
+/// origin after it. The two arrays put the sway in the same slots, which is what lets
+/// one program read either; the bark array leaves the origin's slot empty, and the
+/// shader never reads it there.
+const WIRE_ATTRIBS: [&str; 9] = [
+    "a_pos",
+    "a_normal",
+    "a_uv",
+    "a_tangent",
+    "a_weathering",
+    "a_wind1",
+    "a_wind2",
+    "a_wind3",
+    "a_leaf_origin",
+];
+
+/// Where the sway sits in both vertex arrays: three vec4s, one per branch order, read
+/// out of one buffer.
+const SWAY_SLOT: u32 = 5;
+
+/// Points the three sway attributes at the bound buffer of `arbor_core::Sway`s.
+unsafe fn sway_attribs(gl: &glow::Context) {
+    const STRIDE: i32 = (4 * arbor_core::wind::SWAY_ORDERS * 4) as i32;
+    unsafe {
+        for order in 0..arbor_core::wind::SWAY_ORDERS as u32 {
+            gl.enable_vertex_attrib_array(SWAY_SLOT + order);
+            gl.vertex_attrib_pointer_f32(
+                SWAY_SLOT + order,
+                4,
+                glow::FLOAT,
+                false,
+                STRIDE,
+                (order * 16) as i32,
+            );
+        }
+    }
+}
+
+/// The wind as the tree's shaders take it: the weather the scene sets, and how the
+/// species gives to it. The default is still air.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindUniforms {
+    /// Seconds on the wind's clock.
+    pub time: f32,
+    /// The way the wind blows, on the ground: x and z of a unit vector.
+    pub direction: [f32; 2],
+    /// 0 for still air, 1 for a full gale.
+    pub strength: f32,
+    pub gustiness: f32,
+    /// How far the trunk, limbs, branches and twigs bend in a full gale, in radians.
+    pub flexibility: [f32; 4],
+    /// How fast the trunk sways, in hertz.
+    pub frequency: f32,
+    /// How far a leaf flutters in a full gale, in radians.
+    pub flutter: f32,
+    /// The trunk bends along its height, so it has to know what that is.
+    pub tree_height: f32,
+}
+
+impl WindUniforms {
+    pub fn new(
+        species: &arbor_core::WindParams,
+        time: f32,
+        direction_deg: f32,
+        strength: f32,
+        gustiness: f32,
+        tree_height: f32,
+    ) -> Self {
+        let a = direction_deg.to_radians();
+        Self {
+            time,
+            direction: [a.cos(), a.sin()],
+            strength: strength.max(0.0),
+            gustiness: gustiness.clamp(0.0, 1.0),
+            flexibility: species.flexibility.map(|f| f.max(0.0)),
+            frequency: species.frequency.max(0.0),
+            flutter: species.flutter.max(0.0),
+            tree_height,
+        }
+    }
+
+    /// Furthest the tree can move from where it was grown, as a generous bound, so the
+    /// shadow frustum can be fitted to where the tree actually is rather than to where it
+    /// stands in still air. Lean and sway on the trunk at the top of a gust, plus a limb
+    /// swinging on top of that.
+    pub fn reach(&self) -> f32 {
+        if self.strength <= 0.0 {
+            return 0.0;
+        }
+        let peak = self.strength * (1.0 + self.gustiness) * 1.6;
+        peak * (self.tree_height * (self.flexibility[0] + 0.4 * self.flexibility[1]) + 0.5)
+    }
+
+    /// Sets whichever of the wind uniforms the program kept. Ones the compiler dropped
+    /// are skipped, like the sky's.
+    pub unsafe fn bind(&self, gl: &glow::Context, program: glow::Program) {
+        unsafe {
+            if let Some(l) = gl.get_uniform_location(program, "u_time") {
+                gl.uniform_1_f32(Some(&l), self.time);
+            }
+            if let Some(l) = gl.get_uniform_location(program, "u_wind") {
+                gl.uniform_4_f32(
+                    Some(&l),
+                    self.direction[0],
+                    self.direction[1],
+                    self.strength,
+                    self.gustiness,
+                );
+            }
+            if let Some(l) = gl.get_uniform_location(program, "u_wind_flex") {
+                let f = self.flexibility;
+                gl.uniform_4_f32(Some(&l), f[0], f[1], f[2], f[3]);
+            }
+            if let Some(l) = gl.get_uniform_location(program, "u_wind_motion") {
+                gl.uniform_2_f32(Some(&l), self.frequency, self.flutter);
+            }
+            if let Some(l) = gl.get_uniform_location(program, "u_tree_height") {
+                gl.uniform_1_f32(Some(&l), self.tree_height);
+            }
+        }
+    }
+}
+
 fn loc(gl: &glow::Context, program: &glow::Program, name: &str) -> glow::UniformLocation {
     unsafe { gl.get_uniform_location(*program, name) }
         .unwrap_or_else(|| panic!("uniform {name} not found"))
@@ -528,7 +664,7 @@ pub struct DepthPass {
 impl DepthPass {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::DEPTH_VS, shaders::DEPTH_FS, &["a_pos", "a_normal", "a_uv", "a_tangent"]);
+            let program = compile_program(gl, &shaders::depth_vs(), shaders::DEPTH_FS, &MESH_ATTRIBS);
             let u_light_view_proj = loc(gl, &program, "u_light_view_proj");
             Self {
                 program,
@@ -542,16 +678,18 @@ pub struct ColorPass {
     pub program: glow::Program,
     pub u_view_proj: glow::UniformLocation,
     pub u_color: glow::UniformLocation,
+    u_leaf: glow::UniformLocation,
 }
 
 impl ColorPass {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::COLOR_VS, shaders::COLOR_FS, &["a_pos", "a_normal", "a_uv", "a_tangent"]);
+            let program = compile_program(gl, &shaders::color_vs(), shaders::COLOR_FS, &WIRE_ATTRIBS);
             Self {
                 program,
                 u_view_proj: loc(gl, &program, "u_view_proj"),
                 u_color: loc(gl, &program, "u_color"),
+                u_leaf: loc(gl, &program, "u_leaf"),
             }
         }
     }
@@ -565,9 +703,11 @@ impl ColorPass {
         leaves: Option<&GpuLeaves>,
         view_proj: Mat4,
         color: [f32; 4],
+        wind: &WindUniforms,
     ) {
         unsafe {
             gl.use_program(Some(self.program));
+            wind.bind(gl, self.program);
             gl.uniform_matrix_4_f32_slice(
                 Some(&self.u_view_proj),
                 false,
@@ -575,8 +715,10 @@ impl ColorPass {
             );
             gl.uniform_4_f32(Some(&self.u_color), color[0], color[1], color[2], color[3]);
             gl.polygon_mode(glow::FRONT_AND_BACK, glow::LINE);
+            gl.uniform_1_i32(Some(&self.u_leaf), 0);
             mesh.bind_and_draw(gl);
             if let Some(leaves) = leaves {
+                gl.uniform_1_i32(Some(&self.u_leaf), 1);
                 leaves.bind_and_draw(gl);
             }
             gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
@@ -593,6 +735,7 @@ pub struct GpuMesh {
     vbo_uv: glow::Buffer,
     vbo_tan: glow::Buffer,
     vbo_weather: glow::Buffer,
+    vbo_sway: glow::Buffer,
     ibo: glow::Buffer,
     index_count: i32,
     u_view_proj: glow::UniformLocation,
@@ -654,18 +797,20 @@ pub struct MeshDrawParams<'a> {
     pub use_normal_map: bool,
     pub material: &'a MaterialTextures,
     pub shadow_depth: glow::Texture,
+    pub wind: &'a WindUniforms,
 }
 
 impl GpuMesh {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::MESH_VS, &shaders::mesh_fs(), &["a_pos", "a_normal", "a_uv", "a_tangent", "a_weathering"]);
+            let program = compile_program(gl, &shaders::mesh_vs(), &shaders::mesh_fs(), &MESH_ATTRIBS);
             let vao = gl.create_vertex_array().expect("mesh vao");
             let vbo_pos = gl.create_buffer().expect("vbo pos");
             let vbo_nrm = gl.create_buffer().expect("vbo nrm");
             let vbo_uv = gl.create_buffer().expect("vbo uv");
             let vbo_tan = gl.create_buffer().expect("vbo tan");
             let vbo_weather = gl.create_buffer().expect("vbo weathering");
+            let vbo_sway = gl.create_buffer().expect("vbo sway");
             let ibo = gl.create_buffer().expect("ibo");
 
             gl.bind_vertex_array(Some(vao));
@@ -684,6 +829,8 @@ impl GpuMesh {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo_weather));
             gl.enable_vertex_attrib_array(4);
             gl.vertex_attrib_pointer_f32(4, 1, glow::FLOAT, false, 4, 0);
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo_sway));
+            sway_attribs(gl);
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
@@ -708,6 +855,7 @@ impl GpuMesh {
                 vbo_uv,
                 vbo_tan,
                 vbo_weather,
+                vbo_sway,
                 ibo,
                 index_count: 0,
                 u_view_proj: u("u_view_proj"),
@@ -740,6 +888,7 @@ impl GpuMesh {
                 (self.vbo_uv, cast_slice(&mesh.uvs)),
                 (self.vbo_tan, cast_slice(&mesh.tangents)),
                 (self.vbo_weather, cast_slice(&mesh.weathering)),
+                (self.vbo_sway, cast_slice(&mesh.sway)),
             ] {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
                 gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STATIC_DRAW);
@@ -817,6 +966,7 @@ impl GpuMesh {
             );
             gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
             p.sky.bind(gl, self.program);
+            p.wind.bind(gl, self.program);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE1);
@@ -840,7 +990,17 @@ pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
 /// Leaf vertex attributes, in the order the one leaf vertex array binds them. The
 /// colour pass and the depth pass draw from that same array, so they have to agree on
 /// it or the depth pass reads positions out of the tint buffer.
-const LEAF_ATTRIBS: [&str; 5] = ["a_pos", "a_normal", "a_uv", "a_tint", "a_atlas_v"];
+const LEAF_ATTRIBS: [&str; 9] = [
+    "a_pos",
+    "a_normal",
+    "a_uv",
+    "a_tint",
+    "a_atlas_v",
+    "a_wind1",
+    "a_wind2",
+    "a_wind3",
+    "a_leaf_origin",
+];
 
 /// Which atlas cells a leaf card samples, and how hard the alpha test bites.
 #[derive(Clone, Copy)]
@@ -908,7 +1068,7 @@ pub struct LeafDepthPass {
 impl LeafDepthPass {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::LEAF_DEPTH_VS, shaders::LEAF_DEPTH_FS, &LEAF_ATTRIBS);
+            let program = compile_program(gl, &shaders::leaf_depth_vs(), shaders::LEAF_DEPTH_FS, &LEAF_ATTRIBS);
             gl.use_program(Some(program));
             gl.uniform_1_i32(Some(&loc(gl, &program, "u_albedo_tex")), 0);
             gl.use_program(None);
@@ -929,9 +1089,11 @@ impl LeafDepthPass {
         light_view_proj: Mat4,
         material: &MaterialTextures,
         p: LeafMaterialParams,
+        wind: &WindUniforms,
     ) {
         unsafe {
             gl.use_program(Some(self.program));
+            wind.bind(gl, self.program);
             gl.uniform_matrix_4_f32_slice(
                 Some(&self.u_light_view_proj),
                 false,
@@ -960,6 +1122,7 @@ pub struct LeafDrawParams<'a> {
     pub material: &'a MaterialTextures,
     pub shadow_depth: glow::Texture,
     pub leaf: LeafMaterialParams,
+    pub wind: &'a WindUniforms,
 }
 
 pub struct GpuLeaves {
@@ -970,6 +1133,8 @@ pub struct GpuLeaves {
     vbo_uv: glow::Buffer,
     vbo_tint: glow::Buffer,
     vbo_atlas_v: glow::Buffer,
+    vbo_sway: glow::Buffer,
+    vbo_origin: glow::Buffer,
     ibo: glow::Buffer,
     index_count: i32,
     u_view_proj: glow::UniformLocation,
@@ -994,13 +1159,15 @@ pub struct GpuLeaves {
 impl GpuLeaves {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
-            let program = compile_program(gl, shaders::LEAF_VS, &shaders::leaf_fs(), &LEAF_ATTRIBS);
+            let program = compile_program(gl, &shaders::leaf_vs(), &shaders::leaf_fs(), &LEAF_ATTRIBS);
             let vao = gl.create_vertex_array().expect("leaf vao");
             let vbo_pos = gl.create_buffer().expect("leaf pos");
             let vbo_nrm = gl.create_buffer().expect("leaf nrm");
             let vbo_uv = gl.create_buffer().expect("leaf uv");
             let vbo_tint = gl.create_buffer().expect("leaf tint");
             let vbo_atlas_v = gl.create_buffer().expect("leaf atlas v");
+            let vbo_sway = gl.create_buffer().expect("leaf sway");
+            let vbo_origin = gl.create_buffer().expect("leaf origin");
             let ibo = gl.create_buffer().expect("leaf ibo");
 
             gl.bind_vertex_array(Some(vao));
@@ -1010,11 +1177,14 @@ impl GpuLeaves {
                 (2, vbo_uv, 2, 8),
                 (3, vbo_tint, 4, 16),
                 (4, vbo_atlas_v, 1, 4),
+                (8, vbo_origin, 3, 12),
             ] {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
                 gl.enable_vertex_attrib_array(slot);
                 gl.vertex_attrib_pointer_f32(slot, size, glow::FLOAT, false, stride, 0);
             }
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo_sway));
+            sway_attribs(gl);
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
@@ -1034,6 +1204,8 @@ impl GpuLeaves {
                 vbo_uv,
                 vbo_tint,
                 vbo_atlas_v,
+                vbo_sway,
+                vbo_origin,
                 ibo,
                 index_count: 0,
                 u_view_proj: u("u_view_proj"),
@@ -1067,6 +1239,8 @@ impl GpuLeaves {
                 (self.vbo_uv, cast_slice(&leaves.uvs)),
                 (self.vbo_tint, cast_slice(&leaves.tints)),
                 (self.vbo_atlas_v, cast_slice(&leaves.atlas_v)),
+                (self.vbo_sway, cast_slice(&leaves.sway)),
+                (self.vbo_origin, cast_slice(&leaves.origins)),
             ] {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
                 gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STATIC_DRAW);
@@ -1138,6 +1312,7 @@ impl GpuLeaves {
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
             gl.uniform_1_f32(Some(&self.u_normal_bias), p.normal_bias);
             p.sky.bind(gl, self.program);
+            p.wind.bind(gl, self.program);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE2);

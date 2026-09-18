@@ -4,6 +4,7 @@ use std::f32::consts::{PI, TAU};
 use crate::math::{norm_or_zero, ortho_of, ortho_unit, transport};
 use crate::skeleton::Skeleton;
 use crate::species::{BarkIrregularity, MeshParams, SpeciesParams};
+use crate::wind::{Sway, StemSway, SwayField};
 
 /// Angular step used for the finite-difference normal around a ring.
 const NORMAL_DA: f32 = 0.01;
@@ -17,6 +18,8 @@ pub struct Mesh {
     /// Per vertex, 1 on wood the tree has lost and 0 on living wood, for the renderer
     /// to weather by `dead_wood_weathering`.
     pub weathering: Vec<f32>,
+    /// Per vertex, the wood it hangs off, for the renderer to sway in the wind.
+    pub sway: Vec<Sway>,
     pub indices: Vec<u32>,
 }
 
@@ -420,16 +423,22 @@ struct MeshSink {
     /// Written onto every vertex pushed until it is changed: the stem being swept is
     /// dead or it is not, and everything in it is the same.
     weathering: f32,
+    /// How the stem being swept hangs off the wood carrying it, read off at each
+    /// vertex's distance along it.
+    sway: StemSway,
 }
 
 impl MeshSink {
-    fn push_vertex(&mut self, pos: Vec3, normal: Vec3, tangent: Vec3, uv: [f32; 2]) {
+    /// `arc` is how far along the stem the vertex sits, from where the stem leaves its
+    /// parent, which is what its sway is read off.
+    fn push_vertex(&mut self, pos: Vec3, normal: Vec3, tangent: Vec3, uv: [f32; 2], arc: f32) {
         self.mesh.positions.push(pos.to_array());
         self.mesh.normals.push(normal.to_array());
         let t = norm_or_zero(tangent - normal * tangent.dot(normal));
         self.mesh.tangents.push([t.x, t.y, t.z, 1.0]);
         self.mesh.uvs.push(uv);
         self.mesh.weathering.push(self.weathering);
+        self.mesh.sway.push(self.sway.at(arc));
     }
 
     fn vertex_offset(&self) -> u32 {
@@ -905,6 +914,7 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
     let phase = seed_phases(params.seed);
 
     let children = child_index(sk);
+    let field = SwayField::new(sk);
 
     for stem in sk.stem_runs() {
         let Some(path) = StemPath::build(sk, &stem, mp, params.seed, &children) else {
@@ -914,6 +924,7 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
             continue;
         }
         sink.weathering = if path.is_dead { 1.0 } else { 0.0 };
+        sink.sway = field.stem(sk, stem[0] as usize);
         emit_stem(&mut sink, &path, mp, phase);
     }
 
@@ -965,12 +976,13 @@ fn emit_spike(
             j as f32 / radial as f32 * path.radii[0] * TAU / mp.uv_scale.max(1e-4),
             0.0,
         ];
-        sink.push_vertex(path.points[0] + e_r * r, normal, e_a, uv);
+        sink.push_vertex(path.points[0] + e_r * r, normal, e_a, uv, path.arc[0]);
     }
 
-    let tip = path.points[1] + path.dirs[1] * mp.tip_length.max(path.radii[1] * 1.2);
+    let reach = mp.tip_length.max(path.radii[1] * 1.2);
+    let tip = path.points[1] + path.dirs[1] * reach;
     let apex = sink.vertex_offset();
-    sink.push_vertex(tip, path.dirs[1], ortho_of(path.dirs[1]), [0.0, arc]);
+    sink.push_vertex(tip, path.dirs[1], ortho_of(path.dirs[1]), [0.0, arc], arc + reach);
     for j in 0..radial {
         sink.mesh
             .indices
@@ -1274,7 +1286,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
                 j as f32 / radial as f32 * path.radii[i] * TAU / mp.uv_scale.max(1e-4),
                 path.arc[i] / mp.uv_scale.max(1e-4),
             ];
-            sink.push_vertex(path.points[i] + e_r * r, normal, e_a, uv);
+            sink.push_vertex(path.points[i] + e_r * r, normal, e_a, uv, path.arc[i]);
         }
         ring_bases.push(base);
     }
@@ -1294,10 +1306,10 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
             let a = j as f32 / rim_sides as f32 * TAU;
             let e_r = n0 * a.cos() + b0 * a.sin();
             let pos = path.points[0] + e_r * path.radius_at(0, a, mp, phase);
-            sink.push_vertex(pos, cap_n, ortho_of(cap_n), [0.0, 0.0]);
+            sink.push_vertex(pos, cap_n, ortho_of(cap_n), [0.0, 0.0], path.arc[0]);
         }
         let center = sink.vertex_offset();
-        sink.push_vertex(path.points[0], cap_n, ortho_of(cap_n), [0.0, 0.0]);
+        sink.push_vertex(path.points[0], cap_n, ortho_of(cap_n), [0.0, 0.0], path.arc[0]);
         for j in 0..rim_sides {
             sink.mesh
                 .indices
@@ -1310,13 +1322,16 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
     // the tree has lost ends where it snapped instead, so it gets a flat break.
     let end_dir = path.dirs[last];
     let r_end = path.radii[last];
-    let tip = if path.is_dead {
-        path.points[last]
-    } else {
-        path.points[last] + end_dir * mp.tip_length.max(r_end * 1.2)
-    };
+    let reach = if path.is_dead { 0.0 } else { mp.tip_length.max(r_end * 1.2) };
+    let tip = path.points[last] + end_dir * reach;
     let apex = sink.vertex_offset();
-    sink.push_vertex(tip, end_dir, ortho_of(end_dir), [0.0, path.arc[last]]);
+    sink.push_vertex(
+        tip,
+        end_dir,
+        ortho_of(end_dir),
+        [0.0, path.arc[last]],
+        path.arc[last] + reach,
+    );
     let base = ring_bases[swept - 1];
     for j in 0..sides[swept - 1] {
         sink.mesh
@@ -2042,6 +2057,28 @@ mod tests {
         for (n, t) in mesh.normals.iter().zip(mesh.tangents.iter()) {
             let dot = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
             assert!(dot.abs() < 0.02, "tangent not orthogonal: dot={dot}");
+        }
+    }
+
+    #[test]
+    fn every_vertex_knows_what_it_hangs_off() {
+        let params = parse_species(OAK_RON).unwrap();
+        let sk = crate::grow(&params);
+        let mesh = build_mesh(&sk, &params);
+        assert_eq!(mesh.sway.len(), mesh.vertex_count());
+        // The foot of the trunk is carried by nothing; the renderer bends the trunk
+        // by height alone.
+        for (p, w) in mesh.positions.iter().zip(&mesh.sway) {
+            if p[1] < 0.5 {
+                assert!(w.iter().all(|o| o[3] == 0.0), "trunk foot at {p:?} sways as a branch");
+            }
+        }
+        // Each order has wood in it somewhere.
+        for order in 0..crate::wind::SWAY_ORDERS {
+            assert!(
+                mesh.sway.iter().any(|w| w[order][3] > 0.0),
+                "nothing in the oak bends as order {order}"
+            );
         }
     }
 

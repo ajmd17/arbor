@@ -23,6 +23,7 @@ use crate::math::{ortho_of, ortho_unit, transport};
 use crate::seed::{range_f32, TreeRng};
 use crate::skeleton::Skeleton;
 use crate::species::{LeafParams, SpeciesParams};
+use crate::wind::{StemSway, Sway, SwayField};
 
 /// Ceiling on card count, so a dense preset cannot allocate without bound.
 const MAX_LEAVES: usize = 400_000;
@@ -43,6 +44,13 @@ pub struct LeafMesh {
     pub atlas_v: Vec<f32>,
     /// rgb is a per-leaf colour multiplier, a is a crown-depth shade term.
     pub tints: Vec<[f32; 4]>,
+    /// Per vertex, the point on its twig the card hangs from, which is what it
+    /// flutters about. The same for all four corners of a card.
+    pub origins: Vec<[f32; 3]>,
+    /// Per vertex, how the twig point the card hangs from is carried by the wood
+    /// under it, for the renderer to sway. A card rides that point rigidly, so all
+    /// four corners carry the sway of the origin rather than of where they are.
+    pub sway: Vec<Sway>,
     pub indices: Vec<u32>,
 }
 
@@ -77,6 +85,8 @@ struct Card {
     hue: f32,
     /// Offset down the atlas to the cluster arrangement this card draws.
     atlas_v: f32,
+    /// How the twig carrying the card sways where the card hangs from it.
+    sway: Sway,
 }
 
 pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
@@ -102,6 +112,7 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
         .as_ref()
         .map_or_else(|| lp.atlas_rows.max(1), |c| c.variants.max(1));
     let tree_rng = TreeRng::new(params.seed ^ 0x1EAF_1EAF_1EAF_1EAF);
+    let field = SwayField::new(sk);
     let mut cards: Vec<Card> = Vec::new();
 
     for run in sk.stem_runs() {
@@ -116,7 +127,8 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
         if sk.nodes[first].dead {
             continue;
         }
-        place_on_stem(sk, lp, &tree_rng, &run, variants, &mut cards);
+        let sway = field.stem(sk, first);
+        place_on_stem(sk, lp, &tree_rng, &run, variants, &sway, &mut cards);
     }
 
     if cards.is_empty() {
@@ -129,6 +141,8 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
     mesh.uvs.reserve(cards.len() * 4);
     mesh.atlas_v.reserve(cards.len() * 4);
     mesh.tints.reserve(cards.len() * 4);
+    mesh.origins.reserve(cards.len() * 4);
+    mesh.sway.reserve(cards.len() * 4);
     mesh.indices.reserve(cards.len() * 6);
     for card in &cards {
         emit_card(&mut mesh, card, lp, center, radius);
@@ -142,6 +156,7 @@ fn place_on_stem(
     tree_rng: &TreeRng,
     run: &[u32],
     variants: u32,
+    sway: &StemSway,
     out: &mut Vec<Card>,
 ) {
     // Walk from the attachment point, the same polyline the bark tube is swept
@@ -214,6 +229,9 @@ fn place_on_stem(
                 }
             }
             let at = a + dir * travelled;
+            // The walk starts where the twig leaves its parent, as the sway does, so
+            // the distance walked is the distance the sway is read off at.
+            let hang = sway.at(walked + travelled);
             // Every card in a cluster shares one anchor and one base direction, and
             // fans out from it, so the canopy reads as tufts rather than a uniform
             // spray of evenly spaced leaves.
@@ -244,7 +262,7 @@ fn place_on_stem(
                 let variant = range_f32(&mut rng, 0.0, variants as f32) as u32;
                 let even = cluster_roll
                     + k as f32 * std::f32::consts::PI / lp.cluster_size.max(1) as f32;
-                out.push(make_card(
+                let mut card = make_card(
                     lp,
                     &mut rng,
                     at,
@@ -254,7 +272,9 @@ fn place_on_stem(
                     even,
                     base_azimuth + fan,
                     variant.min(variants - 1) as f32 / variants as f32,
-                ));
+                );
+                card.sway = hang;
+                out.push(card);
             }
         }
         until_next -= seg_len - travelled;
@@ -316,6 +336,7 @@ fn make_card(
         width: (lp.card_width * scale).max(1e-3),
         hue: range_f32(rng, -1.0, 1.0),
         atlas_v,
+        sway: Sway::default(),
     }
 }
 
@@ -374,6 +395,8 @@ fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, ra
         mesh.uvs.push(uv);
         mesh.atlas_v.push(card.atlas_v);
         mesh.tints.push(tint);
+        mesh.origins.push(card.origin.to_array());
+        mesh.sway.push(card.sway);
     }
     mesh.indices
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -432,6 +455,30 @@ mod tests {
                 assert!((i as usize) < leaves.vertex_count(), "index {i} out of range");
             }
         }
+    }
+
+    #[test]
+    fn every_card_rides_one_point_of_its_twig() {
+        // A card is swayed as a rigid quad hung from its origin, so all four corners
+        // have to agree on where that is and on how it moves.
+        let params = oak();
+        let leaves = build_leaves(&crate::grow(&params), &params);
+        assert_eq!(leaves.origins.len(), leaves.vertex_count());
+        assert_eq!(leaves.sway.len(), leaves.vertex_count());
+        let mut swaying = 0;
+        for (origins, sway) in leaves.origins.chunks_exact(4).zip(leaves.sway.chunks_exact(4)) {
+            assert!(origins.iter().all(|o| o == &origins[0]), "one card, two origins");
+            assert!(sway.iter().all(|w| w == &sway[0]), "one card, two sways");
+            // Leaves grow on twigs, and a twig is always carried by some limb.
+            if sway[0][0][3] > 0.0 {
+                swaying += 1;
+            }
+        }
+        assert!(
+            swaying * 10 > leaves.leaf_count() * 9,
+            "only {swaying} of {} cards move with a limb",
+            leaves.leaf_count()
+        );
     }
 
     #[test]
