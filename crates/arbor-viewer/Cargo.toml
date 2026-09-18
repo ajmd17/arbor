@@ -11,8 +11,17 @@ egui.workspace = true
 egui_glow.workspace = true
 glow.workspace = true
 glam.workspace = true
-rand.workspace = true
 bytemuck.workspace = true
 image.workspace = true
 ron.workspace = true
+web-time.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures.workspace = true
+web-sys.workspace = true
+js-sys.workspace = true
+ehttp.workspace = true
+log.workspace = true

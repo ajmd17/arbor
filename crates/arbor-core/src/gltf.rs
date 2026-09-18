@@ -38,7 +38,7 @@ use crate::math::ortho_of;
 use crate::mesh::Mesh;
 use crate::skeleton::Skeleton;
 use crate::species::{SpeciesParams, SpeciesTemplate};
-use crate::textures;
+use crate::textures::{self, MapSource};
 use crate::wind::{SwayAt, SwayField, SwayStem};
 
 /// The viewer's alpha test on leaf cards.
@@ -132,14 +132,14 @@ pub struct Textures {
 }
 
 impl Textures {
-    /// Reads the species' maps from `dir`. A missing map is reported in `warnings` and
-    /// left out, and the material it belongs to is exported without it.
-    pub fn load(params: &SpeciesParams, dir: &Path) -> Result<Self, String> {
+    /// Reads the species' maps from `source`. A missing map is reported in `warnings`
+    /// and left out, and the material it belongs to is exported without it.
+    pub fn load<S: MapSource + ?Sized>(params: &SpeciesParams, source: &S) -> Result<Self, String> {
         let mut out = Textures::default();
         let mp = &params.mesh;
         let name = &mp.bark_texture;
         // Bark maps go in as they are on disk, byte for byte: nothing needs changing.
-        let read = |map: &str| std::fs::read(textures::map_path(dir, name, map)).ok();
+        let read = |map: &str| source.read(&textures::map_file(name, map));
         out.bark_albedo = read("albedo");
         out.bark_normal = read("normal");
         out.bark_roughness = read("roughness");
@@ -148,7 +148,7 @@ impl Textures {
         }
         let bleach = mp.dead_wood_weathering.clamp(0.0, 1.0);
         if bleach > 0.0
-            && let Some(bitmap) = textures::load_bitmap(&textures::map_path(dir, name, "albedo"))
+            && let Some(bitmap) = out.bark_albedo.as_deref().and_then(textures::decode)
         {
             let bleached = bleach_bark(&bitmap, mp.bark_tint, mp.dead_wood_color, bleach);
             out.dead_albedo = Some(textures::encode_png(&bleached)?);
@@ -158,7 +158,7 @@ impl Textures {
         // is the slowest thing here.
         let lp = &params.leaves;
         if lp.enabled {
-            match textures::load_leaf_maps(dir, lp) {
+            match textures::load_leaf_maps(source, lp) {
                 Some(maps) => {
                     out.leaf_albedo = Some(textures::encode_png(&maps.albedo)?);
                     if let Some(r) = &maps.roughness {
@@ -189,20 +189,32 @@ pub struct Exporter {
 impl Exporter {
     pub fn new(params: &SpeciesParams, options: &ExportOptions) -> Result<Self, String> {
         let textures = match &options.textures {
-            Some(dir) => Textures::load(params, dir)?,
+            Some(dir) => Textures::load(params, dir.as_path())?,
             None => Textures::default(),
         };
-        Ok(Self {
+        Ok(Self::with_textures(textures, options.wind))
+    }
+
+    /// An exporter for textures already loaded, from wherever they came.
+    pub fn with_textures(textures: Textures, wind: bool) -> Self {
+        Self {
             textures,
-            wind: options.wind,
+            wind,
             shared_images: None,
             written: Default::default(),
-        })
+        }
     }
 
     /// Maps that were looked for and not found.
     pub fn warnings(&self) -> &[String] {
         &self.textures.warnings
+    }
+
+    /// One tree as a `.glb`, in memory. The mesh and leaves have to be the ones built
+    /// from `skeleton`.
+    pub fn glb(&self, skeleton: &Skeleton, mesh: &Mesh, leaves: &LeafMesh, params: &SpeciesParams) -> Vec<u8> {
+        let tree = Tree { skeleton, mesh, leaves, params };
+        build(Format::Glb, "tree", "tree", &tree, &self.textures, self.wind).glb()
     }
 
     /// Names the image files of every `.gltf` written from here on `<name>_*.png`,
@@ -284,10 +296,7 @@ pub fn to_glb(
     params: &SpeciesParams,
     options: &ExportOptions,
 ) -> Result<Vec<u8>, String> {
-    let exporter = Exporter::new(params, options)?;
-    let tree = Tree { skeleton, mesh, leaves, params };
-    let doc = build(Format::Glb, "tree", "tree", &tree, &exporter.textures, options.wind);
-    Ok(doc.glb())
+    Ok(Exporter::new(params, options)?.glb(skeleton, mesh, leaves, params))
 }
 
 /// What a batch wrote.

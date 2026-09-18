@@ -1,12 +1,11 @@
 use std::cell::RefCell;
 
 use glam::Vec3;
-use rand::rngs::SmallRng;
 use rand::Rng;
 
 use crate::envelope::EnvelopeParams;
 use crate::math::{ortho_of, ortho_unit, transport};
-use crate::seed::{child_path, range_f32, TreeRng};
+use crate::seed::{child_path, range_f32, PortableRng, TreeRng};
 use crate::skeleton::Skeleton;
 use crate::species::{ChildPattern, SpeciesParams, StemParams};
 
@@ -927,7 +926,7 @@ fn fork_cap(ahead: f32, max_len: f32, evenness: f32) -> f32 {
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_children(
-    rng: &mut SmallRng,
+    rng: &mut PortableRng,
     attach: u32,
     dir: Vec3,
     frame: Vec3,
@@ -952,7 +951,7 @@ fn spawn_children(
     let spawn_one = |az: f32,
                      pending: &mut Vec<Pending>,
                      slot: &mut u32,
-                     rng: &mut SmallRng| {
+                     rng: &mut PortableRng| {
         *slot += 1;
         // Children leave at a shallower or steeper angle depending how far along the
         // parent they are, so a stem does not carry every child at one fixed angle.
@@ -1212,7 +1211,7 @@ fn norm_or_up(v: Vec3) -> Vec3 {
     if len > 1e-8 { v / len } else { Vec3::Y }
 }
 
-fn rand_perpendicular(rng: &mut SmallRng, dir: Vec3) -> Vec3 {
+fn rand_perpendicular(rng: &mut PortableRng, dir: Vec3) -> Vec3 {
     let a = ortho_of(dir);
     let b = dir.cross(a);
     let ang = range_f32(rng, 0.0, std::f32::consts::TAU);

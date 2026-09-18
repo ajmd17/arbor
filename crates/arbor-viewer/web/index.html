@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Arbor</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #1b1b1b;
+        }
+
+        /* The viewer sizes its drawing buffer to whatever this is laid out as. */
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #9a9a9a;
+            font: 15px system-ui, sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="arbor"></canvas>
+    <div id="loading">Growing a tree…</div>
+    <script type="module">
+        import init from "./arbor.js";
+        init().catch((e) => {
+            document.getElementById("loading").textContent = "The viewer could not load: " + e;
+        });
+    </script>
+</body>
+</html>

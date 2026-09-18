@@ -291,7 +291,7 @@ fn place_on_stem(
 #[allow(clippy::too_many_arguments)]
 fn make_card(
     lp: &LeafParams,
-    rng: &mut rand::rngs::SmallRng,
+    rng: &mut crate::seed::PortableRng,
     on_twig: Vec3,
     twig_dir: Vec3,
     frame: Vec3,

@@ -85,6 +85,38 @@ The OBJ comes out as triangles in two groups, `bark` and `leaves`, with leaf UVs
 baked into their atlas cell (the viewer's shader picks a cell per card, an
 exported mesh has no such shader).
 
+### In a browser
+
+The viewer also builds for the web, on WebGL2:
+
+```bash
+bash crates/arbor-viewer/web/build.sh
+python -m http.server 8080 -d target/web
+```
+
+Then open http://localhost:8080. `target/web` is the whole site: the page, the wasm,
+and the texture maps the built-in species use (about 55 MB, most of it the spruce
+bark). It works on any static host.
+
+The build needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli`. The CLI's
+version has to match the `wasm-bindgen` crate in `Cargo.lock`, which
+`cargo tree -p arbor-viewer --target wasm32-unknown-unknown -i wasm-bindgen` prints.
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install --locked wasm-bindgen-cli --version 0.2.126
+```
+
+On the web:
+
+- Textures are fetched when a species is picked. Switching species holds the page
+  for a moment while its leaf atlas is baked.
+- **Download GLB** exports the tree on screen as a download. Batches, glTF and
+  saving presets need the desktop viewer; **Copy as RON** works in both.
+- There's no wireframe, because WebGL can't draw one.
+- A seed grows the same tree as on the desktop. Only float noise differs, well under
+  a millimetre.
+
 ## Exporting glTF
 
 In the viewer, under **Save as**:

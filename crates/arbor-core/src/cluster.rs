@@ -13,7 +13,6 @@
 
 use std::collections::VecDeque;
 
-use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
 use crate::species::LeafClusterParams;
@@ -347,7 +346,7 @@ fn lay_out(
     sources: &[(u32, u32, u32, u32)],
     seed: u64,
 ) -> Vec<Placement> {
-    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut rng = crate::seed::PortableRng::seed_from_u64(seed);
     let cell = size as f32;
     let count = p.count.clamp(1, 512);
     let narrow = p.leaf_narrow.clamp(0.02, 4.0);

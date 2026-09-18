@@ -5,6 +5,7 @@ use glam::{Mat4, Vec3};
 
 use arbor_core::cluster::Bitmap;
 use arbor_core::species::LeafParams;
+use arbor_core::textures::{self, MapSource};
 
 use crate::shaders;
 
@@ -21,7 +22,7 @@ pub unsafe fn compile_program(
     unsafe {
         let compile = |kind: u32, src: &str| {
             let shader = gl.create_shader(kind).expect("create_shader");
-            gl.shader_source(shader, src);
+            gl.shader_source(shader, &for_this_gl(src));
             gl.compile_shader(shader);
             if !gl.get_shader_compile_status(shader) {
                 panic!("shader compile: {}", gl.get_shader_info_log(shader));
@@ -44,6 +45,20 @@ pub unsafe fn compile_program(
         gl.delete_shader(fs);
         program
     }
+}
+
+/// The shaders are written as GLSL 1.50. WebGL2 takes GLSL ES 3.00, which reads them
+/// the same once the header says so and the precisions are spelled out: high all
+/// through, or the shadow map's depths come back too coarse to compare.
+fn for_this_gl(src: &str) -> std::borrow::Cow<'_, str> {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(body) = src.strip_prefix("#version 150") {
+        return format!(
+            "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;{body}"
+        )
+        .into();
+    }
+    src.into()
 }
 
 /// Bark vertex attributes, in the order the mesh vertex array binds them. The colour
@@ -392,9 +407,10 @@ unsafe fn set_max_anisotropy(gl: &glow::Context) {
     const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
     const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
     unsafe {
-        if !gl
-            .supported_extensions()
-            .contains("GL_EXT_texture_filter_anisotropic")
+        // WebGL names its extensions without the prefix.
+        let extensions = gl.supported_extensions();
+        if !extensions.contains("GL_EXT_texture_filter_anisotropic")
+            && !extensions.contains("EXT_texture_filter_anisotropic")
         {
             return;
         }
@@ -403,13 +419,6 @@ unsafe fn set_max_anisotropy(gl: &glow::Context) {
             gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, max.min(8.0));
         }
     }
-}
-
-unsafe fn load_image(path: &str) -> Option<(Vec<u8>, u32, u32)> {
-    let img = image::open(path).ok()?;
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-    Some((rgba.into_raw(), w, h))
 }
 
 fn hash2(x: i32, y: i32, seed: u32) -> f32 {
@@ -509,13 +518,17 @@ pub fn procedural_bark_roughness() -> (Vec<u8>, u32, u32) {
     (px, S, S)
 }
 
-/// Loads `<dir>/<name>_albedo.png` and friends, falling back to the procedural bark
-/// so the viewer still runs against a bare checkout with no texture assets.
-pub unsafe fn load_material(gl: &glow::Context, dir: &str, name: &str) -> MaterialTextures {
+/// Loads `<name>_albedo.png` and friends, falling back to the procedural bark so the
+/// viewer still runs against a bare checkout with no texture assets.
+pub unsafe fn load_material<S: MapSource + ?Sized>(
+    gl: &glow::Context,
+    maps: &S,
+    name: &str,
+) -> MaterialTextures {
     unsafe {
-        let load_or = |suffix: &str, fallback: fn() -> (Vec<u8>, u32, u32), srgb: bool| {
-            match load_image(&format!("{dir}/{name}_{suffix}.png")) {
-                Some((data, w, h)) => create_texture(gl, &data, w, h, srgb),
+        let load_or = |map: &str, fallback: fn() -> (Vec<u8>, u32, u32), srgb: bool| {
+            match textures::load_bitmap(maps, name, map) {
+                Some(m) => create_texture(gl, &m.pixels, m.width, m.height, srgb),
                 None => {
                     let (data, w, h) = fallback();
                     create_texture(gl, &data, w, h, srgb)
@@ -530,22 +543,34 @@ pub unsafe fn load_material(gl: &glow::Context, dir: &str, name: &str) -> Materi
     }
 }
 
+/// Plain bark to draw with while the real maps are on their way, which on the web they
+/// are for a moment.
+pub unsafe fn placeholder_material(gl: &glow::Context) -> MaterialTextures {
+    unsafe {
+        MaterialTextures {
+            albedo: create_texture(gl, &[88, 66, 50, 255], 1, 1, true),
+            normal: create_texture(gl, &[128, 128, 255, 255], 1, 1, false),
+            roughness: create_texture(gl, &[220, 220, 220, 255], 1, 1, false),
+        }
+    }
+}
+
 /// A leaf texture has no sensible procedural stand-in, so a missing one is reported
 /// rather than silently replaced by bark.
 ///
 /// When the species clusters, the art on disk is a single leaf and the atlas actually
 /// sampled is grown from it here. That keeps one leaf in the repository instead of a
 /// baked sheet per species, and lets the arrangement be retuned by editing numbers.
-pub unsafe fn load_leaf_material(
+pub unsafe fn load_leaf_material<S: MapSource + ?Sized>(
     gl: &glow::Context,
-    dir: &str,
+    maps: &S,
     lp: &LeafParams,
 ) -> Option<MaterialTextures> {
     unsafe {
         // Loaded, and clustered where the species clusters, by the same code the
         // exporters use, so what is exported is what is on screen.
-        let started = std::time::Instant::now();
-        let maps = arbor_core::textures::load_leaf_maps(std::path::Path::new(dir), lp)?;
+        let started = web_time::Instant::now();
+        let maps = textures::load_leaf_maps(maps, lp)?;
         if let Some(cluster) = &lp.cluster {
             println!(
                 "clustered {} into {}x{} from {} leaves, coverage {:.3} ({:.0} ms)",
@@ -599,21 +624,21 @@ impl ShadowTarget {
             // sit on the border. Clamping to the edge instead smears that last row of
             // texels outward, and with a low sun one shadow texel covers metres of
             // ground, so the smear reads as long straight bands lying across it.
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_BORDER as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_BORDER as i32,
-            );
-            gl.tex_parameter_f32_slice(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_BORDER_COLOR,
-                &[1.0, 1.0, 1.0, 1.0],
-            );
+            // WebGL has no border to clamp to; there the shaders' own test for falling
+            // off the map does the work, leaving only the filter taps at its very edge.
+            #[cfg(not(target_arch = "wasm32"))]
+            let (wrap, border) = (glow::CLAMP_TO_BORDER, true);
+            #[cfg(target_arch = "wasm32")]
+            let (wrap, border) = (glow::CLAMP_TO_EDGE, false);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, wrap as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap as i32);
+            if border {
+                gl.tex_parameter_f32_slice(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_BORDER_COLOR,
+                    &[1.0, 1.0, 1.0, 1.0],
+                );
+            }
             let fbo = gl.create_framebuffer().expect("shadow fbo");
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             gl.framebuffer_texture_2d(

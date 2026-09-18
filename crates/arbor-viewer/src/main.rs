@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod assets;
+mod export;
 mod gpu;
 mod knobs;
 mod lighting;
@@ -7,8 +9,7 @@ mod mipmap;
 mod presets;
 mod shaders;
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -16,8 +17,8 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
-use arbor_core::gltf::{self, ExportOptions, Format};
 use arbor_core::species::{LeafClusterParams, CUSTOM_PRESET_DIR};
+use arbor_core::textures;
 use arbor_core::{
     build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams, SpeciesTemplate,
 };
@@ -30,10 +31,6 @@ use gpu::{
 use lighting::{light_view_proj, SkyParams};
 
 const TEXTURE_DIR: &str = arbor_core::textures::TEXTURE_DIR;
-/// Where exports go until another folder is chosen, relative to the repository root.
-const EXPORT_DIR: &str = "exports";
-/// Most trees one export may grow.
-const MAX_VARIATIONS: u32 = 1000;
 
 #[derive(Clone, Copy, PartialEq)]
 enum RenderMode {
@@ -103,6 +100,7 @@ fn sun_at_hour(hour: f32) -> (f32, f32) {
     (elevation, azimuth)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |key: &str| args.iter().position(|a| a == key).and_then(|i| args.get(i + 1));
@@ -149,50 +147,51 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Grows `count` trees of `params` — its own seed, then each one after, every range
-/// landing afresh for each — and writes them into `dir` named after `name`, returning
-/// the line the panel reports it with.
-/// `progress` hears how many are done after each; returning false stops the batch.
-fn export_trees(
-    dir: &Path,
-    name: &str,
-    format: Format,
-    params: &SpeciesTemplate,
-    count: u32,
-    options: &ExportOptions,
-    progress: impl FnMut(u32) -> bool,
-) -> Result<String, String> {
-    let report = gltf::export_batch(dir, name, format, params, count, options, progress)?;
-    let size = report.bytes as f64 / 1e6;
-    let done = report.trees.len();
-    let mut message = if report.stopped {
-        format!("stopped after {done} of {count} trees in {} ({size:.1} MB)", dir.display())
-    } else if count == 1 {
-        format!("exported {} ({size:.1} MB)", report.trees[0].display())
-    } else {
-        format!("exported {done} trees to {} ({size:.1} MB)", dir.display())
-    };
-    for warning in report.warnings {
-        message.push_str("; ");
-        message.push_str(&warning);
-    }
-    Ok(message)
+/// In a page, the viewer takes over the canvas called `arbor`.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use eframe::wasm_bindgen::JsCast as _;
+    eframe::WebLogger::init(log::LevelFilter::Warn).ok();
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window().and_then(|w| w.document()).expect("a page to run in");
+        let canvas = document
+            .get_element_by_id("arbor")
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .expect("a <canvas id=\"arbor\"> on the page");
+        let started = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|cc| Ok(Box::new(App::new(cc, Startup::default())))),
+            )
+            .await;
+        let loading = document.get_element_by_id("loading");
+        match started {
+            Ok(()) => {
+                if let Some(loading) = loading {
+                    loading.remove();
+                }
+            }
+            Err(e) => {
+                log::error!("the viewer could not start: {e:?}");
+                if let Some(loading) = loading {
+                    loading.set_text_content(Some("The viewer could not start: this browser may not have WebGL2."));
+                }
+            }
+        }
+    });
 }
 
-/// What an export running on its own thread says as it goes.
-enum ExportEvent {
-    /// This many trees are written.
-    Progress(u32),
-    Finished(Result<String, String>),
-}
-
-/// An export running on its own thread.
-struct ExportJob {
-    events: std::sync::mpsc::Receiver<ExportEvent>,
-    /// Set to ask it to stop after the tree it is on.
-    stop: Arc<AtomicBool>,
-    done: u32,
-    total: u32,
+/// A seed nobody picked: the clock, stirred so that two clicks a moment apart land far
+/// apart.
+fn random_seed() -> u64 {
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let mut z = now.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// What the save field offers for a preset once it is loaded: a saved one's own name,
@@ -288,6 +287,8 @@ struct App {
     color_pass: Arc<ColorPass>,
     sky_pass: Arc<GpuSky>,
     ground_pass: Arc<GpuGround>,
+    /// Where the texture maps come from: off disk, or fetched on the web.
+    maps: assets::Maps,
     bark_material: MaterialTextures,
     leaf_material: Option<MaterialTextures>,
     loaded_bark: String,
@@ -300,20 +301,11 @@ struct App {
     preset: Option<usize>,
     /// Name typed for the next save.
     save_name: String,
-    /// Outcome of the last load, save or delete, and whether it was a failure.
-    status: Option<(String, bool)>,
+    /// Outcome of the last load, save, delete or export, and whether it was a failure.
+    status: export::Status,
     /// Delete has been clicked once and is waiting to be confirmed.
     confirm_delete: bool,
-    /// Folder exports are written to, as typed or picked.
-    export_dir: String,
-    /// How many trees an export grows, one per seed from the tree's own up.
-    export_variations: u32,
-    /// Whether an export carries each vertex's wind data.
-    export_wind: bool,
-    /// Browse was clicked; the folder picker opens once the panel is drawn, where the
-    /// window it belongs to is to hand.
-    browse_requested: bool,
-    export_job: Option<ExportJob>,
+    exports: export::Exports,
     /// The species the panel edits and saves, ranges and all.
     params: SpeciesTemplate,
     /// What the tree on screen was grown from: `params` with every range landed where
@@ -403,10 +395,9 @@ impl App {
         let color_pass = ColorPass::new(&gl);
         let sky_pass = GpuSky::new(&gl);
         let ground_pass = GpuGround::new(&gl);
-        let loaded_bark = grown.mesh.bark_texture.clone();
-        let loaded_leaf = (grown.leaves.texture.clone(), grown.leaves.cluster.clone());
-        let bark_material = unsafe { gpu::load_material(&gl, TEXTURE_DIR, &loaded_bark) };
-        let leaf_material = unsafe { gpu::load_leaf_material(&gl, TEXTURE_DIR, &grown.leaves) };
+        // The real maps are put in by `sync_materials` below, at once on the desktop and
+        // once they have been fetched on the web.
+        let bark_material = unsafe { gpu::placeholder_material(&gl) };
 
         let mut app = Self {
             gl: Arc::clone(&gl),
@@ -419,20 +410,17 @@ impl App {
             color_pass: Arc::new(color_pass),
             sky_pass: Arc::new(sky_pass),
             ground_pass: Arc::new(ground_pass),
+            maps: assets::Maps::default(),
             bark_material,
-            leaf_material,
-            loaded_bark,
-            loaded_leaf,
+            leaf_material: None,
+            loaded_bark: String::new(),
+            loaded_leaf: (String::new(), None),
             presets,
             preset: Some(preset_index),
             save_name,
             status,
             confirm_delete: false,
-            export_dir: EXPORT_DIR.to_string(),
-            export_variations: 1,
-            export_wind: false,
-            browse_requested: false,
-            export_job: None,
+            exports: export::Exports::default(),
             params,
             grown,
             skeleton,
@@ -540,12 +528,13 @@ impl App {
             app.coverage_lod = v;
         }
         app.stats = app.skeleton.stats();
+        app.sync_materials();
         app.rebuild_overlay();
         app
     }
 
     fn regenerate(&mut self) {
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         self.grown = self.params.instance();
         self.skeleton = grow(&self.grown);
         let mesh = build_mesh(&self.skeleton, &self.grown);
@@ -566,25 +555,27 @@ impl App {
     }
 
     /// Textures follow the species, so a preset switch has to swap them and hand the
-    /// old ones back rather than keep loading new ones on top.
+    /// old ones back rather than keep loading new ones on top. On the web a species'
+    /// maps have to be fetched first, and until they are all in, what was there stays.
     fn sync_materials(&mut self) {
-        if self.grown.mesh.bark_texture != self.loaded_bark {
+        let bark = &self.grown.mesh.bark_texture;
+        if *bark != self.loaded_bark && self.maps.ready(&textures::map_files(bark)) {
             self.bark_material.delete(&self.gl);
-            self.loaded_bark = self.grown.mesh.bark_texture.clone();
+            self.loaded_bark = bark.clone();
             self.bark_material =
-                unsafe { gpu::load_material(&self.gl, TEXTURE_DIR, &self.loaded_bark) };
+                unsafe { gpu::load_material(&self.gl, &self.maps, &self.loaded_bark) };
         }
-        let leaf_key = (
-            self.grown.leaves.texture.clone(),
-            self.grown.leaves.cluster.clone(),
-        );
-        if leaf_key != self.loaded_leaf {
+        let leaves = &self.grown.leaves;
+        let loaded = &self.loaded_leaf;
+        if (&leaves.texture, &leaves.cluster) != (&loaded.0, &loaded.1)
+            && self.maps.ready(&textures::map_files(&leaves.texture))
+        {
             if let Some(old) = self.leaf_material.take() {
                 old.delete(&self.gl);
             }
-            self.loaded_leaf = leaf_key;
+            self.loaded_leaf = (leaves.texture.clone(), leaves.cluster.clone());
             self.leaf_material =
-                unsafe { gpu::load_leaf_material(&self.gl, TEXTURE_DIR, &self.grown.leaves) };
+                unsafe { gpu::load_leaf_material(&self.gl, &self.maps, &self.grown.leaves) };
         }
     }
 
@@ -649,108 +640,6 @@ impl App {
         }
     }
 
-    /// Where an export would go and what its files would be called, for the buttons
-    /// to say before they are pressed, or why it cannot go anywhere.
-    fn export_target(&self, format: Format) -> Result<(PathBuf, String), String> {
-        let name = presets::key_for(&self.save_name)?;
-        let dir = self.export_dir.trim();
-        if dir.is_empty() {
-            return Err("choose a folder to export to".to_string());
-        }
-        let count = self.export_variations.clamp(1, MAX_VARIATIONS);
-        let first = self.params.seed;
-        let files = if count == 1 {
-            gltf::batch_file(&name, format, first, 1)
-        } else {
-            format!(
-                "{count} trees, {} to {}",
-                gltf::batch_file(&name, format, first, count),
-                gltf::batch_file(&name, format, first.wrapping_add(u64::from(count) - 1), count)
-            )
-        };
-        Ok((PathBuf::from(dir), files))
-    }
-
-    /// Writes the tree as it stands, and as many more of the species as the panel asks
-    /// for, off the UI thread: growing a batch, baking the leaf atlas and encoding the
-    /// textures takes a while. Each tree is grown again there from a copy of the
-    /// settings, which gives the same tree, since growth is deterministic, and cannot
-    /// be a frame behind the panel.
-    fn start_export(&mut self, format: Format) {
-        let (dir, files) = match self.export_target(format) {
-            Ok(target) => target,
-            Err(why) => {
-                self.status = Some((why, true));
-                return;
-            }
-        };
-        let name = presets::key_for(&self.save_name).expect("checked by export_target");
-        let mut params = self.params.clone();
-        params.name = self.save_name.trim().to_string();
-        let count = self.export_variations.clamp(1, MAX_VARIATIONS);
-        let options = ExportOptions {
-            textures: Some(TEXTURE_DIR.into()),
-            wind: self.export_wind,
-        };
-        self.status = Some((format!("exporting {files} to {}", dir.display()), false));
-        let stop = Arc::new(AtomicBool::new(false));
-        let asked_to_stop = Arc::clone(&stop);
-        let (tx, events) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let progress = tx.clone();
-            let outcome = export_trees(&dir, &name, format, &params, count, &options, |done| {
-                let _ = progress.send(ExportEvent::Progress(done));
-                !asked_to_stop.load(Ordering::Relaxed)
-            });
-            let _ = tx.send(ExportEvent::Finished(outcome));
-        });
-        self.export_job = Some(ExportJob {
-            events,
-            stop,
-            done: 0,
-            total: count,
-        });
-    }
-
-    /// Picks up how far an export has got, and its outcome once it is done.
-    fn poll_export(&mut self) {
-        let Some(job) = &mut self.export_job else { return };
-        let outcome = loop {
-            match job.events.try_recv() {
-                Ok(ExportEvent::Progress(done)) => job.done = done,
-                Ok(ExportEvent::Finished(outcome)) => break outcome,
-                Err(std::sync::mpsc::TryRecvError::Empty) => return,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    break Err("the export stopped without finishing".to_string());
-                }
-            }
-        };
-        self.status = Some(match outcome {
-            Ok(message) => (message, false),
-            Err(why) => (format!("export failed: {why}"), true),
-        });
-        self.export_job = None;
-    }
-
-    /// The system's folder picker, opened over the viewer's window at the folder the
-    /// field names when there is one.
-    fn browse_export_dir(&mut self, frame: &eframe::Frame) {
-        let typed = Path::new(self.export_dir.trim());
-        let start = std::path::absolute(typed)
-            .ok()
-            .filter(|p| p.is_dir())
-            .or_else(|| std::env::current_dir().ok());
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("Export to")
-            .set_parent(frame);
-        if let Some(start) = start {
-            dialog = dialog.set_directory(start);
-        }
-        if let Some(dir) = dialog.pick_folder() {
-            self.export_dir = dir.display().to_string();
-        }
-    }
-
     fn delete_preset(&mut self, i: usize) {
         self.confirm_delete = false;
         match presets::delete(&self.presets[i]) {
@@ -764,78 +653,27 @@ impl App {
         }
     }
 
-    /// Where exports go, how many trees they grow, and the buttons that start them.
-    fn export_ui(&mut self, ui: &mut egui::Ui) {
-        let idle = self.export_job.is_none();
-        ui.add_space(4.0);
+    /// The name to save the species under, and the button that saves it.
+    fn save_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Export to");
-            ui.add_enabled(
-                idle,
-                egui::TextEdit::singleline(&mut self.export_dir)
-                    .desired_width(160.0)
-                    .hint_text("folder"),
-            )
-            .on_hover_text(
-                "Folder the exports are written to, created if it is not there. A relative \
-                 path is taken from the folder the viewer was started in.",
+            ui.label("Save as");
+            ui.add(egui::TextEdit::singleline(&mut self.save_name).desired_width(150.0));
+            let target = presets::path_for(Path::new(CUSTOM_PRESET_DIR), &self.save_name);
+            let taken = target.as_ref().is_ok_and(|p| p.exists());
+            let button = ui.add_enabled(
+                target.is_ok(),
+                egui::Button::new(if taken { "Overwrite" } else { "Save" }),
             );
-            if ui
-                .add_enabled(idle, egui::Button::new("Browse…"))
-                .on_hover_text("Pick the folder.")
-                .clicked()
-            {
-                self.browse_requested = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Variations");
-            ui.add_enabled(
-                idle,
-                egui::DragValue::new(&mut self.export_variations)
-                    .range(1..=MAX_VARIATIONS)
-                    .speed(0.2),
-            )
-            .on_hover_text(
-                "How many trees to export: this one, then the same species grown from each \
-                 seed after its own. With more than one, each file is named for its seed \
-                 (name_seed7.glb), so any of them can be grown again.",
-            );
-            ui.checkbox(&mut self.export_wind, "Wind data").on_hover_text(
-                "Also write what an engine needs to sway the tree as the viewer does: a table \
-                 of the stems it bends as, and where each vertex sits on them (the \
-                 ARBOR_tree_wind extension).",
-            );
-        });
-        ui.horizontal(|ui| {
-            for (label, format, what) in [
-                ("Export GLB", Format::Glb, "one self-contained file per tree, textures inside"),
-                ("Export glTF", Format::Gltf, "JSON per tree, with its buffer and the textures as files beside it"),
-            ] {
-                let target = self.export_target(format);
-                let button = ui.add_enabled(idle && target.is_ok(), egui::Button::new(label));
-                let button = match &target {
-                    Ok((dir, files)) => {
-                        button.on_hover_text(format!("Write {files} to {}: {what}.", dir.display()))
-                    }
-                    Err(why) => button.on_disabled_hover_text(why.as_str()),
-                };
-                if button.clicked() {
-                    self.start_export(format);
-                }
-            }
-            if let Some(job) = &self.export_job {
-                ui.spinner();
-                if job.total > 1 {
-                    ui.label(format!("{} / {}", job.done, job.total));
-                    if ui
-                        .button("Stop")
-                        .on_hover_text("Stop after the tree being written now. What is written stays.")
-                        .clicked()
-                    {
-                        job.stop.store(true, Ordering::Relaxed);
-                    }
-                }
+            let button = match &target {
+                Ok(path) => button.on_hover_text(format!(
+                    "Write the species as it stands, every value and the seed included, to {}.{}",
+                    path.display(),
+                    if taken { " A preset of that name is already there and will be replaced." } else { "" }
+                )),
+                Err(why) => button.on_disabled_hover_text(why),
+            };
+            if button.clicked() {
+                self.save_preset();
             }
         });
     }
@@ -865,29 +703,12 @@ impl App {
             self.pick_preset(i);
         }
 
-        ui.horizontal(|ui| {
-            ui.label("Save as");
-            ui.add(egui::TextEdit::singleline(&mut self.save_name).desired_width(150.0));
-            let target = presets::path_for(Path::new(CUSTOM_PRESET_DIR), &self.save_name);
-            let taken = target.as_ref().is_ok_and(|p| p.exists());
-            let button = ui.add_enabled(
-                target.is_ok(),
-                egui::Button::new(if taken { "Overwrite" } else { "Save" }),
-            );
-            let button = match &target {
-                Ok(path) => button.on_hover_text(format!(
-                    "Write the species as it stands, every value and the seed included, to {}.{}",
-                    path.display(),
-                    if taken { " A preset of that name is already there and will be replaced." } else { "" }
-                )),
-                Err(why) => button.on_disabled_hover_text(why),
-            };
-            if button.clicked() {
-                self.save_preset();
-            }
-        });
+        // A saved preset is a file in the repository, and a page has nowhere to put one.
+        if !cfg!(target_arch = "wasm32") {
+            self.save_ui(ui);
+        }
 
-        self.export_ui(ui);
+        self.exports.ui(ui, &self.params, &self.save_name, &mut self.status);
 
         if let Some(i) = self.preset.filter(|&i| self.presets[i].is_saved()) {
             let name = self.presets[i].name.clone();
@@ -934,8 +755,7 @@ impl App {
                 self.dirty = true;
             }
             if ui.button("Random").clicked() {
-                use rand::Rng;
-                self.params.seed = rand::rng().random();
+                self.params.seed = random_seed();
                 self.dirty = true;
             }
         });
@@ -1023,10 +843,14 @@ impl App {
             });
         ui.checkbox(&mut self.show_leaves, "Leaves");
         if self.leaf_material.is_none() {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                format!("no {}_albedo.png in {TEXTURE_DIR}", self.loaded_leaf.0),
-            );
+            if self.loaded_leaf.0 != self.grown.leaves.texture {
+                ui.weak("fetching the leaf textures…");
+            } else {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("no {}_albedo.png in {TEXTURE_DIR}", self.loaded_leaf.0),
+                );
+            }
         }
         ui.add(
             egui::Slider::new(&mut self.leaf_translucency, 0.0..=2.0).text("Leaf translucency"),
@@ -1034,7 +858,10 @@ impl App {
         ui.add(
             egui::Slider::new(&mut self.coverage_lod, 0.0..=10.0).text("Leaf coverage LOD"),
         );
-        ui.checkbox(&mut self.wireframe, "Wireframe");
+        // WebGL draws no lines in place of triangles.
+        if !cfg!(target_arch = "wasm32") {
+            ui.checkbox(&mut self.wireframe, "Wireframe");
+        }
         ui.checkbox(&mut self.shadows, "Shadows");
         ui.checkbox(&mut self.use_normal_map, "Normal map");
         if ui.checkbox(&mut self.show_grid, "Grid").changed() {
@@ -1242,10 +1069,9 @@ impl eframe::App for App {
             self.regenerate();
             self.dirty = false;
         }
-        self.poll_export();
-        if std::mem::take(&mut self.browse_requested) {
-            self.browse_export_dir(frame);
-        }
+        // Maps being fetched are put in on the frame they arrive.
+        self.sync_materials();
+        self.exports.poll(frame, &mut self.status, &self.maps);
 
         if self.wind_on && !self.wind_paused {
             // Held to a tenth of a second so a stall — a regrow, a dragged window —
@@ -1315,7 +1141,7 @@ impl eframe::App for App {
                 };
                 let sun_dir = self.sun_dir();
                 let shadows = self.shadows;
-                let wire = self.wireframe;
+                let wire = self.wireframe && !cfg!(target_arch = "wasm32");
                 let overlay = self.show_skeleton || self.show_grid;
                 let use_normal_map = self.use_normal_map;
                 let mode = match self.render_mode {
@@ -1497,6 +1323,7 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbor_core::gltf::{ExportOptions, Format};
     use arbor_core::species::{builtin_presets, parse_template, ChildPattern};
     use arbor_core::Ranged;
 
@@ -1514,13 +1341,13 @@ mod tests {
             textures: Some("../../assets/textures".into()),
             wind: true,
         };
-        let one = export_trees(&dir, "fir", Format::Glb, &params, 1, &options, |_| true).unwrap();
+        let one = export::export_trees(&dir, "fir", Format::Glb, &params, 1, &options, |_| true).unwrap();
         // Any texture it could not find would be reported after a semicolon.
         assert!(one.starts_with("exported") && !one.contains(';'), "{one}");
         assert_eq!(&std::fs::read(dir.join("fir.glb")).unwrap()[0..4], b"glTF");
 
         let mut heard = Vec::new();
-        let three = export_trees(&dir, "fir", Format::Glb, &params, 3, &options, |done| {
+        let three = export::export_trees(&dir, "fir", Format::Glb, &params, 3, &options, |done| {
             heard.push(done);
             true
         })
@@ -1531,7 +1358,7 @@ mod tests {
             assert!(dir.join(format!("fir_seed{seed}.glb")).is_file());
         }
 
-        let stopped = export_trees(&dir, "stop", Format::Glb, &params, 4, &options, |_| false).unwrap();
+        let stopped = export::export_trees(&dir, "stop", Format::Glb, &params, 4, &options, |_| false).unwrap();
         assert!(stopped.starts_with("stopped after 1 of 4"), "{stopped}");
         let _ = std::fs::remove_dir_all(&dir);
     }
