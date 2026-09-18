@@ -1,5 +1,4 @@
-/target/*
-!/target/web/
+/target
 Cargo.lock
 *.obj.tmp
 .opencode

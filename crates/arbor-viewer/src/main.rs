@@ -456,7 +456,7 @@ impl App {
             auto_frame: true,
             capture: startup.capture,
             frames: 0,
-            coverage_lod: 9.0,
+            coverage_lod: 1.3,
             wind_on: true,
             wind_strength: DEFAULT_WIND,
             wind_gustiness: DEFAULT_GUSTINESS,

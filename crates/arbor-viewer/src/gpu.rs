@@ -1055,7 +1055,7 @@ impl LeafMaterialParams {
             // so soft coverage stays dense well into the distance and the cutoff only
             // has to take over once a card is down to about a pixel. Crossing over
             // early costs nothing but the antialiasing on every leaf edge.
-            coverage_lod: 9.0,
+            coverage_lod: 1.3,
             translucency,
             edge_sharpness: lp.edge_sharpness.clamp(0.0, 1.0),
             normal_blend: lp.normal_blend.clamp(0.0, 1.0),
