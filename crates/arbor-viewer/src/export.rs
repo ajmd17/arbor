@@ -89,8 +89,6 @@ mod desktop {
         dir: String,
         /// How many trees an export grows, one per seed from the tree's own up.
         variations: u32,
-        /// Whether an export carries the wind data.
-        wind: bool,
         /// Browse was clicked; the folder picker opens once the panel is drawn, where
         /// the window it belongs to is to hand.
         browse_requested: bool,
@@ -102,7 +100,6 @@ mod desktop {
             Self {
                 dir: EXPORT_DIR.to_string(),
                 variations: 1,
-                wind: false,
                 browse_requested: false,
                 job: None,
             }
@@ -180,7 +177,7 @@ mod desktop {
             let count = self.variations.clamp(1, MAX_VARIATIONS);
             let options = ExportOptions {
                 textures: Some(TEXTURE_DIR.into()),
-                wind: self.wind,
+                wind: true,
             };
             *status = Some((format!("exporting {files} to {}", dir.display()), false));
             let stop = Arc::new(AtomicBool::new(false));
@@ -264,7 +261,6 @@ mod desktop {
                      seed after its own. With more than one, each file is named for its seed \
                      (name_seed7.glb), so any of them can be grown again.",
                 );
-                wind_checkbox(ui, &mut self.wind);
             });
             ui.horizontal(|ui| {
                 for (label, format, what) in [
@@ -319,8 +315,6 @@ mod web {
 
     #[derive(Default)]
     pub struct Exports {
-        /// Whether the download carries the wind data.
-        wind: bool,
         pending: Option<Pending>,
     }
 
@@ -349,7 +343,7 @@ mod web {
             let (mesh, leaves) = (build_mesh(&skeleton, &tree), build_leaves(&skeleton, &tree));
             let textures = Textures::load(&tree, maps)?;
             let warnings = textures.warnings.clone();
-            let bytes = Exporter::with_textures(textures, self.wind).glb(&skeleton, &mesh, &leaves, &tree);
+            let bytes = Exporter::with_textures(textures, true).glb(&skeleton, &mesh, &leaves, &tree);
             save_file(&pending.file, &bytes, "model/gltf-binary").map_err(|e| format!("{e:?}"))?;
             let mut message = format!("downloaded {} ({:.1} MB)", pending.file, bytes.len() as f64 / 1e6);
             for warning in warnings {
@@ -388,7 +382,6 @@ mod web {
                     *status = Some((format!("packing {file}…"), false));
                     self.pending = Some(Pending { params, file });
                 }
-                wind_checkbox(ui, &mut self.wind);
             });
         }
     }
@@ -417,12 +410,4 @@ mod web {
         window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 60_000)?;
         Ok(())
     }
-}
-
-fn wind_checkbox(ui: &mut egui::Ui, wind: &mut bool) {
-    ui.checkbox(wind, "Wind data").on_hover_text(
-        "Also write what an engine needs to sway the tree as the viewer does: a table \
-         of the stems it bends as, and where each vertex sits on them (the \
-         ARBOR_tree_wind extension).",
-    );
 }

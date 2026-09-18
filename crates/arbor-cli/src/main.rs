@@ -15,7 +15,6 @@ fn main() {
     let mut obj_out: Option<String> = None;
     let mut gltf_out: Vec<String> = Vec::new();
     let mut texture_dir: Option<String> = Some(TEXTURE_DIR.to_string());
-    let mut wind_data = false;
     let mut variations: u32 = 1;
     let mut no_leaves = false;
 
@@ -47,7 +46,8 @@ fn main() {
                 texture_dir = args.get(i).cloned();
             }
             "--no-textures" => texture_dir = None,
-            "--wind-data" => wind_data = true,
+            // every export carries wind data now; kept accepted so old scripts don't break
+            "--wind-data" => {}
             "--variations" => {
                 i += 1;
                 match args.get(i).and_then(|s| s.parse::<u32>().ok()) {
@@ -126,7 +126,7 @@ fn main() {
 
     let options = ExportOptions {
         textures: texture_dir.map(Into::into),
-        wind: wind_data,
+        wind: true,
     };
     for path in gltf_out {
         let t = std::time::Instant::now();
@@ -261,7 +261,7 @@ fn print_usage() {
     );
     println!(
         "          [--obj out.obj] [--glb out.glb] [--gltf out.gltf] \
-         [--textures DIR | --no-textures] [--wind-data] [--variations N]"
+         [--textures DIR | --no-textures] [--variations N]"
     );
     println!("Grows a tree, builds bark and leaf meshes, prints stats.");
     println!("A saved preset is one saved from the viewer, found by name in {CUSTOM_PRESET_DIR}.");
@@ -269,8 +269,8 @@ fn print_usage() {
     println!("--glb writes one self-contained glTF binary, textures and all.");
     println!("--gltf writes glTF JSON, with its buffer and textures as files beside it.");
     println!("  Textures are read from {TEXTURE_DIR} unless --textures says otherwise;");
-    println!("  --no-textures leaves them out. --wind-data adds what an engine needs to sway");
-    println!("  the tree, in the ARBOR_tree_wind extension.");
+    println!("  --no-textures leaves them out. Every export carries what an engine needs to");
+    println!("  sway the tree, in the ARBOR_tree_wind extension.");
     println!("  --variations N writes N trees, from the seed and each one after it, each");
     println!("  named for its seed: out_seed7.glb, out_seed8.glb, and so on.");
     println!("Any number in a species may be a range, `length: (12.0, 18.0)`: each seed lands");
