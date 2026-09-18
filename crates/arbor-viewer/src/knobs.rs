@@ -299,9 +299,14 @@ pub static BARK: &[Group<MeshParams>] = &[
             knob("Colour green", (0.0, 1.5), "Colour dead wood weathers toward.", |m| &mut m.dead_wood_color[1]),
             knob("Colour blue", (0.0, 1.5), "Colour dead wood weathers toward.", |m| &mut m.dead_wood_color[2]),
             log_knob("Min living bark", (0.0005, 0.1), "Living stems thinner than this get no bark, in metres. Foliage hides them.", |m| &mut m.min_bark_radius),
-            knob("Min dead bark", (0.0, 0.05), "Dead stems thinner than this get no bark, in metres. Zero follows the living figure. Dead wood carries no foliage, so its thin twigs are on show.", |m| &mut m.dead_bark_radius),
+            knob("Min dead bark", (0.0, 0.05), "Bare dead stems — the dead band, reaching the trunk through dead wood only — thinner than this get no bark, in metres. Zero follows the living figure. Dead twigs inside the crown take the living one.", |m| &mut m.dead_bark_radius),
         ],
-        counts: &[],
+        counts: &[Count {
+            label: "Cull from level",
+            range: (0, 6),
+            help: "Shallowest level the bark cutoffs may cull. Stems above it are always swept, so a thin limb is never dropped and its foliage never left floating. Zero lets the cutoff reach any level.",
+            get: |m| &mut m.cull_from_level,
+        }],
     },
 ];
 

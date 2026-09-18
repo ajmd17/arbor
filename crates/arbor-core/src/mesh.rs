@@ -567,6 +567,12 @@ struct StemPath {
     /// True for a stem the tree has lost: no leaves, and a broken end rather than a
     /// tapered one.
     is_dead: bool,
+    /// True for dead wood that reaches the trunk through nothing but dead wood: the
+    /// band of dead limbs under a crown, with no foliage anywhere near to hide it.
+    /// Dead wood hanging off a living limb is inside the crown, and is not.
+    is_bare: bool,
+    /// Branching order of the stem, 0 for the trunk.
+    level: u8,
     /// Parallel-transported frame at each ring. Built once here rather than in the
     /// sweep, because the bark needs to know which way a point on the surface faces
     /// before it can put a branch collar on the right side of the trunk.
@@ -721,6 +727,8 @@ impl StemPath {
             arc,
             is_trunk,
             is_dead: sk.nodes[first].dead,
+            is_bare: hangs_from_trunk_by_dead_wood(sk, first),
+            level: sk.nodes[first].level,
             frames,
             irregular,
         };
@@ -755,6 +763,8 @@ impl StemPath {
             arc,
             is_trunk: self.is_trunk,
             is_dead: self.is_dead,
+            is_bare: self.is_bare,
+            level: self.level,
             frames,
             irregular: self.irregular,
         }
@@ -828,6 +838,22 @@ impl StemPath {
     }
 }
 
+/// Whether the stem starting at `first` is dead and reaches the trunk through nothing
+/// but dead wood.
+fn hangs_from_trunk_by_dead_wood(sk: &Skeleton, first: usize) -> bool {
+    let mut at = first;
+    loop {
+        let node = &sk.nodes[at];
+        if !node.dead {
+            return node.level == 0;
+        }
+        match node.parent {
+            Some(p) => at = p as usize,
+            None => return false,
+        }
+    }
+}
+
 pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
     let mp: &MeshParams = &params.mesh;
     let mut sink = MeshSink::default();
@@ -850,10 +876,16 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
 }
 
 /// Whether a stem is below the radius worth sweeping. Living twigs are culled against
-/// `min_bark_radius` because foliage hides them; dead wood carries none and answers to
-/// `dead_bark_radius` instead, when that is set.
+/// `min_bark_radius` because foliage hides them. Bare dead wood — the dead band, with
+/// no foliage near it — answers to `dead_bark_radius` instead, when that is set. Dead
+/// twigs inside the living crown are hidden exactly as well as the living ones, so
+/// they take the living cutoff.
 fn too_thin_for_bark(path: &StemPath, mp: &MeshParams) -> bool {
-    let cutoff = if path.is_dead && mp.dead_bark_radius > 0.0 {
+    // Structure is always swept; only twigs are culled.
+    if u32::from(path.level) < mp.cull_from_level {
+        return false;
+    }
+    let cutoff = if path.is_bare && mp.dead_bark_radius > 0.0 {
         mp.dead_bark_radius
     } else {
         mp.min_bark_radius
@@ -2027,5 +2059,77 @@ mod tests {
         assert!(dead > 0 && alive > 0, "{dead} dead and {alive} living vertices");
         // The trunk is alive, and it is the stem that starts at the root.
         assert_eq!(mesh.weathering[0], 0.0, "the first vertex is the trunk's");
+    }
+    #[test]
+    fn dead_twigs_inside_the_crown_are_culled_like_living_ones() {
+        // The fine dead-wood cutoff is for the dead band, where nothing hides the wood.
+        // A dead twig on a living limb sits inside the foliage and is as invisible as a
+        // living one, so it answers to the living cutoff.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.mesh.cull_from_level = 0;
+        params.mesh.min_bark_radius = 0.05;
+        params.mesh.dead_bark_radius = 0.001;
+        let sk = crate::grow(&params);
+        let hidden: Vec<usize> = sk
+            .stem_runs()
+            .iter()
+            .map(|run| run[0] as usize)
+            .filter(|&i| sk.nodes[i].dead && !hangs_from_trunk_by_dead_wood(&sk, i))
+            .collect();
+        assert!(hidden.len() > 20, "only {} dead stems inside the crown", hidden.len());
+
+        let children = child_index(&sk);
+        let meshed = |first: usize| {
+            let run: Vec<u32> = sk
+                .stem_runs()
+                .into_iter()
+                .find(|r| r[0] as usize == first)
+                .unwrap();
+            StemPath::build(&sk, &run, &params.mesh, params.seed, &children)
+                .is_some_and(|path| !too_thin_for_bark(&path, &params.mesh))
+        };
+        let swept = hidden.iter().filter(|&&i| meshed(i)).count();
+        assert!(
+            swept * 10 < hidden.len(),
+            "{swept} of {} dead twigs inside the crown were swept below the living cutoff",
+            hidden.len()
+        );
+        // And the bare ones still are: the dead band keeps its fine twigs.
+        let bare_swept = sk
+            .stem_runs()
+            .iter()
+            .map(|run| run[0] as usize)
+            .filter(|&i| sk.nodes[i].level >= 2 && hangs_from_trunk_by_dead_wood(&sk, i))
+            .filter(|&i| meshed(i))
+            .count();
+        assert!(bare_swept > 20, "only {bare_swept} bare dead twigs were swept");
+    }
+
+    #[test]
+    fn culling_can_be_kept_off_the_limbs() {
+        // The bark cutoffs are for twigs. A limb thin enough to fall under one is still
+        // structure, and dropping it leaves its foliage floating in the gaps of a crown.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.mesh.min_bark_radius = 0.2;
+        params.mesh.dead_bark_radius = 0.0;
+        let sk = crate::grow(&params);
+        let limbs = sk
+            .stem_runs()
+            .iter()
+            .filter(|run| sk.nodes[run[0] as usize].level == 1)
+            .count();
+        let swept_limbs = |params: &SpeciesParams| {
+            stem_costs(&sk, params).iter().filter(|c| c.level == 1).count()
+        };
+
+        params.mesh.cull_from_level = 0;
+        let culled = swept_limbs(&params);
+        params.mesh.cull_from_level = 2;
+        let kept = swept_limbs(&params);
+        assert!(culled < limbs / 2, "a 20 cm cutoff should drop most limbs, kept {culled} of {limbs}");
+        assert_eq!(kept, limbs, "with culling from level 2 every limb is swept");
+        // Twigs are still culled.
+        let twigs = stem_costs(&sk, &params).iter().filter(|c| c.level >= 2).count();
+        assert_eq!(twigs, 0, "{twigs} twigs survived a 20 cm cutoff");
     }
 }

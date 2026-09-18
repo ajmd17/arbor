@@ -183,6 +183,14 @@ pub struct MeshParams {
     /// size. Under foliage they cannot be seen at all; bare, a few millimetres costs
     /// only the finest hairs. Zero keeps every one of them.
     pub min_bark_radius: f32,
+    /// Shallowest level the bark cutoffs may cull from. Stems above it are always
+    /// swept, however thin.
+    ///
+    /// The cutoffs are for twigs: wood buried in foliage that no one can see. A thin
+    /// limb is not that. It is part of the structure the crown hangs on, and dropping
+    /// it leaves its foliage floating where the gaps in a crown show it. Zero lets the
+    /// cutoff reach any level.
+    pub cull_from_level: u32,
     pub max_radial: u32,
     /// How much wider than the bole the buttress gets where it meets the ground.
     pub root_flare: f32,
@@ -242,13 +250,15 @@ pub struct MeshParams {
     /// How far dead wood has gone toward `dead_wood_color`, from 0 to 1. The grain
     /// of the bark is kept and only its colour is pulled across.
     pub dead_wood_weathering: f32,
-    /// Dead wood thinner than this gets no bark, in metres. Zero follows
+    /// Bare dead wood thinner than this gets no bark, in metres. Zero follows
     /// `min_bark_radius`.
     ///
-    /// The cull there exists because the finest twigs are buried in foliage, and dead
-    /// wood carries none: the dead twigs under a pine's crown are the finest wood on
-    /// the tree and among the most visible, so they want a lower threshold than the
-    /// living twigs do.
+    /// The cull there exists because the finest twigs are buried in foliage, and bare
+    /// dead wood has none near it: the dead twigs under a pine's crown are the finest
+    /// wood on the tree and among the most visible, so they want a lower threshold than
+    /// the living twigs do. Bare means reaching the trunk through nothing but dead
+    /// wood. A dead twig on a living limb is inside the crown, hidden as well as any
+    /// living one, and takes `min_bark_radius` like them.
     pub dead_bark_radius: f32,
     pub irregularity: BarkIrregularity,
 }
@@ -260,6 +270,7 @@ impl Default for MeshParams {
             silhouette_tolerance: 0.010,
             min_radial: 3,
             min_bark_radius: 0.006,
+            cull_from_level: 0,
             max_radial: 24,
             root_flare: 0.9,
             flare_height: 1.4,

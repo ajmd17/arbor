@@ -294,7 +294,13 @@
         uv_scale: 1.2,
         silhouette_tolerance: 0.018,
         min_radial: 4,
-        min_bark_radius: 0.012,
+        // Twigs under 3 cm are not swept at all: every living branchlet and shoot sits
+        // inside a needle tuft, and with the foliage on the crown looks the same with or
+        // without them. That, and taking the dead twigs inside the crown with them (see
+        // `dead_bark_radius`), is 26k bark triangles down to 12k. The limbs are exempt
+        // however thin — a dropped limb leaves its foliage floating in the gaps.
+        min_bark_radius: 0.03,
+        cull_from_level: 2,
         max_radial: 32,
         root_flare: 0.7,
         flare_height: 1.2,
@@ -313,8 +319,9 @@
         dead_wood_color: (0.26, 0.255, 0.24),
         dead_wood_weathering: 0.85,
         // The living twigs are culled at `min_bark_radius` because needles hide them;
-        // the dead ones carry nothing, and their fine twigs are most of what the dead
-        // band is, so they are meshed down to the finest there are.
+        // the dead band carries nothing, and its fine twigs are most of what it is, so
+        // they are meshed down to the finest there are. Dead twigs inside the living
+        // crown are hidden like the living ones and are culled with them.
         dead_bark_radius: 0.004,
         irregularity: (
             flute_depth: 0.06,
