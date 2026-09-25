@@ -23,7 +23,9 @@
 //! tree bends as (`branches`, two VEC4s a stem: its pivot and reach, then the row of the
 //! stem carrying it, how far out along that one it leaves, and its order; row 0 is the
 //! trunk and empty), the species' `flexibility` per order, `frequency`, `flutter` and the
-//! tree's `height`, and on leaves `leafOrigins`, the twig point each card hangs from.
+//! tree's `height`, and on leaves `leafOrigins`, the twig point each card hangs from,
+//! with the species' `normalBlend` and `backfaceVolume` for turning a card's normal
+//! round when it is seen from behind.
 //! Each vertex names its row and how far out along it it sits in `TEXCOORD_1`. The tree's
 //! foot is at the origin, which the trunk's bend is reckoned from.
 
@@ -37,7 +39,7 @@ use crate::leaves::LeafMesh;
 use crate::math::ortho_of;
 use crate::mesh::Mesh;
 use crate::skeleton::Skeleton;
-use crate::species::{SpeciesParams, SpeciesTemplate};
+use crate::species::{LeafParams, SpeciesParams, SpeciesTemplate};
 use crate::textures::{self, MapSource};
 use crate::wind::{SwayAt, SwayField, SwayStem};
 
@@ -660,7 +662,7 @@ fn leaf_mesh(
     if let Some(wind) = wind.filter(|_| leaves.sway_at.len() == n && leaves.origins.len() == n) {
         shared.push(("TEXCOORD_1", wind.places(doc, &leaves.sway_at)));
         let origins = doc.data(&flat(&leaves.origins), 3);
-        extension = wind.extension(Some(origins));
+        extension = wind.extension(Some((origins, lp)));
     }
 
     let mut primitives = Vec::new();
@@ -676,7 +678,7 @@ fn leaf_mesh(
     };
     side(doc, &normals, &uvs_for(cell(lp.atlas_front)), &leaves.indices);
     if two_faced {
-        let flipped: Vec<[f32; 3]> = normals.iter().map(|v| v.map(|c| -c)).collect();
+        let flipped = back_normals(&normals, &leaves.positions, &leaves.indices, lp);
         let reversed: Vec<u32> = leaves
             .indices
             .chunks_exact(3)
@@ -751,11 +753,19 @@ impl TreeWind {
         doc.floats(&flat(&places), 2, false)
     }
 
-    /// The extension as it goes on a primitive, with a leaf primitive's card origins.
-    fn extension(&self, leaf_origins: Option<usize>) -> String {
-        let origins = leaf_origins.map_or(String::new(), |a| format!(r#","leafOrigins":{a}"#));
+    /// The extension as it goes on a primitive, with a leaf primitive's card origins and
+    /// how its shading normals lean, so an engine can turn a double-sided card's normal
+    /// round the way the viewer does.
+    fn extension(&self, leaves: Option<(usize, &LeafParams)>) -> String {
+        let leaves = leaves.map_or(String::new(), |(origins, lp)| {
+            format!(
+                r#","leafOrigins":{origins},"normalBlend":{},"backfaceVolume":{}"#,
+                num(lp.normal_blend.clamp(0.0, 1.0)),
+                num(lp.backface_volume.clamp(0.0, 1.0))
+            )
+        });
         format!(
-            r#","extensions":{{"{TREE_WIND_EXTENSION}":{{"branches":{}{origins},{}}}}}"#,
+            r#","extensions":{{"{TREE_WIND_EXTENSION}":{{"branches":{}{leaves},{}}}}}"#,
             self.branches, self.settings
         )
     }
@@ -1035,6 +1045,39 @@ fn attributes(attrs: &[(&str, usize)]) -> String {
 
 fn flat<const N: usize>(v: &[[f32; N]]) -> Vec<f32> {
     v.iter().flatten().copied().collect()
+}
+
+/// The normals of the back-facing copy of every card, turned round the way the viewer
+/// turns a card seen from behind: all the way for a broad leaf, but for a tuft of
+/// needles (`backface_volume`) only the card's own flat share, keeping the crown's
+/// outward lean.
+fn back_normals(normals: &[[f32; 3]], positions: &[[f32; 3]], indices: &[u32], lp: &LeafParams) -> Vec<[f32; 3]> {
+    let blend = lp.normal_blend.clamp(0.0, 1.0);
+    let volume = lp.backface_volume.clamp(0.0, 1.0);
+    let mut faces = vec![None; normals.len()];
+    for tri in indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|i| Vec3::from(positions[tri[i] as usize]));
+        if let Some(face) = (b - a).cross(c - a).try_normalize() {
+            for &i in tri {
+                faces[i as usize].get_or_insert(face);
+            }
+        }
+    }
+    normals
+        .iter()
+        .zip(&faces)
+        .map(|(&n, face)| {
+            let n = Vec3::from(n);
+            let turned = match face {
+                Some(face) if volume > 0.0 => {
+                    let kept = (n - 2.0 * (1.0 - blend) * n.dot(*face) * *face).normalize_or(-n);
+                    (-n).lerp(kept, volume).normalize_or(kept)
+                }
+                _ => -n,
+            };
+            turned.to_array()
+        })
+        .collect()
 }
 
 fn unit_or(v: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
