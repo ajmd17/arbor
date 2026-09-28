@@ -43,6 +43,9 @@ use crate::species::{LeafParams, SpeciesParams, SpeciesTemplate};
 use crate::textures::{self, MapSource};
 use crate::wind::{SwayAt, SwayField, SwayStem};
 
+mod cover;
+pub use cover::{cover_glb, export_cover_batch, write_cover, CoverTextures, GROUND_COVER_EXTENSION};
+
 /// The viewer's alpha test on leaf cards.
 pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;
 /// Roughest the viewer lets a leaf look glossy: below this, with nothing occluding the
@@ -1157,7 +1160,7 @@ mod tests {
     }
 
     /// The JSON chunk and the buffer chunk of a `.glb`, having checked the container.
-    fn chunks(glb: &[u8]) -> (Value, &[u8]) {
+    pub(super) fn chunks(glb: &[u8]) -> (Value, &[u8]) {
         let word = |at: usize| u32::from_le_bytes(glb[at..at + 4].try_into().unwrap()) as usize;
         assert_eq!(&glb[0..4], b"glTF");
         assert_eq!(word(4), 2, "glTF version");
@@ -1177,7 +1180,7 @@ mod tests {
         (doc, &glb[bin_at + 8..])
     }
 
-    fn get<'a>(v: &'a Value, key: &str) -> &'a Value {
+    pub(super) fn get<'a>(v: &'a Value, key: &str) -> &'a Value {
         match v {
             Value::Map(m) => m
                 .get(&Value::String(key.to_string()))
@@ -1186,25 +1189,25 @@ mod tests {
         }
     }
 
-    fn has(v: &Value, key: &str) -> bool {
+    pub(super) fn has(v: &Value, key: &str) -> bool {
         matches!(v, Value::Map(m) if m.get(&Value::String(key.to_string())).is_some())
     }
 
-    fn seq(v: &Value) -> &[Value] {
+    pub(super) fn seq(v: &Value) -> &[Value] {
         match v {
             Value::Seq(s) => s,
             _ => panic!("not an array"),
         }
     }
 
-    fn int(v: &Value) -> usize {
+    pub(super) fn int(v: &Value) -> usize {
         match v {
             Value::Number(n) => n.into_f64() as usize,
             _ => panic!("not a number"),
         }
     }
 
-    fn text(v: &Value) -> String {
+    pub(super) fn text(v: &Value) -> String {
         match v {
             Value::String(s) => s.clone(),
             _ => panic!("not a string"),
@@ -1214,7 +1217,7 @@ mod tests {
     /// Checks every accessor against the buffer it reads and every primitive against
     /// its own accessors — what a validator would complain about first — and returns
     /// the primitives of each mesh by name.
-    fn validate(doc: &Value, bin: &[u8]) -> Vec<(String, Vec<Value>)> {
+    pub(super) fn validate(doc: &Value, bin: &[u8]) -> Vec<(String, Vec<Value>)> {
         let views = seq(get(doc, "bufferViews"));
         let accessors = seq(get(doc, "accessors"));
         assert_eq!(int(get(&seq(get(doc, "buffers"))[0], "byteLength")), bin.len());

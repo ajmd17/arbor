@@ -62,7 +62,7 @@ impl Bitmap {
         })
     }
 
-    fn at(&self, x: u32, y: u32) -> [u8; 4] {
+    pub(crate) fn at(&self, x: u32, y: u32) -> [u8; 4] {
         let i = (y as usize * self.width as usize + x as usize) * 4;
         [
             self.pixels[i],
@@ -72,7 +72,7 @@ impl Bitmap {
         ]
     }
 
-    fn put(&mut self, x: u32, y: u32, p: [u8; 4]) {
+    pub(crate) fn put(&mut self, x: u32, y: u32, p: [u8; 4]) {
         let i = (y as usize * self.width as usize + x as usize) * 4;
         self.pixels[i..i + 4].copy_from_slice(&p);
     }

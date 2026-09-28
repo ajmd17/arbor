@@ -1,0 +1,108 @@
+// Mixed meadow grass, 0.3 to 0.7 m, mostly lush with some dry tufts and seed heads.
+// Any number may be a (lo, hi) range: each seed lands somewhere in it.
+(
+    name: "meadow_grass",
+    seed: 1,
+    footprint: (
+        size: 1.5,
+        tufts: 36,
+        jitter: 0.8,
+    ),
+    tuft: (
+        cards: 5,
+        radius: 0.07,
+        height: (0.42, 0.52),
+        height_variance: 0.3,
+        card_height_variance: 0.15,
+        lean_deg: 14.0,
+        lean_variance_deg: 8.0,
+        curl_deg: 20.0,
+        twist_deg: 25.0,
+    ),
+    card: (
+        width: 1.0,
+        width_top: 1.2,
+    ),
+    colour: (
+        dry_fraction: 0.2,
+        mix: 0.2,
+    ),
+    normals: (
+        ground_normal_blend: 0.85,
+        root_blend: 0.12,
+    ),
+    wind: (
+        flexibility: (0.0, 0.6, 0.0, 0.0),
+        flutter: 0.12,
+        frequency: 1.1,
+    ),
+    lod: [
+        (cards: 1.0, segments: 4, width: 1.0, screen_size: 0.0),
+        (cards: 0.5, segments: 2, width: 1.35, screen_size: 0.08),
+        (cards: 0.2, segments: 1, width: 1.9, screen_size: 0.035),
+    ],
+    atlas: (
+        cell_height: 512,
+        cell_aspect: 0.5,
+        cells: [
+            // Lush, mid height.
+            (
+                weight: 1.0,
+                count: 38,
+                length: (0.45, 0.92),
+                width: 0.016,
+                lean_deg: 14.0,
+                curve_deg: 24.0,
+                root: (0.15, 0.24, 0.06),
+                tip: (0.40, 0.54, 0.16),
+                tip_burn: 0.12,
+                seed: 11,
+            ),
+            // Lush, longer and arching over.
+            (
+                weight: 1.0,
+                count: 30,
+                length: (0.65, 0.97),
+                width: 0.014,
+                lean_deg: 20.0,
+                curve_deg: 45.0,
+                root: (0.13, 0.22, 0.06),
+                tip: (0.36, 0.52, 0.15),
+                tip_burn: 0.2,
+                seed: 23,
+            ),
+            // Lush with seed heads standing out of it.
+            (
+                weight: 0.5,
+                count: 26,
+                heads: 5,
+                length: (0.4, 0.8),
+                width: 0.015,
+                lean_deg: 12.0,
+                curve_deg: 20.0,
+                root: (0.15, 0.24, 0.06),
+                tip: (0.42, 0.55, 0.17),
+                head_length: 0.14,
+                head: (0.60, 0.55, 0.34),
+                seed: 37,
+            ),
+            // Dry straw.
+            (
+                dry: true,
+                weight: 1.0,
+                count: 32,
+                heads: 2,
+                length: (0.4, 0.9),
+                width: 0.013,
+                lean_deg: 18.0,
+                curve_deg: 35.0,
+                root: (0.30, 0.28, 0.14),
+                tip: (0.72, 0.64, 0.40),
+                color_variance: 0.22,
+                tip_burn: 0.0,
+                roughness: 0.72,
+                seed: 41,
+            ),
+        ],
+    ),
+)

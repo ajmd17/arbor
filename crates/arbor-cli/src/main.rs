@@ -9,6 +9,10 @@ fn main() {
         print_usage();
         std::process::exit(2);
     }
+    if args[0] == "cover" {
+        cover_main(&args[1..]);
+        return;
+    }
 
     let mut species_src: Option<String> = None;
     let mut seed_override: Option<u64> = None;
@@ -275,4 +279,157 @@ fn print_usage() {
     println!("  named for its seed: out_seed7.glb, out_seed8.glb, and so on.");
     println!("Any number in a species may be a range, `length: (12.0, 18.0)`: each seed lands");
     println!("somewhere in it, and the landings are printed with the stats.");
+    println!();
+    let covers: Vec<&str> = arbor_core::cover::builtin_cover_presets().into_iter().map(|(n, _)| n).collect();
+    println!(
+        "arbor-cli cover <{}|saved-preset|path/to/cover.ron> [--seed N] [--variations N]",
+        covers.join("|")
+    );
+    println!("          [--out DIR] [--gltf] [--atlas]");
+    println!("Builds a ground cover clump and writes it, LODs and blade atlas inside, to");
+    println!("DIR/<name>.glb (exports/ by default). --atlas also writes the atlas as PNGs.");
+}
+
+/// `arbor-cli cover <preset> [--seed N] [--variations N] [--out DIR] [--gltf] [--atlas]`
+fn cover_main(args: &[String]) {
+    use arbor_core::cover::{builtin_cover_presets, parse_cover_template, CUSTOM_COVER_DIR};
+    use arbor_core::{bake_blades, build_cover};
+
+    let mut src: Option<String> = None;
+    let mut seed: Option<u64> = None;
+    let mut variations: u32 = 1;
+    let mut out = std::path::PathBuf::from("exports");
+    let mut format = gltf::Format::Glb;
+    let mut atlas = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seed" => {
+                i += 1;
+                seed = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--variations" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse::<u32>().ok()) {
+                    Some(n) if n >= 1 => variations = n,
+                    _ => {
+                        eprintln!("--variations needs a count of one or more");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--out" => {
+                i += 1;
+                match args.get(i) {
+                    Some(dir) => out = dir.into(),
+                    None => {
+                        eprintln!("--out needs a folder");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--gltf" => format = gltf::Format::Gltf,
+            "--atlas" => atlas = true,
+            "--help" | "-h" => {
+                print_usage();
+                return;
+            }
+            other => src = Some(other.to_string()),
+        }
+        i += 1;
+    }
+
+    let src = src.unwrap_or_else(|| "meadow_grass".to_string());
+    let saved = std::path::Path::new(CUSTOM_COVER_DIR).join(format!("{src}.ron"));
+    let text = match builtin_cover_presets().into_iter().find(|(n, _)| *n == src) {
+        Some((_, text)) => text.to_string(),
+        None if saved.is_file() => std::fs::read_to_string(&saved).unwrap_or_else(|e| {
+            eprintln!("cannot read {}: {e}", saved.display());
+            std::process::exit(1);
+        }),
+        None => std::fs::read_to_string(&src).unwrap_or_else(|e| {
+            eprintln!("cannot read cover preset '{src}': {e}");
+            std::process::exit(1);
+        }),
+    };
+    let mut template = parse_cover_template(&text).unwrap_or_else(|e| {
+        eprintln!("cover preset parse error: {e}");
+        std::process::exit(1);
+    });
+    if let Some(seed) = seed {
+        template.seed = seed;
+    }
+    let params = template.instance();
+
+    let t = std::time::Instant::now();
+    let mesh = build_cover(&params);
+    println!("cover:   {}", params.name);
+    println!("seed:    {}", params.seed);
+    for (key, range, landed) in template.landings() {
+        println!("  {key} = {landed:.4} (of {} to {})", range.lo(), range.hi());
+    }
+    println!("cards:   {}", mesh.cards.len());
+    println!("height:  {:.3} m", mesh.height);
+    for (i, lod) in mesh.lods.iter().enumerate() {
+        println!(
+            "LOD{i}:    {} cards, {} tris, from screen size {}",
+            lod.card_count,
+            lod.triangle_count(),
+            lod.screen_size
+        );
+    }
+    println!("gen:     {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+
+    if atlas {
+        let baked = bake_blades(&params.atlas);
+        std::fs::create_dir_all(&out).ok();
+        let maps = [
+            ("albedo", Some(&baked.maps.albedo)),
+            ("normal", baked.maps.normal.as_ref()),
+            ("roughness", baked.maps.roughness.as_ref()),
+        ];
+        for (map, bitmap) in maps {
+            let Some(bitmap) = bitmap else { continue };
+            let path = out.join(format!("{}_{map}.png", params.name));
+            let png = arbor_core::textures::encode_png(bitmap).unwrap_or_else(|e| {
+                eprintln!("encoding {map}: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&path, png).unwrap_or_else(|e| {
+                eprintln!("{}: {e}", path.display());
+                std::process::exit(1);
+            });
+            println!("atlas:   {}", path.display());
+        }
+        let cells: Vec<String> = baked.coverage.iter().map(|c| format!("{c:.3}")).collect();
+        println!("coverage per cell: {}", cells.join(" "));
+    }
+
+    let t = std::time::Instant::now();
+    let report = gltf::export_cover_batch(&out, &params.name, format, &template, variations, |done| {
+        if variations > 1 {
+            eprint!("\rexporting {done}/{variations}");
+        }
+        true
+    });
+    if variations > 1 {
+        eprintln!();
+    }
+    match report {
+        Ok(report) => {
+            let what = match report.trees.as_slice() {
+                [one] => one.display().to_string(),
+                all => format!("{} clumps, {} to {}", all.len(), all[0].display(), all[all.len() - 1].display()),
+            };
+            println!(
+                "gltf:    {what} ({:.1} MB, {:.0} ms)",
+                report.bytes as f64 / 1e6,
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Err(e) => {
+            eprintln!("cover export failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }

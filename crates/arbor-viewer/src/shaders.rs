@@ -465,6 +465,9 @@ uniform vec4 u_wind_flex;
 // x: how fast the trunk sways, in hertz. y: how far a leaf flutters, in radians.
 uniform vec2 u_wind_motion;
 uniform float u_tree_height;
+// Ground cover: each vertex of a card bends about the card's root by its own weight,
+// rather than the card riding its origin rigidly as a leaf does.
+uniform int u_wind_card_bend;
 
 const float WIND_TAU = 6.28318531;
 
@@ -566,6 +569,9 @@ vec3 wind_leaf(vec3 pos, inout vec3 normal, vec3 origin, vec4 w1, vec4 w2, vec4 
             + vec3(0.0, 0.35 * (fract(h * 5.3) - 0.5), 0.0));
         local = wind_rotate(local, axis, angle);
         normal = wind_rotate(normal, axis, angle);
+    }
+    if (u_wind_card_bend != 0) {
+        return wind_displace(origin + local, w1, w2, w3);
     }
     return wind_displace(origin, w1, w2, w3) + local;
 }

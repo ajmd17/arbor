@@ -131,6 +131,9 @@ pub struct WindUniforms {
     pub flutter: f32,
     /// The trunk bends along its height, so it has to know what that is.
     pub tree_height: f32,
+    /// Ground cover cards bend along their length about their roots, each vertex by
+    /// its own weight, where a leaf card rides its origin rigidly.
+    pub card_bend: bool,
 }
 
 impl WindUniforms {
@@ -152,6 +155,7 @@ impl WindUniforms {
             frequency: species.frequency.max(0.0),
             flutter: species.flutter.max(0.0),
             tree_height,
+            card_bend: false,
         }
     }
 
@@ -192,6 +196,9 @@ impl WindUniforms {
             }
             if let Some(l) = gl.get_uniform_location(program, "u_tree_height") {
                 gl.uniform_1_f32(Some(&l), self.tree_height);
+            }
+            if let Some(l) = gl.get_uniform_location(program, "u_wind_card_bend") {
+                gl.uniform_1_i32(Some(&l), i32::from(self.card_bend));
             }
         }
     }
@@ -702,7 +709,7 @@ impl ColorPass {
     pub unsafe fn draw_wire(
         &self,
         gl: &glow::Context,
-        mesh: &GpuMesh,
+        mesh: Option<&GpuMesh>,
         leaves: Option<&GpuLeaves>,
         view_proj: Mat4,
         color: [f32; 4],
@@ -719,7 +726,9 @@ impl ColorPass {
             gl.uniform_4_f32(Some(&self.u_color), color[0], color[1], color[2], color[3]);
             gl.polygon_mode(glow::FRONT_AND_BACK, glow::LINE);
             gl.uniform_1_i32(Some(&self.u_leaf), 0);
-            mesh.bind_and_draw(gl);
+            if let Some(mesh) = mesh {
+                mesh.bind_and_draw(gl);
+            }
             if let Some(leaves) = leaves {
                 gl.uniform_1_i32(Some(&self.u_leaf), 1);
                 leaves.bind_and_draw(gl);

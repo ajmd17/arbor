@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod cover_view;
 mod export;
 mod gpu;
 mod hdri;
@@ -95,6 +96,28 @@ struct Startup {
     msaa: Option<i32>,
     sun_size: Option<f32>,
     shadow_softness: Option<f32>,
+    /// Open in ground cover mode, on this preset.
+    cover: Option<String>,
+    /// Where the camera starts in ground cover mode.
+    cover_camera: Option<CoverCamera>,
+    /// Ground cover: tint each clump by its LOD, and the field's size.
+    lod_tint: bool,
+    field: Option<f32>,
+}
+
+/// What the viewer is showing: a tree, or a clump of ground cover planted over a field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewMode {
+    Tree,
+    Cover,
+}
+
+/// The two places ground cover is looked at from: standing in it, and from far enough
+/// off that every LOD is on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoverCamera {
+    Eye,
+    Far,
 }
 
 /// What stands under the tree.
@@ -208,6 +231,14 @@ fn main() -> eframe::Result<()> {
         msaa: flag("--msaa").and_then(|s| s.parse().ok()),
         sun_size: num("--sun-size"),
         shadow_softness: num("--softness"),
+        cover: flag("--cover").cloned(),
+        cover_camera: flag("--cover-view").and_then(|v| match v.as_str() {
+            "eye" | "near" => Some(CoverCamera::Eye),
+            "far" => Some(CoverCamera::Far),
+            _ => None,
+        }),
+        lod_tint: args.iter().any(|a| a == "--lod-tint"),
+        field: num("--field"),
     };
 
     let options = eframe::NativeOptions {
@@ -469,6 +500,10 @@ struct App {
     /// pausing holds the pose and resuming carries on from it without a jump.
     wind_clock: f32,
     wind_paused: bool,
+    view: ViewMode,
+    cover: cover_view::CoverScene,
+    cover_gpu: Arc<Mutex<GpuLeaves>>,
+    cover_material: Option<MaterialTextures>,
 }
 
 impl App {
@@ -519,6 +554,11 @@ impl App {
         let backdrop = GpuBackdrop::new(&gl);
         let ground_pass = GpuGround::new(&gl);
         let renderer = Renderer::new(&gl);
+        let cover_gpu = GpuLeaves::new(&gl);
+        let (cover, cover_problem) = cover_view::CoverScene::new(startup.cover.as_deref());
+        if cover_problem.is_some() {
+            status = cover_problem.map(|m| (m, true));
+        }
         // The real maps are put in by `sync_materials` below, at once on the desktop and
         // once they have been fetched on the web.
         let bark_material = unsafe { gpu::placeholder_material(&gl) };
@@ -612,7 +652,19 @@ impl App {
             wind_direction: DEFAULT_WIND_DIRECTION,
             wind_clock: 0.0,
             wind_paused: false,
+            view: if startup.cover.is_some() { ViewMode::Cover } else { ViewMode::Tree },
+            cover,
+            cover_gpu: Arc::new(Mutex::new(cover_gpu)),
+            cover_material: None,
         };
+        if app.view == ViewMode::Cover {
+            app.cover_camera(startup.cover_camera.unwrap_or(CoverCamera::Eye));
+            app.ground = Ground::Plain;
+        }
+        app.cover.tint_lods = startup.lod_tint;
+        if let Some(f) = startup.field {
+            app.cover.field = f;
+        }
         // A capture is a measurement, so it is taken in still air unless it asks for
         // wind, and on a stopped clock when it does, so one command gives one frame.
         if app.capture.is_some() {
@@ -918,6 +970,259 @@ impl App {
         self.camera.distance = h * 1.9;
     }
 
+    /// Puts the camera at one of ground cover's two viewpoints.
+    fn cover_camera(&mut self, at: CoverCamera) {
+        match at {
+            // Standing at the edge of the field, eyes 1.7 m up, looking across it.
+            CoverCamera::Eye => {
+                self.camera.target = Vec3::new(0.0, 0.3, 0.0);
+                self.camera.distance = 6.0;
+                self.camera.pitch = ((1.7f32 - 0.3) / 6.0).asin();
+            }
+            // Far enough off that the coarser LODs take over across the field.
+            CoverCamera::Far => {
+                self.camera.target = Vec3::ZERO;
+                self.camera.distance = 45.0;
+                self.camera.pitch = 0.18;
+            }
+        }
+        self.camera.yaw = 0.35;
+        self.auto_frame = false;
+    }
+
+    /// Keeps ground cover up to date: the clump rebuilt when its preset changed, the
+    /// atlas baked again when its cells did, and the field rebuilt when the LOD any
+    /// clump is drawn at has changed.
+    fn sync_cover(&mut self) {
+        if self.cover.dirty {
+            self.cover.rebuild();
+        }
+        if self.cover.atlas_stale() {
+            let t = web_time::Instant::now();
+            if let Some(old) = self.cover_material.take() {
+                old.delete(&self.gl);
+            }
+            self.cover_material = Some(unsafe { self.cover.bake_material(&self.gl) });
+            println!("baked the blade atlas ({:.0} ms)", t.elapsed().as_secs_f32() * 1000.0);
+        }
+        if self.cover.choose_lods(self.camera.eye(), self.camera.fov_y) {
+            let field = self.cover.field_mesh();
+            self.cover_gpu.lock().unwrap().upload(&self.gl, &field);
+        }
+    }
+
+    /// The panel in ground cover mode.
+    fn cover_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut picked = None;
+        let current = self
+            .cover
+            .preset
+            .map_or_else(|| "(unsaved)".to_string(), |i| self.cover.presets[i].name.clone());
+        egui::ComboBox::from_label("Preset").selected_text(current).show_ui(ui, |ui| {
+            let mut saved_heading = false;
+            for (i, preset) in self.cover.presets.iter().enumerate() {
+                if preset.path.is_some() && !saved_heading {
+                    ui.separator();
+                    ui.weak("Saved");
+                    saved_heading = true;
+                }
+                if ui.selectable_label(self.cover.preset == Some(i), &preset.name).clicked() {
+                    picked = Some(i);
+                }
+            }
+        });
+        if let Some(i) = picked {
+            self.status = self.cover.pick(i).err().map(|e| (e, true));
+        }
+        ui.horizontal(|ui| {
+            ui.label("Seed");
+            if ui.add(egui::DragValue::new(&mut self.cover.template.seed).speed(1.0)).changed() {
+                self.cover.dirty = true;
+            }
+            if ui.button("Random").clicked() {
+                self.cover.template.seed = random_seed();
+                self.cover.dirty = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.cover.preset.is_some(), egui::Button::new("Reset"))
+                .on_hover_text("Reload the preset, dropping every change made in the panel.")
+                .clicked()
+                && let Some(i) = self.cover.preset
+            {
+                self.status = self.cover.pick(i).err().map(|e| (e, true));
+            }
+            if ui.button("Copy as RON").on_hover_text("Copy the preset as it stands.").clicked() {
+                match ron::ser::to_string_pretty(&self.cover.template, ron::ser::PrettyConfig::default()) {
+                    Ok(text) => ctx.copy_text(text),
+                    Err(e) => eprintln!("could not write the preset as RON: {e}"),
+                }
+            }
+        });
+        if !cfg!(target_arch = "wasm32") {
+            ui.horizontal(|ui| {
+                ui.label("Save as");
+                ui.add(egui::TextEdit::singleline(&mut self.cover.save_name).desired_width(150.0));
+                if ui.button("Save").clicked() {
+                    match cover_view::save_preset(&self.cover.save_name, &self.cover.template) {
+                        Ok(path) => {
+                            self.cover.presets = cover_view::list_presets();
+                            let key = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+                            self.cover.preset =
+                                self.cover.presets.iter().position(|p| p.path.is_some() && p.name == key);
+                            self.status = Some((format!("saved {}", path.display()), false));
+                        }
+                        Err(e) => self.status = Some((e, true)),
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Variations");
+                ui.add(egui::DragValue::new(&mut self.cover.variations).range(1..=200).speed(0.2))
+                    .on_hover_text("How many clumps to export: this seed, then each one after it, one file each.");
+                if ui
+                    .button("Export GLB")
+                    .on_hover_text("Write the clump, its LODs and the baked atlas to exports/cover.")
+                    .clicked()
+                {
+                    let dir = Path::new("exports/cover");
+                    let name = presets::key_for(&self.cover.save_name)
+                        .unwrap_or_else(|_| self.cover.params.name.clone());
+                    let n = self.cover.variations.max(1);
+                    let format = arbor_core::gltf::Format::Glb;
+                    self.status = Some(
+                        match arbor_core::gltf::export_cover_batch(dir, &name, format, &self.cover.template, n, |_| true) {
+                            Ok(r) => (
+                                format!(
+                                    "exported {} clump(s) to {} ({:.1} MB)",
+                                    r.trees.len(),
+                                    dir.display(),
+                                    r.bytes as f64 / 1e6
+                                ),
+                                false,
+                            ),
+                            Err(e) => (format!("export failed: {e}"), true),
+                        },
+                    );
+                }
+            });
+        }
+        if let Some((message, failed)) = &self.status {
+            if *failed {
+                ui.colored_label(egui::Color32::LIGHT_RED, message);
+            } else {
+                ui.weak(message);
+            }
+        }
+
+        let mut landed = self.cover.template.instance().template();
+        ui.separator();
+        ui.label("Clump");
+        for group in cover_view::GROUPS {
+            self.cover.dirty |= knobs::group_ui(ui, "cover", &mut self.cover.template, &mut landed, group);
+        }
+        let lods = self.cover.template.lod.len().min(cover_view::LODS.len());
+        for group in &cover_view::LODS[..lods] {
+            self.cover.dirty |= knobs::group_ui(ui, "cover", &mut self.cover.template, &mut landed, group);
+        }
+
+        ui.separator();
+        ui.label("Field");
+        if ui
+            .add(egui::Slider::new(&mut self.cover.field, 2.0..=120.0).text("Field size (m)"))
+            .on_hover_text("Metres across the square the clump is planted over, one clump per footprint.")
+            .changed()
+        {
+            self.cover.dirty = true;
+        }
+        let last = self.cover.mesh.lods.len().saturating_sub(1);
+        egui::ComboBox::from_label("LOD")
+            .selected_text(match self.cover.force_lod {
+                None => "By screen size".to_string(),
+                Some(l) => format!("LOD{l} everywhere"),
+            })
+            .show_ui(ui, |ui| {
+                let mut pick = self.cover.force_lod;
+                ui.selectable_value(&mut pick, None, "By screen size");
+                for l in 0..=last {
+                    ui.selectable_value(&mut pick, Some(l), format!("LOD{l} everywhere"));
+                }
+                if pick != self.cover.force_lod {
+                    self.cover.force_lod = pick;
+                    self.cover.field_dirty = true;
+                }
+            });
+        if ui
+            .checkbox(&mut self.cover.tint_lods, "Colour LODs")
+            .on_hover_text("Tint each clump by the LOD it is drawn at: white, red, blue, yellow.")
+            .changed()
+        {
+            self.cover.field_dirty = true;
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Eye height").on_hover_text("Standing at the edge of the field.").clicked() {
+                self.cover_camera(CoverCamera::Eye);
+            }
+            if ui.button("Far").on_hover_text("45 m off, where the coarser LODs take over.").clicked() {
+                self.cover_camera(CoverCamera::Far);
+            }
+        });
+
+        ui.separator();
+        ui.label("Render");
+        egui::ComboBox::from_label("View")
+            .selected_text(match self.render_mode {
+                RenderMode::Shaded => "Shaded",
+                RenderMode::UvChecker => "UV checker",
+                RenderMode::Normals => "Normals",
+                RenderMode::Occlusion => "Occlusion",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.render_mode, RenderMode::Shaded, "Shaded");
+                ui.selectable_value(&mut self.render_mode, RenderMode::UvChecker, "UV checker");
+                ui.selectable_value(&mut self.render_mode, RenderMode::Normals, "Normals");
+                ui.selectable_value(&mut self.render_mode, RenderMode::Occlusion, "Occlusion");
+            });
+        ui.add(egui::Slider::new(&mut self.leaf_translucency, 0.0..=2.0).text("Translucency"));
+        ui.add(egui::Slider::new(&mut self.coverage_lod, 0.0..=10.0).text("Coverage LOD"));
+        if !cfg!(target_arch = "wasm32") {
+            ui.checkbox(&mut self.wireframe, "Wireframe");
+        }
+        ui.checkbox(&mut self.shadows, "Shadows");
+        self.lighting_ui(ui);
+
+        ui.separator();
+        ui.label("Wind");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.wind_on, "Wind");
+            ui.checkbox(&mut self.wind_paused, "Pause");
+        });
+        ui.add(egui::Slider::new(&mut self.wind_strength, 0.0..=1.5).text("Strength"));
+        ui.add(egui::Slider::new(&mut self.wind_gustiness, 0.0..=1.0).text("Gustiness"));
+        ui.add(egui::Slider::new(&mut self.wind_direction, 0.0..=360.0).text("Direction"));
+
+        ui.separator();
+        ui.label("Stats");
+        let c = &self.cover;
+        ui.monospace(format!("cards:  {}", c.mesh.cards.len()));
+        ui.monospace(format!("height: {:.2} m", c.mesh.height));
+        for (i, lod) in c.mesh.lods.iter().enumerate() {
+            ui.monospace(format!("LOD{i}:   {} cards, {} tris", lod.card_count, lod.triangle_count()));
+        }
+        let coverage: Vec<String> = c.coverage.iter().map(|v| format!("{v:.2}")).collect();
+        ui.monospace(format!("atlas:  {}", coverage.join(" ")))
+            .on_hover_text("Share of each atlas cell the blades cover.");
+        let (per, tris) = c.field_stats();
+        let per: Vec<String> = per.iter().map(usize::to_string).collect();
+        ui.monospace(format!("field:  {} clumps ({} by LOD)", c.plants.len(), per.join("/")));
+        ui.monospace(format!("f.tris: {tris}"));
+        ui.monospace(format!("gen:    {:.2} ms", c.gen_ms));
+        ui.monospace(format!("frame:  {:.1} ms", ctx.input(|i| i.stable_dt) * 1000.0));
+        ui.separator();
+        ui.label("Camera: LMB orbit, RMB/MMB pan, wheel zoom");
+    }
+
     fn rebuild_overlay(&mut self) {
         let mut verts = Vec::new();
         if self.show_grid {
@@ -1075,7 +1380,30 @@ impl App {
 
     fn controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Arbor");
+        ui.horizontal(|ui| {
+            let was = self.view;
+            ui.selectable_value(&mut self.view, ViewMode::Tree, "Tree");
+            ui.selectable_value(&mut self.view, ViewMode::Cover, "Ground cover");
+            if was != self.view {
+                self.status = None;
+                match self.view {
+                    // A photographed ground is a picture of grass already, and hides
+                    // what the clump does against the ground it stands on.
+                    ViewMode::Cover => {
+                        self.cover_camera(CoverCamera::Eye);
+                        if self.ground == Ground::Photo {
+                            self.ground = Ground::Plain;
+                        }
+                    }
+                    ViewMode::Tree => self.frame_camera(),
+                }
+            }
+        });
         ui.separator();
+        if self.view == ViewMode::Cover {
+            self.cover_controls(ui, ctx);
+            return;
+        }
 
         self.presets_ui(ui);
 
@@ -1536,6 +1864,9 @@ impl eframe::App for App {
             self.regenerate();
             self.dirty = false;
         }
+        if self.view == ViewMode::Cover {
+            self.sync_cover();
+        }
         // Maps being fetched are put in on the frame they arrive.
         self.sync_materials();
         self.sync_environment();
@@ -1568,8 +1899,11 @@ impl eframe::App for App {
                 // The scene fills the panel, so the camera takes the panel's shape.
                 self.camera.aspect = rect.width() / rect.height().max(1.0);
 
+                // Ground cover draws its field through the leaf pipeline, and no bark.
+                let cover_mode = self.view == ViewMode::Cover;
+                let draw_bark = !cover_mode;
                 let mesh_gpu = Arc::clone(&self.mesh_gpu);
-                let leaves_gpu = Arc::clone(&self.leaves_gpu);
+                let leaves_gpu = Arc::clone(if cover_mode { &self.cover_gpu } else { &self.leaves_gpu });
                 let lines = Arc::clone(&self.lines);
                 let shadow = Arc::clone(&self.shadow);
                 let depth_pass = Arc::clone(&self.depth_pass);
@@ -1586,32 +1920,41 @@ impl eframe::App for App {
                     Ground::Photo if base_lighting.photo => Some(GroundMode::Photo),
                     _ => Some(GroundMode::Plain),
                 };
-                let tree_height = self.stats.height.max(1.0);
+                let tree_height = if cover_mode {
+                    self.cover.mesh.height.max(0.1)
+                } else {
+                    self.stats.height.max(1.0)
+                };
                 let wind = if self.wind_on {
-                    WindUniforms::new(
-                        &self.grown.wind,
+                    let mut wind = WindUniforms::new(
+                        if cover_mode { &self.cover.params.wind } else { &self.grown.wind },
                         self.wind_clock,
                         self.wind_direction,
                         self.wind_strength,
                         self.wind_gustiness,
                         tree_height,
-                    )
+                    );
+                    wind.card_bend = cover_mode;
+                    wind
                 } else {
                     WindUniforms::default()
                 };
                 let bark_material = self.bark_material;
-                let leaf_material = self.leaf_material;
+                let leaf_material = if cover_mode { self.cover_material } else { self.leaf_material };
                 let bark_look = gpu::BarkLook::from_species(&self.grown.mesh);
-                let mut leaf_params =
-                    LeafMaterialParams::from_species(&self.grown.leaves, self.leaf_translucency);
+                let mut leaf_params = if cover_mode {
+                    self.cover.leaf_params(self.leaf_translucency, self.coverage_lod)
+                } else {
+                    LeafMaterialParams::from_species(&self.grown.leaves, self.leaf_translucency)
+                };
                 leaf_params.coverage_lod = self.coverage_lod;
-                let draw_leaves = self.show_leaves && leaf_material.is_some();
+                let draw_leaves = (cover_mode || self.show_leaves) && leaf_material.is_some();
                 let cam = self.camera;
                 let crown = self.crown;
                 // The shadow is fitted to the tree, so it has to be fitted to where the
                 // wind can take it, or a swaying crown runs off the edge of its own map.
                 let aabb = {
-                    let (lo, hi) = self.aabb;
+                    let (lo, hi) = if cover_mode { self.cover.aabb() } else { self.aabb };
                     let r = wind.reach();
                     ([lo[0] - r, lo[1], lo[2] - r], [hi[0] + r, hi[1] + r, hi[2] + r])
                 };
@@ -1628,7 +1971,7 @@ impl eframe::App for App {
                     samples: self.msaa,
                 };
                 let wire = self.wireframe && !cfg!(target_arch = "wasm32");
-                let overlay = self.show_skeleton || self.show_grid;
+                let overlay = !cover_mode && (self.show_skeleton || self.show_grid);
                 let use_normal_map = self.use_normal_map;
                 let mode = match self.render_mode {
                     RenderMode::Shaded => 0,
@@ -1661,7 +2004,7 @@ impl eframe::App for App {
                         let frustum = shadow_frustum(aabb, base_lighting.sun_dir, shadow.size);
                         // The crown's shade on the sky belongs with the occlusion,
                         // and goes when it does.
-                        let canopy = match (draw_leaves && post.ao, leaf_material) {
+                        let canopy = match (draw_leaves && post.ao && !cover_mode, leaf_material) {
                             (true, Some(leaf_mat)) => unsafe {
                                 renderer.canopy(gl, &leaves_gpu, &leaf_mat, leaf_params, &wind, crown)
                             },
@@ -1712,7 +2055,9 @@ impl eframe::App for App {
                                     &frustum.view_proj.to_cols_array(),
                                 );
                                 wind.bind(gl, depth_pass.program);
-                                mesh_gpu.bind_and_draw(gl);
+                                if draw_bark {
+                                    mesh_gpu.bind_and_draw(gl);
+                                }
                                 gl.use_program(None);
                                 // Leaves need their own alpha-tested depth pass or
                                 // the canopy casts the shadow of its solid quads.
@@ -1739,7 +2084,9 @@ impl eframe::App for App {
                                     &view_proj.to_cols_array(),
                                 );
                                 wind.bind(gl, depth_pass.program);
-                                mesh_gpu.bind_and_draw(gl);
+                                if draw_bark {
+                                    mesh_gpu.bind_and_draw(gl);
+                                }
                                 gl.use_program(None);
                                 if let (true, Some(leaf_mat)) = (draw_leaves, leaf_material) {
                                     leaf_depth_pass.draw(
@@ -1787,18 +2134,20 @@ impl eframe::App for App {
                                 gl.clear(glow::COLOR_BUFFER_BIT);
                             }
 
-                            mesh_gpu.draw(
-                                gl,
-                                &MeshDrawParams {
-                                    bark: bark_look,
-                                    lighting: &lighting,
-                                    view_proj,
-                                    mode,
-                                    use_normal_map,
-                                    material: &bark_material,
-                                    wind: &wind,
-                                },
-                            );
+                            if draw_bark {
+                                mesh_gpu.draw(
+                                    gl,
+                                    &MeshDrawParams {
+                                        bark: bark_look,
+                                        lighting: &lighting,
+                                        view_proj,
+                                        mode,
+                                        use_normal_map,
+                                        material: &bark_material,
+                                        wind: &wind,
+                                    },
+                                );
+                            }
 
                             if let (true, Some(leaf_mat)) = (draw_leaves, leaf_material) {
                                 leaves_gpu.draw(
@@ -1817,7 +2166,7 @@ impl eframe::App for App {
                             if wire {
                                 color_pass.draw_wire(
                                     gl,
-                                    &mesh_gpu,
+                                    draw_bark.then_some(&*mesh_gpu),
                                     draw_leaves.then_some(&*leaves_gpu),
                                     view_proj,
                                     [0.02, 0.02, 0.03, 1.0],

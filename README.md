@@ -76,6 +76,11 @@ cargo run --release -p arbor-viewer
 `--bloom`, `--no-ao`, `--ao-radius <metres>`, `--softness`, `--msaa <samples>`,
 `--view <uv|normals|ao>`, and `--screenshot <path> [--settle N]`.
 
+Ground cover: `--cover <preset>` opens in ground cover mode, with the clump planted
+over a field; `--cover-view <eye|far>` picks the eye-height or 45 m viewpoint,
+`--field <metres>` the size of the field, and `--lod-tint` colours each clump by the
+LOD its screen size picks (white, red, blue).
+
 A screenshot is taken in still air unless `--wind` asks otherwise, and then on a
 stopped clock (`--wind-time`, default 0), so the same command always gives the same
 frame. Setting the sun by hand (`--time`, `--sun-elevation`, `--sun-azimuth`) picks

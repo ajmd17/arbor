@@ -1,4 +1,6 @@
+pub mod blades;
 pub mod cluster;
+pub mod cover;
 pub mod envelope;
 pub mod gltf;
 pub mod growth;
@@ -12,6 +14,8 @@ pub mod species;
 pub mod textures;
 pub mod wind;
 
+pub use blades::{bake_blades, BakedBlades, BladeAtlasParams, BladeCell};
+pub use cover::{build_cover, CoverMesh, CoverParams, CoverTemplate};
 pub use cluster::{bake_cluster, BakedMaps, Bitmap, LeafMaps};
 pub use envelope::EnvelopeParams;
 pub use growth::grow;
