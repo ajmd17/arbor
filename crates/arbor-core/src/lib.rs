@@ -2,6 +2,7 @@ pub mod blades;
 pub mod cluster;
 pub mod cover;
 pub mod envelope;
+pub mod flowers;
 pub mod gltf;
 pub mod growth;
 pub mod leaves;

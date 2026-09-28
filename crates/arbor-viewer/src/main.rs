@@ -1136,6 +1136,15 @@ impl App {
         {
             self.cover.dirty = true;
         }
+        let mut variants = self.cover.variant_count as u32;
+        if ui
+            .add(egui::Slider::new(&mut variants, 1..=8).text("Variants"))
+            .on_hover_text("Seeds of the preset planted among each other, the preset's own and each after it, as an engine plants several variants. One shows the clump alone, repeated.")
+            .changed()
+        {
+            self.cover.variant_count = variants as usize;
+            self.cover.dirty = true;
+        }
         let last = self.cover.mesh.lods.len().saturating_sub(1);
         egui::ComboBox::from_label("LOD")
             .selected_text(match self.cover.force_lod {

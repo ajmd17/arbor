@@ -20,6 +20,7 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::cluster::{bleed_color_outward, BakedMaps, Bitmap};
+use crate::flowers::{flower, FlowerParams};
 use crate::seed::PortableRng;
 
 /// Most cells one atlas may hold, so a preset cannot ask for a sheet no GPU takes.
@@ -35,6 +36,8 @@ const CELL_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 /// shallow V, and the two halves catching light differently is most of what makes it
 /// read as a blade rather than a green line.
 const MIDRIB_FOLD: f32 = 0.55;
+/// Furthest a blade may turn off vertical anywhere along it, in radians.
+const MAX_TURN: f32 = 1.75;
 
 /// One cell of the atlas: a spray of blades of one kind.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +60,18 @@ pub struct BladeCell {
     /// How much further it bends by its tip, in degrees, toward the side it already
     /// leans: the droop that makes long grass arch over.
     pub curve_deg: f32,
+    /// How that bend is spread along the blade. A grass blade stands stiff near its
+    /// sheath and gives way toward the tip, so the bend is bunched there: 1 is an even
+    /// arc, 2 or 3 keeps the lower blade straight and lets the top flop.
+    pub droop_power: f32,
+    /// Random bending along the blade, in degrees: no blade is a clean arc.
+    pub wiggle_deg: f32,
+    /// Share of blades folded over partway, as long leaves that have given way do.
+    pub kink: f32,
+    /// How far a blade's lean follows where its root is: 1 fans every blade away from
+    /// the middle, 0 leans each its own way. A little fan keeps long blades from
+    /// crossing; a lot makes every card a fountain.
+    pub fan: f32,
     /// Share of the cell's width the roots are spread over, centred.
     pub root_spread: f32,
     /// Colour at the root and at the tip, sRGB.
@@ -64,6 +79,12 @@ pub struct BladeCell {
     pub tip: [f32; 3],
     /// Spread of brightness and of yellowing from blade to blade.
     pub color_variance: f32,
+    /// Share of blades that are dead through, in `dead_color`: every sward carries old
+    /// leaves among the new, and without them grass reads as plastic.
+    pub dead: f32,
+    pub dead_color: [f32; 3],
+    /// Unevenness of colour along a blade, as a share of its brightness.
+    pub mottle: f32,
     /// Share of blades whose tip has dried, and how much of the blade it reaches.
     pub tip_burn: f32,
     pub burn_length: f32,
@@ -76,8 +97,14 @@ pub struct BladeCell {
     /// its length, and its colour.
     pub head_length: f32,
     pub head_width: f32,
+    /// From a tight spike, grains pressed to the stalk, at 0, to a loose feathery
+    /// panicle of small grains on splayed stalklets at 1.
+    pub head_spread: f32,
     pub head: [f32; 3],
     pub roughness: f32,
+    /// Wildflowers standing among the blades, if this is a flowering cell. A cell with
+    /// flowers is drawn by flowering tufts rather than lush or dry ones.
+    pub flowers: Option<FlowerParams>,
     pub seed: u64,
 }
 
@@ -92,19 +119,28 @@ impl Default for BladeCell {
             width: 0.016,
             lean_deg: 14.0,
             curve_deg: 22.0,
-            root_spread: 0.45,
-            root: [0.16, 0.25, 0.07],
-            tip: [0.42, 0.55, 0.17],
-            color_variance: 0.18,
+            droop_power: 2.2,
+            wiggle_deg: 6.0,
+            kink: 0.06,
+            fan: 0.35,
+            root_spread: 0.8,
+            root: [0.20, 0.26, 0.10],
+            tip: [0.32, 0.40, 0.15],
+            color_variance: 0.2,
+            dead: 0.12,
+            dead_color: [0.45, 0.40, 0.27],
+            mottle: 0.12,
             tip_burn: 0.15,
             burn_length: 0.2,
             burn: [0.58, 0.52, 0.29],
             depth_shade: 0.45,
-            root_shade: 0.5,
+            root_shade: 0.75,
             head_length: 0.16,
             head_width: 0.22,
+            head_spread: 0.5,
             head: [0.64, 0.57, 0.36],
             roughness: 0.62,
+            flowers: None,
             seed: 11,
         }
     }
@@ -207,6 +243,10 @@ struct Stroke {
     /// How far it is turned about its own length, in radians, which tilts its normal.
     tilt: f32,
     roughness: f32,
+    /// Brightness wobble along it: amount, and two frequencies and phases.
+    mottle: (f32, [f32; 4]),
+    /// How much of a blade's midrib, veins and fold it is drawn with, 0 to 1.
+    detail: f32,
 }
 
 /// Premultiplied accumulation of every map in one cell.
@@ -229,10 +269,22 @@ fn bake_cell(c: &BladeCell, w: u32, h: u32, seed: u64) -> Cell {
     let (lo, hi) = (c.length.0.min(c.length.1), c.length.0.max(c.length.1));
     let jitter = |rng: &mut PortableRng, v: f32| if v > 0.0 { rng.random_range(-v..=v) } else { 0.0 };
     let tint = |rng: &mut PortableRng, v: f32| {
-        // Brightness and yellowing, drawn apart: a blade can be pale without being dry.
+        // Brightness and hue, drawn apart: a blade can be pale without being dry, and
+        // grass runs from blue-green to yellow-green blade by blade.
         let bright = 1.0 + jitter(rng, v);
         let yellow = jitter(rng, v);
-        [bright * (1.0 + 0.5 * yellow), bright * (1.0 + 0.2 * yellow), bright * (1.0 - 0.6 * yellow)]
+        [bright * (1.0 + 0.45 * yellow), bright * (1.0 + 0.1 * yellow), bright * (1.0 - 0.7 * yellow)]
+    };
+    let mottle = |rng: &mut PortableRng| {
+        (
+            c.mottle.max(0.0),
+            [
+                rng.random_range(4.0..9.0),
+                rng.random_range(0.0..std::f32::consts::TAU),
+                rng.random_range(13.0..29.0),
+                rng.random_range(0.0..std::f32::consts::TAU),
+            ],
+        )
     };
 
     let total = c.count.min(2048) + c.heads.min(256);
@@ -240,18 +292,31 @@ fn bake_cell(c: &BladeCell, w: u32, h: u32, seed: u64) -> Cell {
         let is_head = i >= c.count.min(2048);
         let depth: f32 = rng.random();
         let root_x = wf * (0.5 + (rng.random::<f32>() - 0.5) * spread);
-        let length = hf * rng.random_range(lo..=hi.max(lo + 1e-4)).clamp(0.02, 1.0);
-        // A tuft fans out from its middle: a blade leans away from the centre by as
-        // much as its root is off it, so the long ones splay rather than crossing in an
-        // X. A few stray the other way. It droops the way it leans, so a long blade
-        // arches over rather than snaking, and further the longer it is.
+        // Lengths weighted toward the short end: a sward is mostly low leaves with a
+        // few long ones standing out of it, not an even crop.
+        let u: f32 = rng.random();
+        let length = hf * (lo + (hi.max(lo + 1e-4) - lo) * u.powf(1.4)).clamp(0.02, 1.0);
+        // Each blade leans its own way, pulled away from the middle by `fan` as far as
+        // its root is off it, so long blades mostly splay rather than cross. It droops
+        // the way it leans, and further the longer it is.
         let off = ((root_x / wf - 0.5) / (0.5 * spread).max(1e-3)).clamp(-1.0, 1.0);
-        let stray = rng.random::<f32>() < 0.15;
-        let side = if (off >= 0.0) != stray { 1.0 } else { -1.0 };
-        let splay = if stray { 0.3 } else { 0.35 + 0.65 * off.abs() };
-        let lean = (c.lean_deg * splay * rng.random_range(0.6..=1.2)).to_radians() * side;
-        let curve = (c.curve_deg * (0.4 + 0.6 * rng.random::<f32>()) * length / hf).to_radians() * side;
-        let spine = fit_inside(arc(root_x, hf - MARGIN, length, lean, curve), wf);
+        let fan = c.fan.clamp(0.0, 1.0);
+        let lean_u = (fan * off + (1.0 - fan) * rng.random_range(-1.0f32..=1.0)).clamp(-1.0, 1.0);
+        let lean = (c.lean_deg * lean_u * rng.random_range(0.7..=1.2)).to_radians();
+        let side = if lean >= 0.0 { 1.0 } else { -1.0 };
+        let curve = (c.curve_deg * (0.3 + 0.7 * rng.random::<f32>()) * length / hf).to_radians() * side;
+        let bend = Bend {
+            lean,
+            curve,
+            power: c.droop_power.clamp(0.5, 5.0),
+            wiggle: (
+                c.wiggle_deg.to_radians() * rng.random::<f32>(),
+                rng.random_range(0.0..std::f32::consts::TAU),
+            ),
+            kink: (!is_head && rng.random::<f32>() < c.kink.clamp(0.0, 1.0))
+                .then(|| (rng.random_range(0.6..0.85), rng.random_range(0.5..1.0) * side)),
+        };
+        let spine = fit_inside(bend.spine(root_x, hf - MARGIN, length), wf);
         let t = tint(&mut rng, c.color_variance.clamp(0.0, 1.0));
         let value = 1.0 - c.depth_shade.clamp(0.0, 1.0) * 0.5 * (1.0 - depth);
         let tilt = jitter(&mut rng, 0.45);
@@ -281,21 +346,28 @@ fn bake_cell(c: &BladeCell, w: u32, h: u32, seed: u64) -> Cell {
                     root_shade: c.root_shade,
                     tilt,
                     roughness: c.roughness + 0.08,
+                    mottle: mottle(&mut rng),
+                    detail: 1.0,
                 },
             ));
-            let grain_len = (head_len * 0.16).max(3.0);
-            let grain_w = (grain_len * c.head_width.clamp(0.05, 1.0)).max(0.8);
-            let grains = ((head_len / (grain_len * 0.45)).ceil() as usize).clamp(2, 64);
+            let loose = c.head_spread.clamp(0.0, 1.0);
+            let grain_len = (head_len * (0.16 - 0.08 * loose)).max(2.5);
+            let grain_w = (grain_len * c.head_width.clamp(0.05, 1.0)).max(0.7);
+            let grains = ((head_len / (grain_len * (0.45 - 0.2 * loose))).ceil() as usize).clamp(2, 96);
             for g in 0..grains {
-                let along = head_from + (1.0 - head_from) * (g as f32 + 0.5) / grains as f32;
+                let step = (g as f32 + 0.5 + jitter(&mut rng, 0.4 * loose)) / grains as f32;
+                let along = head_from + (1.0 - head_from) * step.clamp(0.0, 1.0);
                 let (at, dir) = along_spine(&spine, along);
                 let across = [-dir[1], dir[0]];
-                // Alternate sides, splayed off the stalk, the top ones tighter in.
+                // Alternate sides, splayed off the stalk, the top ones tighter in. A loose
+                // panicle holds its grains out on stalklets, widest at the bottom.
                 let s = if g % 2 == 0 { 1.0 } else { -1.0 };
-                let splay = (0.45 - 0.3 * (along - head_from) / (1.0 - head_from).max(1e-3)) * s;
-                let (sn, cs) = (splay + jitter(&mut rng, 0.15)).sin_cos();
+                let low = 1.0 - (along - head_from) / (1.0 - head_from).max(1e-3);
+                let splay = (0.15 + 0.3 * low + 0.5 * loose * low) * s;
+                let (sn, cs) = (splay + jitter(&mut rng, 0.15 + 0.2 * loose)).sin_cos();
                 let gdir = [dir[0] * cs + across[0] * sn, dir[1] * cs + across[1] * sn];
-                let start = [at[0] + across[0] * s * grain_w * 0.3, at[1] + across[1] * s * grain_w * 0.3];
+                let reach = grain_w * 0.3 + loose * grain_len * 1.5 * low * rng.random::<f32>();
+                let start = [at[0] + across[0] * s * reach, at[1] + across[1] * s * reach];
                 let pts: Vec<[f32; 2]> = (0..5)
                     .map(|k| {
                         let f = k as f32 / 4.0 * grain_len;
@@ -319,43 +391,115 @@ fn bake_cell(c: &BladeCell, w: u32, h: u32, seed: u64) -> Cell {
                         root_shade: 1.0,
                         tilt: jitter(&mut rng, 0.8),
                         roughness: c.roughness + 0.1,
+                        mottle: (0.0, [0.0; 4]),
+                        detail: 0.3,
                     },
                 ));
             }
             continue;
         }
 
-        let w0 = (c.width * hf * rng.random_range(0.7..=1.25)).max(1.0) * 0.5;
+        // Short blades are narrower too: young leaves, and the sheaths of old ones.
+        let young = 0.6 + 0.4 * length / (hi * hf).max(1.0);
+        let w0 = (c.width * hf * rng.random_range(0.6..=1.2) * young).max(0.9) * 0.5;
         let half = (0..SPINE_POINTS)
             .map(|k| {
                 let u = k as f32 / (SPINE_POINTS - 1) as f32;
-                // Near constant down most of the blade, running to a point over the
-                // last third, as grass does.
-                let point = ((1.0 - u) / 0.35).min(1.0).powf(0.8);
-                w0 * (1.0 - 0.25 * u) * point
+                // Tapering the whole way from the sheath, faster toward the point.
+                w0 * (1.0 - u).powf(0.6) * (1.0 - 0.15 * u)
             })
             .collect();
-        let burnt = rng.random::<f32>() < c.tip_burn.clamp(0.0, 1.0);
+        let dead = rng.random::<f32>() < c.dead.clamp(0.0, 1.0);
+        let (root_col, tip_col) = if dead {
+            let d = mul3(c.dead_color, tint(&mut rng, 0.25));
+            (mul3(d, [0.8, 0.8, 0.8]), d)
+        } else {
+            (mul3(c.root, t), mul3(c.tip, t))
+        };
+        let burnt = !dead && rng.random::<f32>() < c.tip_burn.clamp(0.0, 1.0);
         let burn_from = if burnt {
             1.0 - c.burn_length.clamp(0.0, 1.0) * rng.random_range(0.5..=1.2)
         } else {
             2.0
         };
         strokes.push((
-            depth,
+            // Dead leaves lie low in the sward, under the living ones.
+            if dead { depth * 0.5 } else { depth },
             Stroke {
                 spine,
                 half,
-                root: mul3(c.root, t),
-                tip: mul3(c.tip, t),
+                root: root_col,
+                tip: tip_col,
                 burn_from,
                 burn: mul3(c.burn, t),
-                value,
+                value: if dead { value * 0.85 } else { value },
                 root_shade: c.root_shade,
                 tilt,
-                roughness: c.roughness + jitter(&mut rng, 0.06),
+                roughness: c.roughness + if dead { 0.12 } else { jitter(&mut rng, 0.06) },
+                mottle: mottle(&mut rng),
+                detail: 1.0,
             },
         ));
+    }
+
+    if let Some(f) = &c.flowers {
+        let wiggle = c.wiggle_deg.to_radians();
+        let count = f.count.min(64);
+        for i in 0..count {
+            // Toward the front of the grass: a flower stands out of the sward.
+            let depth = rng.random_range(0.35f32..1.0);
+            let pad = (f.size * hf * 0.6).min(wf * 0.3);
+            // Spread across the cell, one to each share of it, so two flowers never
+            // stand on one spot and read as one.
+            let slot = (i as f32 + rng.random_range(0.15f32..0.85)) / count.max(1) as f32;
+            let root_x = pad + slot * (wf - 2.0 * pad).max(1.0);
+            let phase = rng.random_range(0.0..std::f32::consts::TAU);
+            let stem = |x: f32, lean: f32, length: f32, w: f32| {
+                let bend = Bend { lean, curve: lean * 0.5, power: 2.0, wiggle: (wiggle * 0.5, phase), kink: None };
+                fit_inside(bend.spine(x, hf - MARGIN, length), w)
+            };
+            let value = 1.0 - c.depth_shade.clamp(0.0, 1.0) * 0.35 * (1.0 - depth);
+            let mut shapes = flower(f, &mut rng, root_x, wf, hf, &stem);
+            // The stem is kept inside the cell as it is built; the head is not, so the
+            // whole flower is slid back in if its head overhangs an edge.
+            let pad = MARGIN + 2.0;
+            let (lo, hi) = shapes.iter().flat_map(|sh| sh.spine.iter().zip(&sh.half)).fold(
+                (f32::MAX, f32::MIN),
+                |(lo, hi), (pt, r)| (lo.min(pt[0] - r - 1.0), hi.max(pt[0] + r + 1.0)),
+            );
+            let shift = (pad - lo).max(0.0) - (hi - (wf - pad)).max(0.0);
+            let top = shapes
+                .iter()
+                .flat_map(|sh| sh.spine.iter().zip(&sh.half))
+                .map(|(pt, r)| pt[1] - r - 1.0)
+                .fold(f32::MAX, f32::min);
+            let drop = (pad - top).max(0.0);
+            for sh in &mut shapes {
+                for pt in &mut sh.spine {
+                    pt[0] += shift;
+                    pt[1] += drop;
+                }
+            }
+            for (k, shape) in shapes.into_iter().enumerate() {
+                strokes.push((
+                    depth + k as f32 * 1e-6,
+                    Stroke {
+                        spine: shape.spine,
+                        half: shape.half,
+                        root: shape.root,
+                        tip: shape.tip,
+                        burn_from: 2.0,
+                        burn: shape.tip,
+                        value,
+                        root_shade: shape.root_shade,
+                        tilt: shape.tilt,
+                        roughness: shape.roughness,
+                        mottle: (0.0, [0.0; 4]),
+                        detail: shape.detail,
+                    },
+                ));
+            }
+        }
     }
 
     // Back to front.
@@ -367,21 +511,47 @@ fn bake_cell(c: &BladeCell, w: u32, h: u32, seed: u64) -> Cell {
     canvas.finish()
 }
 
-/// A spine of constant curvature: `length` pixels up from `(x, y)`, leaning `lean`
-/// radians off vertical at the root and turning a further `curve` by the tip.
-fn arc(x: f32, y: f32, length: f32, lean: f32, curve: f32) -> Vec<[f32; 2]> {
-    let steps = SPINE_POINTS - 1;
-    let ds = length / steps as f32;
-    let mut out = Vec::with_capacity(SPINE_POINTS);
-    let mut p = [x, y];
-    out.push(p);
-    for k in 0..steps {
-        // Midpoint angle of the step, so the curve does not drift with the step count.
-        let a = lean + curve * (k as f32 + 0.5) / steps as f32;
-        p = [p[0] + a.sin() * ds, p[1] - a.cos() * ds];
-        out.push(p);
+/// How a blade's spine turns along its length.
+struct Bend {
+    /// Off vertical at the root, in radians.
+    lean: f32,
+    /// Further turn by the tip, and how it is bunched toward the tip.
+    curve: f32,
+    power: f32,
+    /// Amplitude and phase of a slow random bending.
+    wiggle: (f32, f32),
+    /// Where along the blade it folds over, and by how much, in radians.
+    kink: Option<(f32, f32)>,
+}
+
+impl Bend {
+    fn angle(&self, u: f32) -> f32 {
+        let mut a = self.lean + self.curve * u.powf(self.power);
+        a += self.wiggle.0 * (u * 7.0 + self.wiggle.1).sin() * u;
+        if let Some((at, by)) = self.kink {
+            // A fold is sharp but not a corner: over a few percent of the blade.
+            a += by * smooth((u - at) / 0.06);
+        }
+        // A blade may hang over, but not loop back up: past a little beyond level it
+        // would run across the whole card as a straight line.
+        a.clamp(-MAX_TURN, MAX_TURN)
     }
-    out
+
+    /// The spine, `length` pixels up from `(x, y)`.
+    fn spine(&self, x: f32, y: f32, length: f32) -> Vec<[f32; 2]> {
+        let steps = SPINE_POINTS - 1;
+        let ds = length / steps as f32;
+        let mut out = Vec::with_capacity(SPINE_POINTS);
+        let mut p = [x, y];
+        out.push(p);
+        for k in 0..steps {
+            // Midpoint angle of the step, so the curve does not drift with the step count.
+            let a = self.angle((k as f32 + 0.5) / steps as f32);
+            p = [p[0] + a.sin() * ds, p[1] - a.cos() * ds];
+            out.push(p);
+        }
+        out
+    }
 }
 
 /// Slides a spine sideways, and if it has to squashes it, so it stays clear of the
@@ -516,22 +686,24 @@ impl Canvas {
             }
             let shade = s.root_shade + (1.0 - s.root_shade) * smooth((t / 0.3).min(1.0));
             // A lighter midrib and faint veins either side of it.
-            let rib = 1.0 + 0.1 * (-(across_s / 0.18).powi(2)).exp();
-            let veins = 1.0 + 0.04 * (across_s * 9.0).sin();
-            let v = s.value * shade * rib * veins;
+            let rib = 1.0 + 0.1 * s.detail * (-(across_s / 0.18).powi(2)).exp();
+            let veins = 1.0 + 0.04 * s.detail * (across_s * 9.0).sin();
+            let (m, f) = s.mottle;
+            let blotch = 1.0 + m * (0.6 * (t * f[0] + f[1]).sin() + 0.4 * (t * f[2] + f[3]).sin());
+            let v = s.value * shade * rib * veins * blotch;
             for k in 0..3 {
                 self.rgb[j][k] = (col[k] * v).clamp(0.0, 1.0) * a + self.rgb[j][k] * keep;
             }
 
             // Folded along the midrib, and the whole blade turned a little about its
             // length. Image y runs down and the normal's green runs up.
-            let phi = s.tilt + MIDRIB_FOLD * across_s;
+            let phi = s.tilt + MIDRIB_FOLD * s.detail * across_s;
             let (sp, cp) = phi.sin_cos();
             let nrm = [across[0] * sp, -across[1] * sp, cp];
             for k in 0..3 {
                 self.n[j][k] = nrm[k] * a + self.n[j][k] * keep;
             }
-            let rough = s.roughness - 0.06 * (-(across_s / 0.18).powi(2)).exp();
+            let rough = s.roughness - 0.06 * s.detail * (-(across_s / 0.18).powi(2)).exp();
             self.r[j] = rough.clamp(0.0, 1.0) * a + self.r[j] * keep;
             self.a[j] = a + self.a[j] * keep;
         }
@@ -683,6 +855,37 @@ mod tests {
             }
         }
         assert!(checked > 200);
+    }
+
+    #[test]
+    fn every_kind_of_flower_shows_its_colour_and_stays_in_its_cell() {
+        use crate::flowers::{FlowerKind, FlowerParams};
+        for kind in [FlowerKind::Radial, FlowerKind::Spike, FlowerKind::Umbel, FlowerKind::Brush] {
+            let cell = BladeCell {
+                count: 20,
+                flowers: Some(FlowerParams {
+                    kind,
+                    count: 4,
+                    size: 0.12,
+                    color: [0.9, 0.2, 0.8],
+                    ..FlowerParams::default()
+                }),
+                ..BladeCell::default()
+            };
+            let img = bake_blades(&BladeAtlasParams { cell_height: 256, cell_aspect: 0.5, cells: vec![cell] }).maps.albedo;
+            let flowery = (0..img.height)
+                .flat_map(|y| (0..img.width).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let p = img.at(x, y);
+                    p[3] > 200 && p[0] > p[1] + 40 && p[2] > p[1] + 40
+                })
+                .count();
+            assert!(flowery > 30, "{kind:?}: only {flowery} flower-coloured texels");
+            for y in 0..img.height {
+                assert_eq!(img.at(0, y)[3], 0, "{kind:?} reaches the left edge");
+                assert_eq!(img.at(img.width - 1, y)[3], 0, "{kind:?} reaches the right edge");
+            }
+        }
     }
 
     #[test]

@@ -26,6 +26,7 @@ use crate::species::WindParams;
 pub const MEADOW_GRASS_RON: &str = include_str!("../../../assets/cover/meadow_grass.ron");
 pub const SHORT_GRASS_RON: &str = include_str!("../../../assets/cover/short_grass.ron");
 pub const DRY_GRASS_RON: &str = include_str!("../../../assets/cover/dry_grass.ron");
+pub const WILDFLOWER_MEADOW_RON: &str = include_str!("../../../assets/cover/wildflower_meadow.ron");
 
 /// Where presets saved from the viewer go, and are found by name from the CLI.
 pub const CUSTOM_COVER_DIR: &str = "assets/cover/custom";
@@ -35,6 +36,7 @@ pub fn builtin_cover_presets() -> Vec<(&'static str, &'static str)> {
         ("meadow_grass", MEADOW_GRASS_RON),
         ("short_grass", SHORT_GRASS_RON),
         ("dry_grass", DRY_GRASS_RON),
+        ("wildflower_meadow", WILDFLOWER_MEADOW_RON),
     ]
 }
 
@@ -167,11 +169,17 @@ pub struct FootprintParams<V = f32> {
     /// evenly, where scattering them at random leaves bald patches and clumps, which
     /// show up as a pattern once the clump is repeated.
     pub jitter: V,
+    /// How far tufts run on past the edge of the square, as a share of its size on each
+    /// side, thinning out toward the outside of that band. An engine plants clumps at a
+    /// random turn, and a turned square does not tile: without an overhang its corners
+    /// leave bare ground between neighbours. With one, neighbours overlap softly
+    /// whichever way each is turned.
+    pub overhang: V,
 }
 
 impl Default for FootprintParams {
     fn default() -> Self {
-        Self { size: 1.5, tufts: 36.0, jitter: 0.8 }
+        Self { size: 1.5, tufts: 36.0, jitter: 0.8, overhang: 0.0 }
     }
 }
 
@@ -185,6 +193,7 @@ impl<V: Scalar> FootprintParams<V> {
             size: f(&key(at, "size"), self.size),
             tufts: f(&key(at, "tufts"), self.tufts),
             jitter: f(&key(at, "jitter"), self.jitter),
+            overhang: f(&key(at, "overhang"), self.overhang),
         }
     }
 }
@@ -214,6 +223,11 @@ pub struct TuftParams<V = f32> {
     /// How far a card turns about its own length from root to tip, in degrees, so a
     /// tuft is not a set of flat planes.
     pub twist_deg: V,
+    /// Share of cards drawn short, as the low layer of leaves every sward has under
+    /// its tall ones, and how tall they are against the rest. Without it, the ground
+    /// shows between the stems of anything tall.
+    pub understory: V,
+    pub understory_height: V,
 }
 
 impl Default for TuftParams {
@@ -228,6 +242,8 @@ impl Default for TuftParams {
             lean_variance_deg: 8.0,
             curl_deg: 18.0,
             twist_deg: 20.0,
+            understory: 0.0,
+            understory_height: 0.35,
         }
     }
 }
@@ -248,6 +264,8 @@ impl<V: Scalar> TuftParams<V> {
             lean_variance_deg: f(&key(at, "lean_variance_deg"), self.lean_variance_deg),
             curl_deg: f(&key(at, "curl_deg"), self.curl_deg),
             twist_deg: f(&key(at, "twist_deg"), self.twist_deg),
+            understory: f(&key(at, "understory"), self.understory),
+            understory_height: f(&key(at, "understory_height"), self.understory_height),
         }
     }
 }
@@ -299,11 +317,16 @@ impl<V: Scalar> CardParams<V> {
 pub struct CoverColour<V = f32> {
     pub dry_fraction: V,
     pub mix: V,
+    /// Share of tufts that flower, drawing from the atlas cells with flowers in them.
+    pub flower_fraction: V,
+    /// Metres across the patches flowering tufts gather in. Wildflowers grow in drifts
+    /// rather than evenly: 0 scatters them tuft by tuft.
+    pub flower_patch: V,
 }
 
 impl Default for CoverColour {
     fn default() -> Self {
-        Self { dry_fraction: 0.2, mix: 0.2 }
+        Self { dry_fraction: 0.2, mix: 0.2, flower_fraction: 0.0, flower_patch: 0.6 }
     }
 }
 
@@ -316,6 +339,8 @@ impl<V: Scalar> CoverColour<V> {
         CoverColour {
             dry_fraction: f(&key(at, "dry_fraction"), self.dry_fraction),
             mix: f(&key(at, "mix"), self.mix),
+            flower_fraction: f(&key(at, "flower_fraction"), self.flower_fraction),
+            flower_patch: f(&key(at, "flower_patch"), self.flower_patch),
         }
     }
 }
@@ -502,15 +527,33 @@ fn lay_out(p: &CoverParams) -> Vec<Card> {
     }
     squares.truncate(tufts as usize);
     squares.sort_unstable();
+    let cell = size / n as f32;
+    let mut spots: Vec<(f32, f32)> = squares.iter().map(|&sq| ((sq % n) as f32, (sq / n) as f32)).collect();
+    // The overhang: grid squares past the edge, each kept with a chance that falls from
+    // the edge of the square to the outside of the band, so the edge is soft.
+    let band = p.footprint.overhang.clamp(0.0, 0.5) * size;
+    let extra = (band / cell).ceil() as i32;
+    for gz in -extra..n as i32 + extra {
+        for gx in -extra..n as i32 + extra {
+            if (0..n as i32).contains(&gx) && (0..n as i32).contains(&gz) {
+                continue;
+            }
+            let out = |g: i32| if g < 0 { -g as f32 } else { (g - n as i32 + 1).max(0) as f32 };
+            let past = out(gx).max(out(gz)) * cell - 0.5 * cell;
+            if rng.random::<f32>() < 1.0 - past / band.max(1e-4) {
+                spots.push((gx as f32, gz as f32));
+            }
+        }
+    }
 
     let t = &p.tuft;
     let (aspect, width_k) = (p.atlas.cell_size().0 as f32 / p.atlas.cell_size().1 as f32, p.card.width.max(0.05));
     let pools = cell_pools(p);
     let mut cards = Vec::new();
     let per_tuft = (t.cards.round().max(1.0) as u32).min(MAX_CARDS);
-    for sq in squares {
-        let (gx, gz) = ((sq % n) as f32, (sq / n) as f32);
-        let cell = size / n as f32;
+    let flowering = flowering(p, &spots, cell, &pools.flower, &mut rng);
+    for (&(gx, gz), &kind) in spots.iter().zip(&flowering) {
+        let flowers = kind.is_some();
         let cx = -size * 0.5 + (gx + 0.5 + jitter * (rng.random::<f32>() - 0.5)) * cell;
         let cz = -size * 0.5 + (gz + 0.5 + jitter * (rng.random::<f32>() - 0.5)) * cell;
         let tuft_h = t.height.max(0.01) * (1.0 + t.height_variance * (rng.random::<f32>() * 2.0 - 1.0)).max(0.1);
@@ -529,15 +572,35 @@ fn lay_out(p: &CoverParams) -> Vec<Card> {
             };
             let (lx, lz) = if r > 1e-4 { (ox / r + rx, oz / r + rz) } else { (rx, rz) };
             let ll = (lx * lx + lz * lz).sqrt().max(1e-4);
-            let height = tuft_h * (1.0 + t.card_height_variance * (rng.random::<f32>() * 2.0 - 1.0)).max(0.2);
+            let mut height = tuft_h * (1.0 + t.card_height_variance * (rng.random::<f32>() * 2.0 - 1.0)).max(0.2);
+            let from_other = rng.random::<f32>() < p.colour.mix.clamp(0.0, 1.0);
+            let pool = match (flowers, dry) {
+                // A flowering tuft is flowers among grass: `mix` of its cards are plain.
+                (true, _) if !from_other => &pools.flower,
+                (true, _) => &pools.lush,
+                (false, true) if !from_other => &pools.dry,
+                (false, false) if from_other => &pools.dry,
+                _ => &pools.lush,
+            };
+            let pool = if pool.is_empty() { &pools.all } else { pool };
+            let mut cell_pick = pick(&mut rng, pool);
+            // Most of a flowering tuft's flowers are its drift's own kind.
+            if let Some(own) = kind
+                && pools.flower.iter().any(|e| e.0 == cell_pick)
+                && rng.random::<f32>() < DRIFT_LOYALTY
+            {
+                cell_pick = own;
+            }
+            // Flowers stand at full height: shrinking a flowering card into the
+            // understory would shrink its flowers with it.
+            let in_flower = pools.flower.iter().any(|e| e.0 == cell_pick);
+            if !in_flower && rng.random::<f32>() < t.understory.clamp(0.0, 1.0) {
+                height *= t.understory_height.clamp(0.05, 1.0);
+            }
             let lean = (t.lean_deg + t.lean_variance_deg * (rng.random::<f32>() * 2.0 - 1.0)).max(0.0);
             let curl = t.curl_deg * rng.random_range(0.6..=1.2);
             let twist = t.twist_deg * (rng.random::<f32>() * 2.0 - 1.0);
             let yaw = phase + std::f32::consts::PI * (k as f32 + rng.random_range(-0.3..=0.3)) / per_tuft as f32;
-            let from_other = rng.random::<f32>() < p.colour.mix.clamp(0.0, 1.0);
-            let pool = if dry != from_other { &pools.1 } else { &pools.0 };
-            let pool = if pool.is_empty() { &pools.2 } else { pool };
-            let cell_pick = pick(&mut rng, pool);
             cards.push(Card {
                 root: [cx + ox, 0.0, cz + oz],
                 height,
@@ -572,17 +635,115 @@ fn lay_out(p: &CoverParams) -> Vec<Card> {
 /// kind has none.
 type Pool = Vec<(u32, f32)>;
 
-fn cell_pools(p: &CoverParams) -> (Pool, Pool, Pool) {
-    let (mut lush, mut dry, mut all) = (Vec::new(), Vec::new(), Vec::new());
+/// The atlas cells by kind, with their weights.
+struct Pools {
+    lush: Pool,
+    dry: Pool,
+    flower: Pool,
+    /// Every cell, for when a kind has none.
+    all: Pool,
+}
+
+fn cell_pools(p: &CoverParams) -> Pools {
+    let mut pools = Pools { lush: Vec::new(), dry: Vec::new(), flower: Vec::new(), all: Vec::new() };
     for (i, c) in p.atlas.cells().iter().enumerate() {
         let entry = (i as u32, c.weight.max(0.0));
-        all.push(entry);
-        if c.dry { dry.push(entry) } else { lush.push(entry) }
+        pools.all.push(entry);
+        if c.flowers.is_some() {
+            pools.flower.push(entry);
+        } else if c.dry {
+            pools.dry.push(entry);
+        } else {
+            pools.lush.push(entry);
+        }
     }
-    if all.is_empty() {
-        all.push((0, 1.0));
+    if pools.all.is_empty() {
+        pools.all.push((0, 1.0));
     }
-    (lush, dry, all)
+    pools
+}
+
+/// Which tufts flower: the `flower_fraction` of them where a smooth noise over the
+/// clump is lowest, so they gather in drifts `flower_patch` metres across. Picked by
+/// rank rather than by a threshold on the noise, so the share is exact whatever the
+/// noise does.
+///
+/// Each flowering tuft also takes the flower its drift is of, from a second, coarser
+/// noise, so a clump holds a stand of lupins here and a patch of daisies there rather
+/// than every kind mixed everywhere.
+fn flowering(
+    p: &CoverParams,
+    spots: &[(f32, f32)],
+    cell: f32,
+    flowers: &[(u32, f32)],
+    rng: &mut PortableRng,
+) -> Vec<Option<u32>> {
+    let share = p.colour.flower_fraction.clamp(0.0, 1.0);
+    let wanted = (share * spots.len() as f32).round() as usize;
+    if wanted == 0 || flowers.is_empty() {
+        return vec![None; spots.len()];
+    }
+    let patch = p.colour.flower_patch.max(0.0);
+    let salt = rng.random::<u64>();
+    let kind_salt = rng.random::<u64>();
+    let total: f32 = flowers.iter().map(|e| e.1).sum::<f32>().max(1e-6);
+    let kind_at = |gx: f32, gz: f32, rng: &mut PortableRng| -> u32 {
+        let u = if patch <= 1e-3 {
+            rng.random::<f32>()
+        } else {
+            // Stretched, since value noise bunches toward the middle of its range and
+            // the kinds at either end would hardly ever be picked.
+            let n = value_noise((gx + 0.5) * cell / (patch * 1.5), (gz + 0.5) * cell / (patch * 1.5), kind_salt);
+            ((n - 0.5) * 1.8 + 0.5).clamp(0.0, 0.9999)
+        };
+        let mut x = u * total;
+        for &(i, w) in flowers {
+            if x < w {
+                return i;
+            }
+            x -= w;
+        }
+        flowers[flowers.len() - 1].0
+    };
+    let score: Vec<f32> = spots
+        .iter()
+        .map(|&(gx, gz)| {
+            if patch <= 1e-3 {
+                return rng.random();
+            }
+            let (x, z) = ((gx + 0.5) * cell / patch, (gz + 0.5) * cell / patch);
+            value_noise(x, z, salt) + 0.15 * rng.random::<f32>()
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..spots.len()).collect();
+    order.sort_by(|&a, &b| score[a].total_cmp(&score[b]));
+    let mut out = vec![None; spots.len()];
+    for &i in order.iter().take(wanted) {
+        let (gx, gz) = spots[i];
+        out[i] = Some(kind_at(gx, gz, rng));
+    }
+    out
+}
+
+/// Share of a flowering tuft's flower cards that are its drift's own kind.
+const DRIFT_LOYALTY: f32 = 0.8;
+
+/// Smooth noise in [0, 1): random values on a unit grid, blended between.
+fn value_noise(x: f32, z: f32, salt: u64) -> f32 {
+    let at = |ix: i32, iz: i32| -> f32 {
+        let mut h = salt ^ (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (iz as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        h ^= h >> 31;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 29;
+        (h >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let (x0, z0) = (x.floor(), z.floor());
+    let (fx, fz) = (x - x0, z - z0);
+    let (sx, sz) = (fx * fx * (3.0 - 2.0 * fx), fz * fz * (3.0 - 2.0 * fz));
+    let (ix, iz) = (x0 as i32, z0 as i32);
+    let top = at(ix, iz) + (at(ix + 1, iz) - at(ix, iz)) * sx;
+    let bottom = at(ix, iz + 1) + (at(ix + 1, iz + 1) - at(ix, iz + 1)) * sx;
+    top + (bottom - top) * sz
 }
 
 fn pick(rng: &mut PortableRng, pool: &[(u32, f32)]) -> u32 {
@@ -705,7 +866,7 @@ mod tests {
     fn the_clump_stands_on_the_ground_inside_its_footprint() {
         let p = parse_cover_template(MEADOW_GRASS_RON).unwrap().instance();
         let m = build_cover(&p);
-        let half = p.footprint.size * 0.5;
+        let half = p.footprint.size * (0.5 + p.footprint.overhang);
         for c in &m.cards {
             assert_eq!(c.root[1], 0.0);
             assert!(c.root[0].abs() <= half + p.tuft.radius && c.root[2].abs() <= half + p.tuft.radius);
@@ -728,6 +889,33 @@ mod tests {
         let mean = m.cards.len() as f32 / 4.0;
         for q in quads {
             assert!((q as f32 - mean).abs() < mean * 0.35, "quadrants {quads:?}");
+        }
+    }
+
+    #[test]
+    fn flowering_tufts_draw_flower_cells_and_come_in_the_share_asked_for() {
+        let p = parse_cover_template(WILDFLOWER_MEADOW_RON).unwrap().instance();
+        let m = build_cover(&p);
+        let flower_cells: Vec<u32> = p
+            .atlas
+            .cells()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.flowers.is_some())
+            .map(|(i, _)| i as u32)
+            .collect();
+        assert!(!flower_cells.is_empty());
+        let shown = m.cards.iter().filter(|c| flower_cells.contains(&c.cell)).count() as f32;
+        let share = shown / m.cards.len() as f32;
+        // Flowering tufts, less the cards of theirs that stray to plain grass.
+        let expect = p.colour.flower_fraction * (1.0 - p.colour.mix);
+        assert!((share - expect).abs() < 0.05, "{share:.3} of cards show flowers, expected about {expect:.3}");
+        // None of them is shrunk into the understory: each is at least as tall as the
+        // height variances alone allow.
+        let t = &p.tuft;
+        let shortest = t.height * (1.0 - t.height_variance) * (1.0 - t.card_height_variance);
+        for c in m.cards.iter().filter(|c| flower_cells.contains(&c.cell)) {
+            assert!(c.height >= shortest * 0.999, "a flowering card was shrunk to {}", c.height);
         }
     }
 

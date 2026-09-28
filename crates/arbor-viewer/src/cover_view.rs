@@ -11,7 +11,6 @@
 use std::path::Path;
 
 use arbor_core::blades::bake_blades;
-use arbor_core::cluster::Bitmap;
 use arbor_core::cover::{
     build_cover, builtin_cover_presets, parse_cover_template, CoverLod, CoverMesh, CUSTOM_COVER_DIR,
 };
@@ -24,10 +23,12 @@ use crate::knobs::{Group, Knob};
 
 /// Metres across the field preview, unless the panel says otherwise.
 pub const DEFAULT_FIELD: f32 = 20.0;
+/// Seeds of the preset planted among each other in the field.
+pub const DEFAULT_VARIANTS: usize = 4;
 /// How far a clump may stray from its grid square, as a share of the footprint, how
 /// far its size varies either way, and how the field's layout is seeded. Placement is
 /// the engine's business; these stand in for its rules.
-const PLANT_JITTER: f32 = 0.3;
+const PLANT_JITTER: f32 = 0.15;
 const PLANT_SCALE: f32 = 0.15;
 const PLANT_SEED: u64 = 0x5EED_F1E1_D000_0001;
 /// A colour per LOD, for the panel's "Colour LODs".
@@ -97,11 +98,13 @@ pub struct Plant {
     pub at: Vec3,
     pub yaw: f32,
     pub scale: f32,
+    /// Which of the clump's variants is planted here.
+    pub variant: usize,
 }
 
 /// Clumps over a square `size` metres across, one per footprint on a jittered grid,
 /// each turned and sized at random, as an engine plants them.
-pub fn plant(size: f32, footprint: f32) -> Vec<Plant> {
+pub fn plant(size: f32, footprint: f32, variants: usize) -> Vec<Plant> {
     use rand::{Rng, SeedableRng};
     let mut rng = arbor_core::seed::PortableRng::seed_from_u64(PLANT_SEED);
     let step = footprint.max(0.2);
@@ -117,6 +120,7 @@ pub fn plant(size: f32, footprint: f32) -> Vec<Plant> {
                 at: Vec3::new(x, 0.0, z),
                 yaw: rng.random_range(0.0..std::f32::consts::TAU),
                 scale: 1.0 + rng.random_range(-PLANT_SCALE..=PLANT_SCALE),
+                variant: rng.random_range(0..variants.max(1)),
             });
         }
     }
@@ -150,7 +154,12 @@ pub struct CoverScene {
     pub save_name: String,
     pub template: CoverTemplate,
     pub params: CoverParams,
+    /// The clump at the preset's own seed, which the panel reports on.
     pub mesh: CoverMesh,
+    /// The same preset at each seed after it, planted among it as an engine plants
+    /// several variants, so the field is not one clump repeated. The first is `mesh`.
+    pub variants: Vec<CoverMesh>,
+    pub variant_count: usize,
     pub plants: Vec<Plant>,
     pub field: f32,
     /// Draw every clump at this LOD rather than the one its size picks.
@@ -190,6 +199,8 @@ impl CoverScene {
             template,
             params,
             mesh,
+            variants: Vec::new(),
+            variant_count: DEFAULT_VARIANTS,
             plants: Vec::new(),
             field: DEFAULT_FIELD,
             force_lod: None,
@@ -225,16 +236,28 @@ impl CoverScene {
         let t = web_time::Instant::now();
         self.params = self.template.instance();
         self.mesh = build_cover(&self.params);
-        self.plants = plant(self.field, self.params.footprint.size);
+        self.variants = (1..self.variant_count.max(1))
+            .map(|i| {
+                let mut t = self.template.clone();
+                t.seed = self.template.seed.wrapping_add(i as u64);
+                build_cover(&t.instance())
+            })
+            .collect();
+        self.plants = plant(self.field, self.params.footprint.size, self.variant_count);
         self.shown.clear();
         self.field_dirty = true;
         self.dirty = false;
         self.gen_ms = t.elapsed().as_secs_f32() * 1000.0;
     }
 
+    /// The clump planted as variant `i`.
+    pub fn variant(&self, i: usize) -> &CoverMesh {
+        if i == 0 { &self.mesh } else { self.variants.get(i - 1).unwrap_or(&self.mesh) }
+    }
+
     /// Radius of the sphere round one clump.
     pub fn radius(&self) -> f32 {
-        let half = self.params.footprint.size * 0.5 + self.params.tuft.radius;
+        let half = self.params.footprint.size * (0.5 + self.params.footprint.overhang.max(0.0)) + self.params.tuft.radius;
         (2.0 * half * half + self.mesh.height * self.mesh.height).sqrt()
     }
 
@@ -263,33 +286,33 @@ impl CoverScene {
     pub fn field_stats(&self) -> (Vec<usize>, usize) {
         let mut per = vec![0; self.mesh.lods.len()];
         let mut tris = 0;
-        for &l in &self.shown {
+        for (plant, &l) in self.plants.iter().zip(&self.shown) {
             per[l] += 1;
-            tris += self.mesh.lods[l].triangle_count();
+            tris += self.variant(plant.variant).lods.get(l).map_or(0, |lod| lod.triangle_count());
         }
         (per, tris)
     }
 
     /// The field as one leaf mesh, every clump at the LOD `choose_lods` picked.
     pub fn field_mesh(&self) -> LeafMesh {
-        let cells = self.params.atlas.cells().len().max(1) as f32;
         let mut out = LeafMesh::default();
         for (plant, &level) in self.plants.iter().zip(&self.shown) {
-            let Some(lod) = self.mesh.lods.get(level) else { continue };
+            let mesh = self.variant(plant.variant);
+            let Some(lod) = mesh.lods.get(level) else { continue };
             let turn = Mat3::from_rotation_y(plant.yaw);
             let place = |p: [f32; 3]| (turn * Vec3::from(p) * plant.scale + plant.at).to_array();
             let tint = if self.tint_lods { LOD_TINTS[level.min(3)] } else { [1.0; 3] };
             let base = out.positions.len() as u32;
             for i in 0..lod.positions.len() {
                 let (card, t) = lod.sway[i];
-                let c = &self.mesh.cards[card as usize];
+                let c = &mesh.cards[card as usize];
                 let root = place(c.root);
                 out.positions.push(place(lod.positions[i]));
                 out.normals.push((turn * Vec3::from(lod.normals[i])).to_array());
-                // Card-local uvs, and the cell as an offset down the stacked atlas.
-                let cell = c.cell as f32;
-                out.uvs.push([lod.uvs[i][0] * cells - cell, lod.uvs[i][1]]);
-                out.atlas_v.push(cell / cells);
+                // The atlas as exported, read directly: the shader's cell offset and
+                // scale are left at nothing and one.
+                out.uvs.push(lod.uvs[i]);
+                out.atlas_v.push(0.0);
                 out.tints.push([tint[0], tint[1], tint[2], 1.0]);
                 out.origins.push(root);
                 // Bent about its root by its own weight, as the export tells the engine.
@@ -313,15 +336,13 @@ impl CoverScene {
         self.baked_atlas.as_ref() != Some(&self.params.atlas)
     }
 
-    /// Bakes the atlas and puts it on the GPU with its cells stacked one under another,
-    /// the layout the leaf shader reads variants in.
+    /// Bakes the atlas and puts it on the GPU, laid out as the export lays it out.
     pub unsafe fn bake_material(&mut self, gl: &glow::Context) -> MaterialTextures {
         let baked = bake_blades(&self.params.atlas);
         self.coverage = baked.coverage.clone();
         self.baked_atlas = Some(self.params.atlas.clone());
-        let n = self.params.atlas.cells().len().max(1) as u32;
-        let albedo = stack(&baked.maps.albedo, n);
-        let rough = baked.maps.roughness.as_ref().map(|r| stack(r, n));
+        let albedo = baked.maps.albedo;
+        let rough = baked.maps.roughness;
         unsafe {
             MaterialTextures {
                 albedo: gpu::create_cutout_texture(gl, &albedo.pixels, albedo.width, albedo.height),
@@ -335,9 +356,8 @@ impl CoverScene {
     }
 
     pub fn leaf_params(&self, translucency: f32, coverage_lod: f32) -> LeafMaterialParams {
-        let n = self.params.atlas.cells().len().max(1) as f32;
         LeafMaterialParams {
-            atlas_scale: [1.0, 1.0 / n],
+            atlas_scale: [1.0, 1.0],
             atlas_front: [0.0, 0.0],
             atlas_back: [0.0, 0.0],
             alpha_cutoff: LEAF_ALPHA_CUTOFF,
@@ -351,21 +371,6 @@ impl CoverScene {
             self_shadow: 1.0,
         }
     }
-}
-
-/// A row of cells as a column of them.
-fn stack(row: &Bitmap, n: u32) -> Bitmap {
-    let cw = row.width / n.max(1);
-    let ch = row.height;
-    let mut px = vec![0u8; (cw * ch * n * 4) as usize];
-    for i in 0..n {
-        for y in 0..ch {
-            let src = ((y * row.width + i * cw) * 4) as usize;
-            let dst = (((i * ch + y) * cw) * 4) as usize;
-            px[dst..dst + (cw * 4) as usize].copy_from_slice(&row.pixels[src..src + (cw * 4) as usize]);
-        }
-    }
-    Bitmap::from_rgba(cw, ch * n, px).expect("sized to fit")
 }
 
 // ---------------------------------------------------------------------------------
@@ -385,6 +390,7 @@ pub static FOOTPRINT: Group<CoverTemplate> = Group {
     knobs: &[
         knob("Size", (0.5, 4.0), "Metres across the square one clump covers. The engine plants clumps this far apart.", |p| &mut p.footprint.size),
         knob("Tufts", (4.0, 200.0), "Tufts in one clump, spread over its footprint.", |p| &mut p.footprint.tufts),
+        knob("Overhang", (0.0, 0.5), "How far tufts run past the edge of the square, thinning out, so clumps planted at a random turn overlap rather than leaving bare corners.", |p| &mut p.footprint.overhang),
         knob("Jitter", (0.0, 1.0), "How far a tuft strays from its own grid square. 0 plants a grid; 1 anywhere in the square.", |p| &mut p.footprint.jitter),
     ],
     counts: &[],
@@ -402,6 +408,8 @@ pub static TUFT: Group<CoverTemplate> = Group {
         knob("Lean variance", (0.0, 40.0), "Spread of that lean, in degrees.", |p| &mut p.tuft.lean_variance_deg),
         knob("Curl", (-30.0, 90.0), "Degrees a card bends further by its tip: the arch of long grass.", |p| &mut p.tuft.curl_deg),
         knob("Twist", (0.0, 90.0), "Degrees a card turns about its length from root to tip.", |p| &mut p.tuft.twist_deg),
+        knob("Understory", (0.0, 1.0), "Share of cards drawn short: the low layer of leaves under the tall ones, which hides the ground.", |p| &mut p.tuft.understory),
+        knob("Understory height", (0.05, 1.0), "Height of those short cards against the rest.", |p| &mut p.tuft.understory_height),
     ],
     counts: &[],
 };
@@ -413,6 +421,8 @@ pub static CARD: Group<CoverTemplate> = Group {
         knob("Width at top", (0.5, 2.0), "Width at the tip against width at the root.", |p| &mut p.card.width_top),
         knob("Dry tufts", (0.0, 1.0), "Share of tufts that draw from the dry cells.", |p| &mut p.colour.dry_fraction),
         knob("Mix", (0.0, 1.0), "Share of a tuft's cards that stray to the other kind of cell.", |p| &mut p.colour.mix),
+        knob("Flowering tufts", (0.0, 1.0), "Share of tufts drawing from the cells with wildflowers in them.", |p| &mut p.colour.flower_fraction),
+        knob("Flower drift", (0.0, 3.0), "Metres across the drifts flowering tufts gather in. 0 scatters them tuft by tuft.", |p| &mut p.colour.flower_patch),
         knob("Ground normal blend", (0.0, 1.0), "How far shading normals lean from the card to straight up. High reads as one lit surface; low as speckle.", |p| &mut p.normals.ground_normal_blend),
         knob("Root blend", (0.0, 0.5), "Metres above the root the engine blends into the terrain colour. Exported only; the viewer does not draw it.", |p| &mut p.normals.root_blend),
     ],
@@ -480,7 +490,8 @@ mod tests {
 
     #[test]
     fn the_field_fills_its_square_one_clump_per_footprint() {
-        let plants = plant(20.0, 1.5);
+        let plants = plant(20.0, 1.5, 3);
+        assert!(plants.iter().all(|p| p.variant < 3));
         assert_eq!(plants.len(), 13 * 13);
         assert!(plants.iter().all(|p| p.at.x.abs() < 11.0 && p.at.z.abs() < 11.0));
     }
@@ -488,7 +499,7 @@ mod tests {
     #[test]
     fn far_clumps_take_coarser_lods() {
         let (mut scene, _) = CoverScene::new(None);
-        scene.field = 120.0;
+        scene.field = 240.0;
         scene.rebuild();
         scene.choose_lods(Vec3::new(0.0, 1.7, 0.0), 50f32.to_radians());
         let (per, _) = scene.field_stats();
@@ -508,6 +519,6 @@ mod tests {
             assert_eq!(len, n);
         }
         assert!(m.indices.iter().all(|&i| (i as usize) < n));
-        assert!(m.uvs.iter().all(|uv| (-1e-4..=1.0001).contains(&uv[0])), "card-local u runs 0 to 1");
+        assert!(m.uvs.iter().all(|uv| (-1e-4..=1.0001).contains(&uv[0])), "atlas u runs 0 to 1");
     }
 }
