@@ -4,7 +4,7 @@
 //! is nine spherical-harmonic coefficients worked out on the CPU, in `lighting.rs` for
 //! the procedural sky and `hdri.rs` for a photograph.
 
-use eframe::glow::{self, HasContext};
+use glow::{self, HasContext};
 use glam::Vec3;
 
 use crate::gpu::compile_program;

@@ -8,7 +8,7 @@
 //! lit from behind glow, and a shadow keep the colour of the sky it is lit by, instead
 //! of everything above white being clipped and everything below a hand-tuned floor.
 
-use eframe::glow::{self, HasContext};
+use glow::{self, HasContext};
 use glam::{Mat3, Mat4, Vec3, Vec4};
 
 use crate::gpu::{compile_program, GpuLeaves, LeafMaterialParams, MaterialTextures, WindUniforms};

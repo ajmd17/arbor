@@ -1,0 +1,14 @@
+[package]
+name = "arbor-render"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "OpenGL renderer for arbor trees, cover and rocks: PBR, shadows, image-based lighting, wind."
+
+[dependencies]
+arbor-core.workspace = true
+glow.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+image.workspace = true
+web-time.workspace = true

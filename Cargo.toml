@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/arbor-core", "crates/arbor-viewer", "crates/arbor-cli"]
+members = ["crates/arbor-core", "crates/arbor-render", "crates/arbor-viewer", "crates/arbor-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -31,3 +31,4 @@ ehttp = "0.5"
 log = "0.4"
 
 arbor-core = { path = "crates/arbor-core" }
+arbor-render = { path = "crates/arbor-render" }

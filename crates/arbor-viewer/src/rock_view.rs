@@ -14,7 +14,7 @@ use arbor_core::rocks::{
 use arbor_core::{Mesh, Ranged};
 use eframe::glow;
 
-use crate::gpu::{self, BarkLook, MaterialTextures};
+use arbor_render::gpu::{self, BarkLook, MaterialTextures};
 use crate::knobs::{Group, Knob};
 
 /// Texels a side the maps are baked at while the sliders move, and at most once they

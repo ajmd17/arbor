@@ -3,16 +3,9 @@
 mod assets;
 mod cover_view;
 mod export;
-mod gpu;
-mod hdri;
-mod ibl;
 mod knobs;
-mod lighting;
-mod mipmap;
 mod presets;
-mod render;
 mod rock_view;
-mod shaders;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -29,13 +22,14 @@ use arbor_core::{
 };
 
 use arbor_core::textures::MapSource as _;
-use gpu::{
+use arbor_render::{gpu, hdri, render};
+use arbor_render::gpu::{
     ColorPass, DepthPass, GpuBackdrop, GpuGround, GpuLeaves, GpuLines, GpuMesh, GroundDrawParams,
     GroundMode, LeafDepthPass, LeafDrawParams, LeafMaterialParams, MaterialTextures,
     MeshDrawParams, ShadowTarget, WindUniforms,
 };
-use lighting::{sh9_cached, shadow_frustum, SkyParams};
-use render::{Lighting, PostSettings, Renderer, Tonemap};
+use arbor_render::lighting::{sh9_cached, shadow_frustum, SkyParams};
+use arbor_render::render::{Lighting, PostSettings, Renderer, Tonemap};
 
 const TEXTURE_DIR: &str = arbor_core::textures::TEXTURE_DIR;
 

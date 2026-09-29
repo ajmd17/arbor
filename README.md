@@ -16,7 +16,8 @@ I didn't want to pay for SpeedTree.
 | Crate | What it is |
 | --- | --- |
 | `arbor-core` | The model: growth, meshing, foliage, cluster baking, ground cover, rocks. No GL, no windowing. |
-| `arbor-viewer` | An OpenGL viewer (eframe/egui + glow) with live parameter sliders. |
+| `arbor-render` | The OpenGL renderer as a library: PBR, shadows, image-based lighting, wind. Takes a `glow::Context`, no UI toolkit. |
+| `arbor-viewer` | A viewer (eframe/egui) built on `arbor-render` with live parameter sliders. |
 | `arbor-cli` | Grows a tree, a ground cover clump (`cover`) or a rock (`rock`) from the terminal, prints stats, optionally writes an OBJ or glTF. |
 
 Species are plain RON files in `assets/species`, compiled in as the built-in
