@@ -1,0 +1,62 @@
+// A block of bedded stone, low and wide: flat top and crisp, chipped edges, its layers
+// standing out by uneven amounts as plates down its sides and across its top, crossed by
+// a joint or two, moss creeping over it in patches.
+// Any number in shape, surface or moss may be a (lo, hi) range: each seed lands in it.
+(
+    name: "slab",
+    seed: 1,
+    shape: (
+        width: (2.2, 3.0),
+        height: (0.6, 0.9),
+        depth: (1.6, 2.2),
+        facets: (10.0, 14.0),
+        facet_depth: (0.4, 0.5),
+        sharpness: (35.0, 55.0),
+        wear: 0.8,
+        bulge: 0.03,
+        bulge_scale: 1.0,
+        undulation: 0.04,
+        chips: (0.03, 0.05),
+        chip_size: 0.16,
+        flaking: 0.9,
+        flake_step: 0.018,
+        flake_size: 0.4,
+        bedded: 0.8,
+        fracture: 0.06,
+        flat_top: 0.6,
+        flat_bottom: 0.35,
+        bury: 0.15,
+    ),
+    surface: (
+        grain: 0.001,
+        pitting: 0.1,
+        cracks: (1.0, 3.0),
+        crack_width: 0.006,
+        strata: 0.6,
+        cavity: 1.2,
+    ),
+    moss: (
+        amount: (-0.3, 0.0),
+        upward: 0.9,
+        patchiness: 0.9,
+        softness: 0.25,
+        crevices: 0.45,
+        dry: 0.35,
+    ),
+    colour: (
+        stone: (0.42, 0.42, 0.40),
+        warm: (0.48, 0.45, 0.41),
+        tone: 0.35,
+        streaks: 0.3,
+        lichen: 0.25,
+    ),
+    lod: [
+        (triangles: 1600, screen_size: 0.0),
+        (triangles: 600, screen_size: 0.3),
+        (triangles: 200, screen_size: 0.12),
+        (triangles: 70, screen_size: 0.05),
+    ],
+    texture: (
+        size: 2048,
+    ),
+)

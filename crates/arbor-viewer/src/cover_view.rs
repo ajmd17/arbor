@@ -389,7 +389,7 @@ pub static FOOTPRINT: Group<CoverTemplate> = Group {
     title: "Footprint",
     knobs: &[
         knob("Size", (0.5, 4.0), "Metres across the square one clump covers. The engine plants clumps this far apart.", |p| &mut p.footprint.size),
-        knob("Tufts", (4.0, 200.0), "Tufts in one clump, spread over its footprint.", |p| &mut p.footprint.tufts),
+        knob("Tufts", (1.0, 200.0), "Tufts in one clump, spread over its footprint.", |p| &mut p.footprint.tufts),
         knob("Overhang", (0.0, 0.5), "How far tufts run past the edge of the square, thinning out, so clumps planted at a random turn overlap rather than leaving bare corners.", |p| &mut p.footprint.overhang),
         knob("Jitter", (0.0, 1.0), "How far a tuft strays from its own grid square. 0 plants a grid; 1 anywhere in the square.", |p| &mut p.footprint.jitter),
     ],
@@ -410,6 +410,7 @@ pub static TUFT: Group<CoverTemplate> = Group {
         knob("Twist", (0.0, 90.0), "Degrees a card turns about its length from root to tip.", |p| &mut p.tuft.twist_deg),
         knob("Understory", (0.0, 1.0), "Share of cards drawn short: the low layer of leaves under the tall ones, which hides the ground.", |p| &mut p.tuft.understory),
         knob("Understory height", (0.05, 1.0), "Height of those short cards against the rest.", |p| &mut p.tuft.understory_height),
+        knob("Rosette", (0.0, 1.0), "0 fans a tuft's cards as grass; 1 spreads them evenly round the middle, each facing along its own arch, as a fern's fronds are.", |p| &mut p.tuft.rosette),
     ],
     counts: &[],
 };
@@ -419,6 +420,7 @@ pub static CARD: Group<CoverTemplate> = Group {
     knobs: &[
         knob("Width", (0.3, 2.0), "Card width against the width that keeps atlas pixels square.", |p| &mut p.card.width),
         knob("Width at top", (0.5, 2.0), "Width at the tip against width at the root.", |p| &mut p.card.width_top),
+        knob("Fold", (0.0, 1.0), "How far a card's edges stand up from its middle, as a share of its half width: the shallow V along a frond's rachis. 0 is flat.", |p| &mut p.card.fold),
         knob("Dry tufts", (0.0, 1.0), "Share of tufts that draw from the dry cells.", |p| &mut p.colour.dry_fraction),
         knob("Mix", (0.0, 1.0), "Share of a tuft's cards that stray to the other kind of cell.", |p| &mut p.colour.mix),
         knob("Flowering tufts", (0.0, 1.0), "Share of tufts drawing from the cells with wildflowers in them.", |p| &mut p.colour.flower_fraction),

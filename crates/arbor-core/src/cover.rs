@@ -27,6 +27,9 @@ pub const MEADOW_GRASS_RON: &str = include_str!("../../../assets/cover/meadow_gr
 pub const SHORT_GRASS_RON: &str = include_str!("../../../assets/cover/short_grass.ron");
 pub const DRY_GRASS_RON: &str = include_str!("../../../assets/cover/dry_grass.ron");
 pub const WILDFLOWER_MEADOW_RON: &str = include_str!("../../../assets/cover/wildflower_meadow.ron");
+pub const LADY_FERN_RON: &str = include_str!("../../../assets/cover/lady_fern.ron");
+pub const BRACKEN_RON: &str = include_str!("../../../assets/cover/bracken.ron");
+pub const SWORD_FERN_RON: &str = include_str!("../../../assets/cover/sword_fern.ron");
 
 /// Where presets saved from the viewer go, and are found by name from the CLI.
 pub const CUSTOM_COVER_DIR: &str = "assets/cover/custom";
@@ -37,6 +40,9 @@ pub fn builtin_cover_presets() -> Vec<(&'static str, &'static str)> {
         ("short_grass", SHORT_GRASS_RON),
         ("dry_grass", DRY_GRASS_RON),
         ("wildflower_meadow", WILDFLOWER_MEADOW_RON),
+        ("lady_fern", LADY_FERN_RON),
+        ("bracken", BRACKEN_RON),
+        ("sword_fern", SWORD_FERN_RON),
     ]
 }
 
@@ -228,6 +234,11 @@ pub struct TuftParams<V = f32> {
     /// shows between the stems of anything tall.
     pub understory: V,
     pub understory_height: V,
+    /// How far a tuft is laid out as a fern's crown rather than a grass fan, 0 to 1: its
+    /// cards spread evenly round the middle, each leaning straight out and turned to
+    /// face along its own lean, so an arching card lies open to the sky as a frond does
+    /// rather than standing edge on.
+    pub rosette: V,
 }
 
 impl Default for TuftParams {
@@ -244,6 +255,7 @@ impl Default for TuftParams {
             twist_deg: 20.0,
             understory: 0.0,
             understory_height: 0.35,
+            rosette: 0.0,
         }
     }
 }
@@ -266,6 +278,7 @@ impl<V: Scalar> TuftParams<V> {
             twist_deg: f(&key(at, "twist_deg"), self.twist_deg),
             understory: f(&key(at, "understory"), self.understory),
             understory_height: f(&key(at, "understory_height"), self.understory_height),
+            rosette: f(&key(at, "rosette"), self.rosette),
         }
     }
 }
@@ -282,11 +295,14 @@ pub struct CardParams<V = f32> {
     pub width: V,
     /// Width at the top against width at the root. Grass fans out, so a little above 1.
     pub width_top: V,
+    /// How far the card's edges stand up from its middle, as a share of its half width:
+    /// a frond is a shallow V along its rachis. 0 keeps a card flat, two vertices across.
+    pub fold: V,
 }
 
 impl Default for CardParams {
     fn default() -> Self {
-        Self { width: 1.0, width_top: 1.15 }
+        Self { width: 1.0, width_top: 1.15, fold: 0.0 }
     }
 }
 
@@ -299,6 +315,7 @@ impl<V: Scalar> CardParams<V> {
         CardParams {
             width: f(&key(at, "width"), self.width),
             width_top: f(&key(at, "width_top"), self.width_top),
+            fold: f(&key(at, "fold"), self.fold),
         }
     }
 }
@@ -497,7 +514,13 @@ pub fn build_cover(p: &CoverParams) -> CoverMesh {
                 if card.keep >= share {
                     continue;
                 }
-                card_mesh(&mut out, i as u32, card, segments, l.width.max(0.05), p.card.width_top, cells, blend);
+                let shape = CardShape {
+                    segments,
+                    width_scale: l.width.max(0.05),
+                    width_top: p.card.width_top,
+                    fold: p.card.fold.clamp(0.0, 2.0),
+                };
+                card_mesh(&mut out, i as u32, card, &shape, cells, blend);
                 out.card_count += 1;
             }
             out
@@ -600,13 +623,31 @@ fn lay_out(p: &CoverParams) -> Vec<Card> {
             let lean = (t.lean_deg + t.lean_variance_deg * (rng.random::<f32>() * 2.0 - 1.0)).max(0.0);
             let curl = t.curl_deg * rng.random_range(0.6..=1.2);
             let twist = t.twist_deg * (rng.random::<f32>() * 2.0 - 1.0);
-            let yaw = phase + std::f32::consts::PI * (k as f32 + rng.random_range(-0.3..=0.3)) / per_tuft as f32;
+            let slot = k as f32 + rng.random_range(-0.3..=0.3);
+            let mut yaw = phase + std::f32::consts::PI * slot / per_tuft as f32;
+            let (mut root_off, mut lean_dir) = ([ox, oz], [lx / ll, lz / ll]);
+            let rosette = t.rosette.clamp(0.0, 1.0);
+            if rosette > 0.0 {
+                // A crown goes all the way round, where a fan goes half way: each card
+                // is seen from above, and one side of a frond is not the other.
+                let out = phase * 2.0 + std::f32::consts::TAU * slot / per_tuft as f32;
+                let (sn, cs) = out.sin_cos();
+                root_off = [ox + (r * cs - ox) * rosette, oz + (r * sn - oz) * rosette];
+                let d = [lean_dir[0] + (cs - lean_dir[0]) * rosette, lean_dir[1] + (sn - lean_dir[1]) * rosette];
+                let dl = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-4);
+                lean_dir = [d[0] / dl, d[1] / dl];
+                // Across the card square to its lean, the one of the two ways round
+                // nearest the fan's, turned toward it by the rosette.
+                let facing = lean_dir[1].atan2(lean_dir[0]) + std::f32::consts::FRAC_PI_2;
+                let wrap = |a: f32| (a + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::PI) - std::f32::consts::FRAC_PI_2;
+                yaw += wrap(facing - yaw) * rosette;
+            }
             cards.push(Card {
-                root: [cx + ox, 0.0, cz + oz],
+                root: [cx + root_off[0], 0.0, cz + root_off[1]],
                 height,
                 width: height * aspect * width_k,
                 yaw,
-                lean_dir: [lx / ll, lz / ll],
+                lean_dir,
                 lean: lean.to_radians(),
                 curl: curl.to_radians(),
                 twist: twist.to_radians(),
@@ -761,18 +802,18 @@ fn pick(rng: &mut PortableRng, pool: &[(u32, f32)]) -> u32 {
     pool[pool.len() - 1].0
 }
 
-/// One card, bent up its spine in `segments` steps.
-#[allow(clippy::too_many_arguments)]
-fn card_mesh(
-    out: &mut CoverLod,
-    index: u32,
-    c: &Card,
+/// How a LOD draws each card.
+struct CardShape {
     segments: u32,
     width_scale: f32,
     width_top: f32,
-    cells: u32,
-    blend: f32,
-) {
+    fold: f32,
+}
+
+/// One card, bent up its spine in `segments` steps: two vertices across it, or three
+/// when it is folded, the middle one down its spine.
+fn card_mesh(out: &mut CoverLod, index: u32, c: &Card, shape: &CardShape, cells: u32, blend: f32) {
+    let CardShape { segments, width_scale, width_top, fold } = *shape;
     let up = glam::Vec3::Y;
     let lean_dir = glam::Vec3::new(c.lean_dir[0], 0.0, c.lean_dir[1]);
     let root = glam::Vec3::from(c.root);
@@ -804,8 +845,21 @@ fn card_mesh(
         let tangent = (across - normal * across.dot(normal)).normalize_or(across);
         let w = if normal.cross(tangent).dot(along) >= 0.0 { 1.0 } else { -1.0 };
         let v = 1.0 - t;
-        for (side, u) in [(-1.0f32, u0), (1.0, u0 + du)] {
-            out.positions.push((spine + across * (half * side)).to_array());
+        // Folded: the edges stand up off the face, the way the face looks, so a card
+        // lying open to the sky is a shallow trough rather than a flat blade.
+        let lift = if face.dot(glam::Vec3::Y) >= 0.0 { face } else { -face };
+        let column = |side: f32| {
+            // Flat at the root, which stands on the ground.
+            let edge = if fold > 0.0 { lift * (half * fold * (t / 0.15).min(1.0) * side.abs()) } else { glam::Vec3::ZERO };
+            spine + across * (half * side) + edge
+        };
+        let row: &[(f32, f32)] = if fold > 0.0 {
+            &[(-1.0, u0), (0.0, u0 + 0.5 * du), (1.0, u0 + du)]
+        } else {
+            &[(-1.0, u0), (1.0, u0 + du)]
+        };
+        for &(side, u) in row {
+            out.positions.push(column(side).to_array());
             out.normals.push(normal.to_array());
             out.tangents.push([tangent.x, tangent.y, tangent.z, w]);
             out.uvs.push([u, v]);
@@ -813,9 +867,13 @@ fn card_mesh(
             out.sway.push((index, t));
         }
     }
+    let across = if fold > 0.0 { 3 } else { 2 };
     for k in 0..segments {
-        let a = base + 2 * k;
-        out.indices.extend_from_slice(&[a, a + 1, a + 3, a, a + 3, a + 2]);
+        for j in 0..across - 1 {
+            let a = base + across * k + j;
+            let b = a + across;
+            out.indices.extend_from_slice(&[a, a + 1, b + 1, a, b + 1, b]);
+        }
     }
 }
 
@@ -929,6 +987,40 @@ mod tests {
             assert!(n.y > 0.5, "normal {n} barely leans up");
             assert!(glam::Vec3::new(t[0], t[1], t[2]).dot(n).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn a_fern_crown_goes_all_the_way_round_and_its_cards_face_the_sky() {
+        let p = parse_cover_template(LADY_FERN_RON).unwrap().instance();
+        let m = build_cover(&p);
+        // Leans spread over every quarter, where a grass fan only covers half a turn.
+        let mut quarters = [0usize; 4];
+        for c in &m.cards {
+            let a = c.lean_dir[1].atan2(c.lean_dir[0]).rem_euclid(std::f32::consts::TAU);
+            quarters[((a / std::f32::consts::FRAC_PI_2) as usize).min(3)] += 1;
+        }
+        assert!(quarters.iter().all(|&q| q > 0), "{quarters:?}");
+        // Each card turned square to its lean, so an arching frond lies open.
+        for c in &m.cards {
+            let across = [c.yaw.cos(), c.yaw.sin()];
+            let dot = across[0] * c.lean_dir[0] + across[1] * c.lean_dir[1];
+            assert!(dot.abs() < 1e-3, "card across its lean by {dot}");
+        }
+        // Folded cards carry a middle column: three vertices a row.
+        let lod = &m.lods[0];
+        let segments = p.lod[0].segments.round() as usize;
+        assert_eq!(lod.positions.len(), lod.card_count * (segments + 1) * 3);
+    }
+
+    #[test]
+    fn a_grass_preset_builds_the_same_clump_it_always_did() {
+        // Rosette and fold are off for grass, and add no draws, so seeds keep their
+        // clumps: two vertices across every card, cards fanned half a turn.
+        let p = parse_cover_template(MEADOW_GRASS_RON).unwrap().instance();
+        assert_eq!((p.tuft.rosette, p.card.fold), (0.0, 0.0));
+        let m = build_cover(&p);
+        let segments = p.lod[0].segments.round() as usize;
+        assert_eq!(m.lods[0].positions.len(), m.lods[0].card_count * (segments + 1) * 2);
     }
 
     #[test]

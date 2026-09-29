@@ -20,6 +20,7 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::cluster::{bleed_color_outward, BakedMaps, Bitmap};
+use crate::ferns::{fronds, FrondParams};
 use crate::flowers::{flower, FlowerParams};
 use crate::seed::PortableRng;
 
@@ -105,6 +106,9 @@ pub struct BladeCell {
     /// Wildflowers standing among the blades, if this is a flowering cell. A cell with
     /// flowers is drawn by flowering tufts rather than lush or dry ones.
     pub flowers: Option<FlowerParams>,
+    /// A fern frond laid over the cell, in front of any blades. A fern's cells are
+    /// usually fronds alone, with `count` at 0.
+    pub frond: Option<FrondParams>,
     pub seed: u64,
 }
 
@@ -141,6 +145,7 @@ impl Default for BladeCell {
             head: [0.64, 0.57, 0.36],
             roughness: 0.62,
             flowers: None,
+            frond: None,
             seed: 11,
         }
     }
@@ -499,6 +504,29 @@ fn bake_cell(c: &BladeCell, w: u32, h: u32, seed: u64) -> Cell {
                     },
                 ));
             }
+        }
+    }
+
+    if let Some(f) = &c.frond {
+        // In front of everything else in the cell, painted in the order they come.
+        for (k, shape) in fronds(f, &mut rng, wf, hf, MARGIN).into_iter().enumerate() {
+            strokes.push((
+                2.0 + k as f32 * 1e-6,
+                Stroke {
+                    spine: shape.spine,
+                    half: shape.half,
+                    root: shape.root,
+                    tip: shape.tip,
+                    burn_from: 2.0,
+                    burn: shape.tip,
+                    value: 1.0,
+                    root_shade: shape.root_shade,
+                    tilt: shape.tilt,
+                    roughness: shape.roughness,
+                    mottle: (0.0, [0.0; 4]),
+                    detail: shape.detail,
+                },
+            ));
         }
     }
 

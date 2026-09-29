@@ -641,6 +641,7 @@ uniform float u_roughness;
 uniform float u_metallic;
 uniform int u_mode;
 uniform int u_use_normal_map;
+uniform float u_baked_occlusion;
 uniform sampler2D u_albedo_tex;
 uniform sampler2D u_normal_tex;
 uniform sampler2D u_rough_tex;
@@ -665,8 +666,12 @@ void main() {
         out_color = vec4(N * 0.5 + 0.5, 1.0);
         return;
     }
+    // Occlusion baked into the maps, where they carry it: the green of the roughness
+    // map, as the viewer packs a rock's.
+    vec2 rough_tex = texture(u_rough_tex, v_uv).rg;
+    float baked_ao = mix(1.0, rough_tex.g, u_baked_occlusion);
     if (u_mode == 3) {
-        out_color = vec4(vec3(screen_ao() * canopy_sky(v_world)), 1.0);
+        out_color = vec4(vec3(screen_ao() * canopy_sky(v_world) * baked_ao), 1.0);
         return;
     }
     vec3 albedo = texture(u_albedo_tex, v_uv).rgb * u_albedo_color;
@@ -692,14 +697,14 @@ void main() {
         float moss = u_moss_amount * low * facing * facing * smoothstep(0.35, 0.75, mottle);
         albedo = mix(albedo, u_moss_color, clamp(moss, 0.0, 1.0));
     }
-    float rough = clamp(texture(u_rough_tex, v_uv).r * u_roughness, 0.045, 1.0);
+    float rough = clamp(rough_tex.r * u_roughness, 0.045, 1.0);
     rough = filtered_roughness(rough, Ng);
     Surface s = surface(albedo, clamp(u_metallic, 0.0, 1.0), rough, N, V);
 
     float NoL = dot(Ng, u_sun_dir);
     float shadow = NoL > -0.05 ? soft_shadow(v_shadow, max(NoL, 0.0), 0.03, 16) : 0.0;
     vec3 color = direct(s, u_sun_dir) * u_sun_color * shadow
-        + ambient(s, Ng, screen_ao() * canopy_sky(v_world));
+        + ambient(s, Ng, screen_ao() * canopy_sky(v_world) * baked_ao);
     out_color = vec4(color * u_exposure, 1.0);
 }"#;
 

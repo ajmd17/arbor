@@ -44,7 +44,7 @@
         (cards: 0.2, segments: 1, width: 1.9, screen_size: 0.035),
     ],
     atlas: (
-        cell_height: 1024,
+        cell_height: 512,
         cell_aspect: 0.5,
         cells: [
             (
