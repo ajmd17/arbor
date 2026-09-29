@@ -13,3 +13,10 @@ egui_glow.workspace = true
 glow.workspace = true
 glam.workspace = true
 image.workspace = true
+rfd.workspace = true
+gltf = { version = "1.4.1", features = ["KHR_materials_emissive_strength", "allow_empty_texture", "extensions"] }
+basisu = "0.1"
+ktx2 = "0.5"
+ruzstd = "0.7"
+base64 = "0.22"
+urlencoding = "2"

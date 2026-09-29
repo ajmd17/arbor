@@ -247,6 +247,17 @@ impl ViewMode {
     }
 }
 
+/// Which faces of a mesh a draw keeps, where the material has not settled it alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sides {
+    /// What the material says: both if it is double-sided, else the front ones.
+    Material,
+    /// Only the faces turned away from the camera.
+    Back,
+    /// Only the faces turned toward it.
+    Front,
+}
+
 /// One mesh with the material it is drawn in and where it stands.
 pub struct PbrItem<'a> {
     pub mesh: &'a PbrMesh,
@@ -398,13 +409,27 @@ impl PbrRenderer {
             // Cut-outs with the opaque ones; what blends goes last, over them.
             let blended = |i: &&PbrItem| i.material.alpha_mode == AlphaMode::Blend;
             for item in frame.items.iter().filter(|i| !blended(i)) {
-                self.draw_lit(gl, item, frame, &lighting);
+                self.draw_lit(gl, item, frame, &lighting, Sides::Material);
             }
+            // Blending has to go far to near, and without writing depth, so that what is
+            // behind still shows through. A double-sided mesh is drawn inside first and
+            // then out, or its inner surfaces would land on top of its outer ones.
+            let mut far_to_near: Vec<&PbrItem> = frame.items.iter().filter(blended).collect();
+            let distance = |i: &PbrItem| {
+                let (lo, hi) = i.bounds();
+                ((lo + hi) * 0.5 - lighting.cam_pos).length_squared()
+            };
+            far_to_near.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
             gl.enable(glow::BLEND);
             gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
             gl.depth_mask(false);
-            for item in frame.items.iter().filter(blended) {
-                self.draw_lit(gl, item, frame, &lighting);
+            for item in far_to_near {
+                if item.material.double_sided {
+                    self.draw_lit(gl, item, frame, &lighting, Sides::Back);
+                    self.draw_lit(gl, item, frame, &lighting, Sides::Front);
+                } else {
+                    self.draw_lit(gl, item, frame, &lighting, Sides::Material);
+                }
             }
             gl.depth_mask(true);
             gl.disable(glow::BLEND);
@@ -454,7 +479,7 @@ impl PbrRenderer {
         }
     }
 
-    unsafe fn draw_lit(&self, gl: &glow::Context, item: &PbrItem, frame: &PbrFrame, lighting: &Lighting) {
+    unsafe fn draw_lit(&self, gl: &glow::Context, item: &PbrItem, frame: &PbrFrame, lighting: &Lighting, sides: Sides) {
         let m = item.material;
         unsafe {
             gl.use_program(Some(self.lit));
@@ -489,11 +514,16 @@ impl PbrRenderer {
             }
             gl.active_texture(glow::TEXTURE0);
 
-            if m.double_sided {
-                gl.disable(glow::CULL_FACE);
-            } else {
-                gl.enable(glow::CULL_FACE);
-                gl.cull_face(glow::BACK);
+            match (sides, m.double_sided) {
+                (Sides::Material, true) => gl.disable(glow::CULL_FACE),
+                (Sides::Material | Sides::Front, _) => {
+                    gl.enable(glow::CULL_FACE);
+                    gl.cull_face(glow::BACK);
+                }
+                (Sides::Back, _) => {
+                    gl.enable(glow::CULL_FACE);
+                    gl.cull_face(glow::FRONT);
+                }
             }
             // A mirroring transform turns every triangle inside out.
             gl.front_face(if item.model.determinant() < 0.0 { glow::CW } else { glow::CCW });

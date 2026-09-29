@@ -17,7 +17,7 @@ I didn't want to pay for SpeedTree.
 | --- | --- |
 | `arbor-core` | The model: growth, meshing, foliage, cluster baking, ground cover, rocks. No GL, no windowing. |
 | `arbor-render` | The OpenGL renderer as a library: PBR, shadows, image-based lighting, wind. Takes a `glow::Context`, no UI toolkit. |
-| `arbor-paint` | A texture painter on `arbor-render`: lit viewport, orbit camera, lighting and channel views. Model loading and painting are on the way. |
+| `arbor-paint` | A texture painter on `arbor-render`: loads glTF, bakes mesh maps (AO, curvature, thickness, normals, position, ID) into the model's own UVs, and shows them on it. Painting is on the way. |
 | `arbor-viewer` | A viewer (eframe/egui) built on `arbor-render` with live parameter sliders. |
 | `arbor-cli` | Grows a tree, a ground cover clump (`cover`) or a rock (`rock`) from the terminal, prints stats, optionally writes an OBJ or glTF. |
 

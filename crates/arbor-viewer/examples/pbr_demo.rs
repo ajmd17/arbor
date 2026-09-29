@@ -128,6 +128,14 @@ impl Scene {
                 ..Default::default()
             },
             PbrMaterial {
+                base_color: [0.3, 0.9, 0.5, 0.35],
+                metallic: 0.0,
+                roughness: 0.1,
+                alpha_mode: AlphaMode::Blend,
+                double_sided: true,
+                ..Default::default()
+            },
+            PbrMaterial {
                 base_color: [0.6, 0.6, 0.58, 1.0],
                 metallic: 0.0,
                 roughness: 0.9,
@@ -140,7 +148,7 @@ impl Scene {
             renderer: PbrRenderer::new(gl, 2048),
             meshes: vec![ball, floor],
             materials,
-            models: vec![at(-1.2), at(0.0) , at(1.2), Mat4::from_scale(Vec3::new(4.0, 1.0, 3.0))],
+            models: vec![at(-1.2), at(0.0), at(1.2), Mat4::from_translation(Vec3::new(-0.6, 0.6, 0.6)) * Mat4::from_scale(Vec3::splat(0.9)), Mat4::from_scale(Vec3::new(4.0, 1.0, 3.0))],
         }
     }
 }
@@ -199,7 +207,7 @@ impl eframe::App for Demo {
                     ];
                     let mut s = scene.lock().unwrap();
                     let s = &mut *s;
-                    let items: Vec<PbrItem> = [(0, 0), (0, 1), (0, 2), (1, 3)]
+                    let items: Vec<PbrItem> = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 4)]
                         .iter()
                         .zip(&s.models)
                         .map(|(&(mesh, mat), &model)| PbrItem { mesh: &s.meshes[mesh], material: &s.materials[mat], model })
