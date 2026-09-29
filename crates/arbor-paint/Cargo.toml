@@ -1,0 +1,15 @@
+[package]
+name = "arbor-paint"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "A texture painter built on arbor-render."
+
+[dependencies]
+arbor-render.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_glow.workspace = true
+glow.workspace = true
+glam.workspace = true
+image.workspace = true

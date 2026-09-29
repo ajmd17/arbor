@@ -1559,3 +1559,166 @@ pub fn composite_fs() -> String {
     format!("#version 150
 {COMMON_GLSL}{COMPOSITE_FS_BODY}")
 }
+
+// ---------------------------------------------------------------------------------
+// The generic glTF-style metallic-roughness surface: any mesh, any material, none of the
+// tree's weathering or wind. Vertex attributes are bound in the order
+// `pbr::PBR_ATTRIBS` names them.
+// ---------------------------------------------------------------------------------
+
+const PBR_VS: &str = r#"#version 150
+in vec3 a_pos;
+in vec3 a_normal;
+in vec2 a_uv;
+in vec4 a_tangent;
+in vec4 a_color;
+uniform mat4 u_view_proj;
+uniform mat4 u_model;
+uniform mat3 u_normal_mat;
+uniform mat4 u_light_view_proj;
+uniform float u_normal_bias;
+out vec3 v_world;
+out vec3 v_normal;
+out vec2 v_uv;
+out vec4 v_tangent;
+out vec4 v_color;
+out vec4 v_shadow;
+void main() {
+    vec4 world = u_model * vec4(a_pos, 1.0);
+    vec3 n = normalize(u_normal_mat * a_normal);
+    v_world = world.xyz;
+    v_normal = n;
+    v_uv = a_uv;
+    v_tangent = vec4(mat3(u_model) * a_tangent.xyz, a_tangent.w);
+    v_color = a_color;
+    v_shadow = u_light_view_proj * vec4(world.xyz + n * u_normal_bias, 1.0);
+    gl_Position = u_view_proj * world;
+}"#;
+
+pub fn pbr_vs() -> &'static str {
+    PBR_VS
+}
+
+/// Position only, for the shadow map, the camera's depth and the wireframe.
+pub const PBR_DEPTH_VS: &str = r#"#version 150
+in vec3 a_pos;
+uniform mat4 u_view_proj;
+uniform mat4 u_model;
+void main() {
+    gl_Position = u_view_proj * u_model * vec4(a_pos, 1.0);
+}"#;
+
+/// Cut-outs have to cut the shadow and the depth as well, so the depth pass samples the
+/// base colour's alpha too.
+pub const PBR_DEPTH_MASK_VS: &str = r#"#version 150
+in vec3 a_pos;
+in vec2 a_uv;
+in vec4 a_color;
+uniform mat4 u_view_proj;
+uniform mat4 u_model;
+out vec2 v_uv;
+out float v_vertex_alpha;
+void main() {
+    v_uv = a_uv;
+    v_vertex_alpha = a_color.a;
+    gl_Position = u_view_proj * u_model * vec4(a_pos, 1.0);
+}"#;
+
+pub const PBR_DEPTH_MASK_FS: &str = r#"#version 150
+in vec2 v_uv;
+in float v_vertex_alpha;
+uniform sampler2D u_base_tex;
+uniform float u_base_alpha;
+uniform float u_alpha_cutoff;
+out vec4 out_color;
+void main() {
+    if (texture(u_base_tex, v_uv).a * u_base_alpha * v_vertex_alpha < u_alpha_cutoff) {
+        discard;
+    }
+    out_color = vec4(1.0);
+}"#;
+
+const PBR_FS_BODY: &str = r#"in vec3 v_world;
+in vec3 v_normal;
+in vec2 v_uv;
+in vec4 v_tangent;
+in vec4 v_color;
+in vec4 v_shadow;
+uniform vec4 u_base_factor;
+uniform vec2 u_mr_factor;
+uniform vec3 u_emissive_factor;
+uniform float u_normal_scale;
+uniform float u_occlusion_strength;
+uniform float u_alpha_cutoff;
+// 0 opaque, 1 mask, 2 blend.
+uniform int u_alpha_mode;
+uniform int u_double_sided;
+uniform int u_has_normal;
+// See `pbr::ViewMode`.
+uniform int u_mode;
+uniform sampler2D u_base_tex;
+uniform sampler2D u_normal_tex;
+uniform sampler2D u_mr_tex;
+uniform sampler2D u_occlusion_tex;
+uniform sampler2D u_emissive_tex;
+out vec4 out_color;
+
+vec3 srgb_encode(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+void main() {
+    vec4 base = texture(u_base_tex, v_uv) * u_base_factor * v_color;
+    if (u_alpha_mode == 1 && base.a < u_alpha_cutoff) {
+        discard;
+    }
+    vec3 Ng = normalize(v_normal);
+    if (u_double_sided == 1 && !gl_FrontFacing) {
+        Ng = -Ng;
+    }
+    vec3 N = Ng;
+    if (u_has_normal == 1) {
+        vec3 T = v_tangent.xyz - Ng * dot(Ng, v_tangent.xyz);
+        // A degenerate tangent (no UVs, or a collapsed triangle) leaves the normal alone.
+        if (dot(T, T) > 1e-10) {
+            T = normalize(T);
+            vec3 B = cross(Ng, T) * v_tangent.w;
+            vec3 nm = texture(u_normal_tex, v_uv).xyz * 2.0 - 1.0;
+            nm.xy *= u_normal_scale;
+            N = normalize(T * nm.x + B * nm.y + Ng * nm.z);
+        }
+    }
+    vec4 mr = texture(u_mr_tex, v_uv);
+    float rough = clamp(mr.g * u_mr_factor.y, 0.045, 1.0);
+    float metallic = clamp(mr.b * u_mr_factor.x, 0.0, 1.0);
+    float occlusion = 1.0 + u_occlusion_strength * (texture(u_occlusion_tex, v_uv).r - 1.0);
+    vec3 emissive = texture(u_emissive_tex, v_uv).rgb * u_emissive_factor;
+
+    // The debug views write display colours, which the composite passes through.
+    if (u_mode == 1) { out_color = vec4(srgb_encode(base.rgb), 1.0); return; }
+    if (u_mode == 2) { out_color = vec4(srgb_encode(vec3(rough)), 1.0); return; }
+    if (u_mode == 3) { out_color = vec4(srgb_encode(vec3(metallic)), 1.0); return; }
+    if (u_mode == 4) { out_color = vec4(N * 0.5 + 0.5, 1.0); return; }
+    if (u_mode == 5) { out_color = vec4(srgb_encode(vec3(occlusion)), 1.0); return; }
+    if (u_mode == 6) { out_color = vec4(srgb_encode(emissive), 1.0); return; }
+    if (u_mode == 7) {
+        float c = mod(floor(v_uv.x * 8.0) + floor(v_uv.y * 8.0), 2.0);
+        out_color = vec4(mix(vec3(0.85, 0.85, 0.9), vec3(0.3, 0.55, 0.85), c), 1.0);
+        return;
+    }
+    if (u_mode == 8) { out_color = vec4(srgb_encode(vec3(screen_ao())), 1.0); return; }
+
+    vec3 V = normalize(u_cam_pos - v_world);
+    Surface s = surface(base.rgb, metallic, filtered_roughness(rough, Ng), N, V);
+    float NoL = dot(Ng, u_sun_dir);
+    float shadow = NoL > -0.05 ? soft_shadow(v_shadow, max(NoL, 0.0), 0.03, 16) : 0.0;
+    vec3 color = direct(s, u_sun_dir) * u_sun_color * shadow
+        + ambient(s, Ng, screen_ao() * occlusion)
+        + emissive;
+    out_color = vec4(color * u_exposure, u_alpha_mode == 2 ? base.a : 1.0);
+}"#;
+
+pub fn pbr_fs() -> String {
+    lit(PBR_FS_BODY)
+}

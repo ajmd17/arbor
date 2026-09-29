@@ -163,7 +163,46 @@ pub struct CanopyPlacement {
     pub heights: [f32; 2],
 }
 
+impl Default for PostSettings {
+    fn default() -> Self {
+        Self {
+            tonemap: Tonemap::Neutral,
+            bloom: 0.04,
+            ao: true,
+            ao_radius: 0.5,
+            ao_power: 1.0,
+            samples: 4,
+        }
+    }
+}
+
 impl Lighting {
+    /// Lit by the procedural sky alone, at the exposure that sky asks for, `ev` stops
+    /// up or down. The shadow and occlusion fields are filled in per frame by whoever
+    /// draws.
+    pub fn procedural(sky: SkyParams, cam_pos: Vec3, ev: f32) -> Self {
+        Self {
+            sky,
+            photo: false,
+            sh: crate::lighting::sh9_cached(&sky),
+            env_rotation: 0.0,
+            env_intensity: 1.0,
+            sun_dir: sky.sun_dir,
+            sun_color: sky.sun_color,
+            sun_radius: 0.53f32.to_radians() * 0.5,
+            shadow_softness: 1.0,
+            exposure: sky.exposure() * 2f32.powf(ev),
+            cam_pos,
+            ground_projection: None,
+            background_blur: 0.0,
+            shadow: crate::lighting::shadow_frustum(([0.0; 3], [1.0; 3]), sky.sun_dir, 1),
+            shadow_size: 1,
+            normal_bias: 0.0,
+            ao_texel: [0.0, 0.0],
+            canopy: CanopyPlacement::default(),
+        }
+    }
+
     /// Sets whichever of these uniforms `program` kept; the compiler drops the rest.
     pub unsafe fn bind(&self, gl: &glow::Context, program: glow::Program) {
         unsafe {

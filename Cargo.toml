@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/arbor-core", "crates/arbor-render", "crates/arbor-viewer", "crates/arbor-cli"]
+members = ["crates/arbor-core", "crates/arbor-render", "crates/arbor-paint", "crates/arbor-viewer", "crates/arbor-cli"]
 
 [workspace.package]
 version = "0.1.0"
