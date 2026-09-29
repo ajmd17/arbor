@@ -22,8 +22,6 @@
 
 use image::{imageops, Rgba, RgbaImage};
 
-#[path = "../src/mipmap.rs"]
-mod mipmap;
 #[path = "common/texture.rs"]
 mod texture;
 use texture::{open, save};

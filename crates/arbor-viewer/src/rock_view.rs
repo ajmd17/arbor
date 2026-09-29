@@ -13,7 +13,7 @@ use arbor_core::rocks::{
 use arbor_core::{Mesh, Ranged};
 use eframe::glow;
 
-use crate::gpu::{self, BarkLook, MaterialTextures};
+use arbor_render::gpu::{self, BarkLook, MaterialTextures};
 use crate::knobs::{Group, Knob};
 
 /// Texels per face edge the preview's maps are baked at.

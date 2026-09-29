@@ -18,7 +18,7 @@ use arbor_core::{BladeAtlasParams, CoverParams, CoverTemplate, LeafMesh, Ranged}
 use eframe::glow;
 use glam::{Mat3, Vec3};
 
-use crate::gpu::{self, LeafMaterialParams, MaterialTextures, LEAF_ALPHA_CUTOFF};
+use arbor_render::gpu::{self, LeafMaterialParams, MaterialTextures, LEAF_ALPHA_CUTOFF};
 use crate::knobs::{Group, Knob};
 
 /// Metres across the field preview, unless the panel says otherwise.

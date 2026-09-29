@@ -6,6 +6,7 @@ authors.workspace = true
 
 [dependencies]
 arbor-core.workspace = true
+arbor-render.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_glow.workspace = true

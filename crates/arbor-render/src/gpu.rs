@@ -1,6 +1,6 @@
 use bytemuck::cast_slice;
-use eframe::glow;
-use eframe::glow::HasContext;
+use glow;
+use glow::HasContext;
 use glam::{Mat4, Vec3};
 
 use arbor_core::cluster::Bitmap;

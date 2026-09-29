@@ -4,8 +4,7 @@
 //!
 //! cargo run --release -p arbor-viewer --example alpha_coverage_report -- assets/textures/leaf_oak_albedo.png [cutoff]
 
-#[path = "../src/mipmap.rs"]
-mod mipmap;
+use arbor_render::mipmap;
 
 fn main() {
     let path = std::env::args()

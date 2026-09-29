@@ -9,13 +9,7 @@
 //! with the sun it found marked, which is the quickest way to check that the sun came
 //! from the sun and not from a bright window.
 
-// Shared with the viewer, which uses parts of them this does not.
-#[path = "../src/hdri.rs"]
-#[allow(dead_code)]
-mod hdri;
-#[path = "../src/lighting.rs"]
-#[allow(dead_code)]
-mod lighting;
+use arbor_render::{hdri, lighting};
 
 use glam::Vec3;
 use hdri::{Equirect, HDRI_DIR};
