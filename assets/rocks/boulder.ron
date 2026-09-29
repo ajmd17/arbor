@@ -1,0 +1,48 @@
+// A granite boulder, about 2 m across: broad faces meeting at worn edges, grey with a
+// warmer cast in places, lichen on the stone and moss only along its top.
+// Any number in shape, surface or moss may be a (lo, hi) range: each seed lands in it.
+(
+    name: "boulder",
+    seed: 1,
+    shape: (
+        width: (1.6, 2.4),
+        height: (1.0, 1.5),
+        depth: (1.3, 1.9),
+        facets: (9.0, 13.0),
+        facet_depth: (0.3, 0.4),
+        sharpness: (28.0, 45.0),
+        bulge: 0.07,
+        bulge_scale: 1.3,
+        ridges: 0.03,
+        fracture: 0.02,
+        flat_bottom: 0.3,
+        bury: 0.12,
+    ),
+    surface: (
+        grain: 0.01,
+        cracks: 0.014,
+        crack_spread: 0.5,
+        strata: 0.004,
+        cavity: 1.0,
+    ),
+    moss: (
+        amount: (-0.1, 0.15),
+        upward: 1.1,
+        patchiness: 0.8,
+        softness: 0.22,
+        crevices: 0.3,
+        dry: 0.3,
+    ),
+    colour: (
+        stone: (0.47, 0.47, 0.46),
+        warm: (0.50, 0.47, 0.42),
+    ),
+    lod: [
+        (resolution: 40, screen_size: 0.0),
+        (resolution: 20, screen_size: 0.15),
+        (resolution: 10, screen_size: 0.05),
+    ],
+    texture: (
+        resolution: 512,
+    ),
+)

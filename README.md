@@ -1,6 +1,8 @@
 # Arbor
 
 Procedural tree model generator in Rust. Aim is to generate ~7k-20k tri models.
+It also makes the things that grow and lie around trees: ground cover (grasses,
+wildflowers and ferns) and rocks.
 
 ![screenshot](docs/screenshot.png)
 
@@ -13,9 +15,9 @@ I didn't want to pay for SpeedTree.
 
 | Crate | What it is |
 | --- | --- |
-| `arbor-core` | The model: growth, meshing, foliage, cluster baking. No GL, no windowing. |
+| `arbor-core` | The model: growth, meshing, foliage, cluster baking, ground cover, rocks. No GL, no windowing. |
 | `arbor-viewer` | An OpenGL viewer (eframe/egui + glow) with live parameter sliders. |
-| `arbor-cli` | Grows a tree from the terminal, prints stats, optionally writes an OBJ or glTF. |
+| `arbor-cli` | Grows a tree, a ground cover clump (`cover`) or a rock (`rock`) from the terminal, prints stats, optionally writes an OBJ or glTF. |
 
 Species are plain RON files in `assets/species`, compiled in as the built-in
 presets. Presets saved from the viewer's panel (**Save as**) go to
@@ -80,6 +82,8 @@ Ground cover: `--cover <preset>` opens in ground cover mode, with the clump plan
 over a field; `--cover-view <eye|far>` picks the eye-height or 45 m viewpoint,
 `--field <metres>` the size of the field, and `--lod-tint` colours each clump by the
 LOD its screen size picks (white, red, blue).
+
+Rocks: `--rock <preset>` opens in rock mode.
 
 A screenshot is taken in still air unless `--wind` asks otherwise, and then on a
 stopped clock (`--wind-time`, default 0), so the same command always gives the same
@@ -251,6 +255,54 @@ To sway a vertex, start at its row with its `t`. The stem there swings the verte
 its pivot by `reach × cantilever(t) × flexibility[order + 1]` metres, where
 `cantilever(x) = x²(6 − 4x + x²)/3`. Then move to the carrying stem's row and its
 `t`, and repeat until row 0.
+
+## Ground cover
+
+A clump of ground cover is a square of tufts, each a fan of cards showing cells of a
+baked atlas, for an engine to plant tens of thousands of times. Presets live in
+`assets/cover`: `meadow_grass`, `short_grass`, `dry_grass`, `wildflower_meadow`, and
+three ferns.
+
+- **Ferns** (`lady_fern`, `bracken`, `sword_fern`) are atlas cells with a `frond` in
+  them: a pinnate leaf painted from the same strokes as grass blades, with pinnae paired
+  up a rachis and cut into pinnules as far as `division` says (0 for a sword fern's
+  whole leaflets, 1 for a lady fern's lace). Their tufts set `rosette`, which spreads
+  the cards evenly round the crown, each facing along its own arch, and their cards set
+  `fold`, a shallow V along the rachis. Both are 0 for grass, which builds exactly as it
+  did before they existed.
+
+```bash
+cargo run --release -p arbor-cli -- cover lady_fern --seed 3 --variations 4 --atlas
+```
+
+Each clump is written with its LODs (`MSFT_lod`), its atlas, and the `ARBOR_tree_wind`
+and `ARBOR_ground_cover` extensions an engine needs to sway it and plant it.
+
+## Rocks
+
+A rock is a sphere cut by a handful of planes (`facets`, `facet_depth`, softened by
+`sharpness`), swelled and dented by noise, stepped into ledges across its bedding
+(`fracture`), cut flat underneath and sunk a little below its origin (`bury`), so one
+set on the ground already sits in it. Its maps are painted from the same surface at
+far finer detail: grain, cracks and strata only the maps carry, speckle, lichen and
+water streaks on the stone, occlusion in the hollows, and moss where the stone faces
+up, in its cracks and creeping up from the ground (`moss.amount` runs from none at -1
+to nearly all of it at 1). Presets live in `assets/rocks`: `boulder`,
+`mossy_boulder`, `slab` and `stone`. Any number in `shape`, `surface` or `moss` may be
+a range.
+
+```bash
+cargo run --release -p arbor-cli -- rock boulder --seed 7 --variations 10 --maps
+```
+
+The mesh is a cube pushed out to the surface, so there is nothing to unwrap: the maps
+are the cube's six faces in a three by two sheet, each padded by carrying the face on
+past its edge. Every seed is its own stone, maps and all. The export carries its LODs
+by `MSFT_lod`, the standard metallic-roughness material with occlusion packed into the
+red of the roughness map, and `ARBOR_rock` on every primitive: `bury` and `height` in
+metres, and `lods`, the screen size each LOD takes over at. The viewer bakes its maps
+at 256 texels a face while the sliders move; an export bakes them at the preset's
+`texture.resolution`.
 
 ## Tools
 

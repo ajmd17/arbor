@@ -45,6 +45,8 @@ use crate::wind::{SwayAt, SwayField, SwayStem};
 
 mod cover;
 pub use cover::{cover_glb, export_cover_batch, write_cover, CoverTextures, GROUND_COVER_EXTENSION};
+mod rock;
+pub use rock::{export_rock_batch, rock_glb, write_rock, RockTextures, ROCK_EXTENSION};
 
 /// The viewer's alpha test on leaf cards.
 pub const LEAF_ALPHA_CUTOFF: f32 = 0.35;

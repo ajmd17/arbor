@@ -1,0 +1,50 @@
+// A boulder on a damp woodland floor: rounder, darker stone, mossed over its top and
+// down its sides, the moss drying paler in patches.
+// Any number in shape, surface or moss may be a (lo, hi) range: each seed lands in it.
+(
+    name: "mossy_boulder",
+    seed: 1,
+    shape: (
+        width: (1.4, 2.2),
+        height: (0.9, 1.4),
+        depth: (1.2, 1.8),
+        facets: (8.0, 11.0),
+        facet_depth: (0.2, 0.3),
+        sharpness: (10.0, 18.0),
+        bulge: 0.09,
+        bulge_scale: 1.2,
+        ridges: 0.03,
+        fracture: 0.015,
+        flat_bottom: 0.3,
+        bury: 0.18,
+    ),
+    surface: (
+        grain: 0.01,
+        cracks: 0.012,
+        crack_spread: 0.4,
+        strata: 0.003,
+        cavity: 1.0,
+    ),
+    moss: (
+        amount: (0.35, 0.6),
+        upward: 1.0,
+        patchiness: 0.9,
+        softness: 0.25,
+        crevices: 0.45,
+        dry: 0.25,
+    ),
+    colour: (
+        stone: (0.40, 0.41, 0.40),
+        warm: (0.44, 0.42, 0.38),
+        lichen: 0.25,
+        streaks: 0.35,
+    ),
+    lod: [
+        (resolution: 40, screen_size: 0.0),
+        (resolution: 20, screen_size: 0.15),
+        (resolution: 10, screen_size: 0.05),
+    ],
+    texture: (
+        resolution: 512,
+    ),
+)

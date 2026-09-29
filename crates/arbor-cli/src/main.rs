@@ -13,6 +13,10 @@ fn main() {
         cover_main(&args[1..]);
         return;
     }
+    if args[0] == "rock" {
+        rock_main(&args[1..]);
+        return;
+    }
 
     let mut species_src: Option<String> = None;
     let mut seed_override: Option<u64> = None;
@@ -288,6 +292,148 @@ fn print_usage() {
     println!("          [--out DIR] [--gltf] [--atlas]");
     println!("Builds a ground cover clump and writes it, LODs and blade atlas inside, to");
     println!("DIR/<name>.glb (exports/ by default). --atlas also writes the atlas as PNGs.");
+    println!();
+    let rocks: Vec<&str> = arbor_core::rocks::builtin_rock_presets().into_iter().map(|(n, _)| n).collect();
+    println!(
+        "arbor-cli rock <{}|saved-preset|path/to/rock.ron> [--seed N] [--variations N]",
+        rocks.join("|")
+    );
+    println!("          [--out DIR] [--gltf] [--maps]");
+    println!("Builds a rock and writes it, LODs and baked maps inside, to DIR/<name>.glb");
+    println!("(exports/ by default). Every seed is its own stone, maps and all. --maps also");
+    println!("writes the maps as PNGs.");
+}
+
+/// `arbor-cli rock <preset> [--seed N] [--variations N] [--out DIR] [--gltf] [--maps]`
+fn rock_main(args: &[String]) {
+    use arbor_core::rocks::{bake_rock, build_rock, builtin_rock_presets, parse_rock_template, CUSTOM_ROCK_DIR};
+
+    let mut src: Option<String> = None;
+    let mut seed: Option<u64> = None;
+    let mut variations: u32 = 1;
+    let mut out = std::path::PathBuf::from("exports");
+    let mut format = gltf::Format::Glb;
+    let mut maps = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seed" => {
+                i += 1;
+                seed = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--variations" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse::<u32>().ok()) {
+                    Some(n) if n >= 1 => variations = n,
+                    _ => {
+                        eprintln!("--variations needs a count of one or more");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--out" => {
+                i += 1;
+                match args.get(i) {
+                    Some(dir) => out = dir.into(),
+                    None => {
+                        eprintln!("--out needs a folder");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--gltf" => format = gltf::Format::Gltf,
+            "--maps" => maps = true,
+            "--help" | "-h" => {
+                print_usage();
+                return;
+            }
+            other => src = Some(other.to_string()),
+        }
+        i += 1;
+    }
+
+    let src = src.unwrap_or_else(|| "boulder".to_string());
+    let saved = std::path::Path::new(CUSTOM_ROCK_DIR).join(format!("{src}.ron"));
+    let text = match builtin_rock_presets().into_iter().find(|(n, _)| *n == src) {
+        Some((_, text)) => text.to_string(),
+        None if saved.is_file() => std::fs::read_to_string(&saved).unwrap_or_else(|e| {
+            eprintln!("cannot read {}: {e}", saved.display());
+            std::process::exit(1);
+        }),
+        None => std::fs::read_to_string(&src).unwrap_or_else(|e| {
+            eprintln!("cannot read rock preset '{src}': {e}");
+            std::process::exit(1);
+        }),
+    };
+    let mut template = parse_rock_template(&text).unwrap_or_else(|e| {
+        eprintln!("rock preset parse error: {e}");
+        std::process::exit(1);
+    });
+    if let Some(seed) = seed {
+        template.seed = seed;
+    }
+    let params = template.instance();
+
+    let t = std::time::Instant::now();
+    let mesh = build_rock(&params);
+    println!("rock:    {}", params.name);
+    println!("seed:    {}", params.seed);
+    for (key, range, landed) in template.landings() {
+        println!("  {key} = {landed:.4} (of {} to {})", range.lo(), range.hi());
+    }
+    let size: Vec<String> = (0..3).map(|k| format!("{:.2}", mesh.max[k] - mesh.min[k])).collect();
+    println!("size:    {} m, {:.2} m of it buried", size.join(" x "), -mesh.min[1].min(0.0));
+    for (i, lod) in mesh.lods.iter().enumerate() {
+        println!("LOD{i}:    {} tris, from screen size {}", lod.triangle_count(), lod.screen_size);
+    }
+    println!("gen:     {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+
+    if maps {
+        let t = std::time::Instant::now();
+        let baked = bake_rock(&params);
+        std::fs::create_dir_all(&out).ok();
+        for (map, bitmap) in [("albedo", &baked.albedo), ("normal", &baked.normal), ("orm", &baked.orm)] {
+            let path = out.join(format!("{}_{map}.png", params.name));
+            let png = arbor_core::textures::encode_png(bitmap).unwrap_or_else(|e| {
+                eprintln!("encoding {map}: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&path, png).unwrap_or_else(|e| {
+                eprintln!("{}: {e}", path.display());
+                std::process::exit(1);
+            });
+            println!("maps:    {}", path.display());
+        }
+        println!("bake:    {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    let t = std::time::Instant::now();
+    let report = gltf::export_rock_batch(&out, &params.name, format, &template, variations, |done| {
+        if variations > 1 {
+            eprint!("\rexporting {done}/{variations}");
+        }
+        true
+    });
+    if variations > 1 {
+        eprintln!();
+    }
+    match report {
+        Ok(report) => {
+            let what = match report.trees.as_slice() {
+                [one] => one.display().to_string(),
+                all => format!("{} rocks, {} to {}", all.len(), all[0].display(), all[all.len() - 1].display()),
+            };
+            println!(
+                "gltf:    {what} ({:.1} MB, {:.0} ms)",
+                report.bytes as f64 / 1e6,
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Err(e) => {
+            eprintln!("rock export failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// `arbor-cli cover <preset> [--seed N] [--variations N] [--out DIR] [--gltf] [--atlas]`

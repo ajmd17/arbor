@@ -1,0 +1,48 @@
+// A loose stone, 30 to 60 cm: for scattering round the foot of bigger rocks and along
+// paths. Coarser mesh and a smaller texture, since there will be many of them.
+// Any number in shape, surface or moss may be a (lo, hi) range: each seed lands in it.
+(
+    name: "stone",
+    seed: 1,
+    shape: (
+        width: (0.35, 0.6),
+        height: (0.2, 0.35),
+        depth: (0.3, 0.5),
+        facets: (7.0, 10.0),
+        facet_depth: (0.2, 0.35),
+        sharpness: (14.0, 26.0),
+        bulge: 0.08,
+        bulge_scale: 1.4,
+        ridges: 0.03,
+        fracture: 0.015,
+        flat_bottom: 0.25,
+        bury: 0.15,
+    ),
+    surface: (
+        grain: 0.012,
+        cracks: 0.01,
+        crack_spread: 0.4,
+        strata: 0.003,
+        cavity: 1.0,
+    ),
+    moss: (
+        amount: (-0.3, 0.1),
+        upward: 1.1,
+        patchiness: 1.0,
+        softness: 0.2,
+        crevices: 0.3,
+        dry: 0.3,
+    ),
+    colour: (
+        stone: (0.46, 0.45, 0.43),
+        warm: (0.50, 0.46, 0.40),
+    ),
+    lod: [
+        (resolution: 20, screen_size: 0.0),
+        (resolution: 10, screen_size: 0.08),
+        (resolution: 5, screen_size: 0.03),
+    ],
+    texture: (
+        resolution: 256,
+    ),
+)

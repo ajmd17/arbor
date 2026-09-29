@@ -11,6 +11,7 @@ mod lighting;
 mod mipmap;
 mod presets;
 mod render;
+mod rock_view;
 mod shaders;
 
 use std::path::Path;
@@ -103,13 +104,17 @@ struct Startup {
     /// Ground cover: tint each clump by its LOD, and the field's size.
     lod_tint: bool,
     field: Option<f32>,
+    /// Open in rock mode, on this preset.
+    rock: Option<String>,
 }
 
-/// What the viewer is showing: a tree, or a clump of ground cover planted over a field.
+/// What the viewer is showing: a tree, a clump of ground cover planted over a field, or
+/// a rock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ViewMode {
     Tree,
     Cover,
+    Rock,
 }
 
 /// The two places ground cover is looked at from: standing in it, and from far enough
@@ -239,6 +244,7 @@ fn main() -> eframe::Result<()> {
         }),
         lod_tint: args.iter().any(|a| a == "--lod-tint"),
         field: num("--field"),
+        rock: flag("--rock").cloned(),
     };
 
     let options = eframe::NativeOptions {
@@ -504,6 +510,9 @@ struct App {
     cover: cover_view::CoverScene,
     cover_gpu: Arc<Mutex<GpuLeaves>>,
     cover_material: Option<MaterialTextures>,
+    rock: rock_view::RockScene,
+    rock_gpu: Arc<Mutex<GpuMesh>>,
+    rock_material: Option<MaterialTextures>,
 }
 
 impl App {
@@ -558,6 +567,11 @@ impl App {
         let (cover, cover_problem) = cover_view::CoverScene::new(startup.cover.as_deref());
         if cover_problem.is_some() {
             status = cover_problem.map(|m| (m, true));
+        }
+        let rock_gpu = GpuMesh::new(&gl);
+        let (rock, rock_problem) = rock_view::RockScene::new(startup.rock.as_deref());
+        if rock_problem.is_some() {
+            status = rock_problem.map(|m| (m, true));
         }
         // The real maps are put in by `sync_materials` below, at once on the desktop and
         // once they have been fetched on the web.
@@ -652,13 +666,26 @@ impl App {
             wind_direction: DEFAULT_WIND_DIRECTION,
             wind_clock: 0.0,
             wind_paused: false,
-            view: if startup.cover.is_some() { ViewMode::Cover } else { ViewMode::Tree },
+            view: if startup.rock.is_some() {
+                ViewMode::Rock
+            } else if startup.cover.is_some() {
+                ViewMode::Cover
+            } else {
+                ViewMode::Tree
+            },
             cover,
             cover_gpu: Arc::new(Mutex::new(cover_gpu)),
             cover_material: None,
+            rock,
+            rock_gpu: Arc::new(Mutex::new(rock_gpu)),
+            rock_material: None,
         };
         if app.view == ViewMode::Cover {
             app.cover_camera(startup.cover_camera.unwrap_or(CoverCamera::Eye));
+            app.ground = Ground::Plain;
+        }
+        if app.view == ViewMode::Rock {
+            app.rock_camera();
             app.ground = Ground::Plain;
         }
         app.cover.tint_lods = startup.lod_tint;
@@ -1009,6 +1036,192 @@ impl App {
             let field = self.cover.field_mesh();
             self.cover_gpu.lock().unwrap().upload(&self.gl, &field);
         }
+    }
+
+    /// Frames the rock from a little above, a few of its own sizes off.
+    fn rock_camera(&mut self) {
+        let (lo, hi) = self.rock.aabb();
+        let size = (Vec3::from(hi) - Vec3::from(lo)).max_element().max(0.2);
+        self.camera.target = Vec3::new(0.0, hi[1] * 0.4, 0.0);
+        self.camera.distance = size * 1.8;
+        self.camera.pitch = 0.3;
+        self.camera.yaw = 0.6;
+        self.auto_frame = false;
+    }
+
+    /// Keeps rock mode up to date: the rock rebuilt when its preset changed, and its maps
+    /// baked again when the rock they were baked for has changed.
+    fn sync_rock(&mut self) {
+        if self.rock.dirty {
+            self.rock.rebuild();
+        }
+        if self.rock.mesh_dirty {
+            let mesh = self.rock.gpu_mesh();
+            self.rock_gpu.lock().unwrap().upload(&self.gl, &mesh);
+            self.rock.mesh_dirty = false;
+        }
+        if self.rock.maps_stale() {
+            if let Some(old) = self.rock_material.take() {
+                old.delete(&self.gl);
+            }
+            self.rock_material = Some(unsafe { self.rock.bake_material(&self.gl) });
+        }
+    }
+
+    /// The panel in rock mode.
+    fn rock_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut picked = None;
+        let current = self
+            .rock
+            .preset
+            .map_or_else(|| "(unsaved)".to_string(), |i| self.rock.presets[i].name.clone());
+        egui::ComboBox::from_label("Preset").selected_text(current).show_ui(ui, |ui| {
+            let mut saved_heading = false;
+            for (i, preset) in self.rock.presets.iter().enumerate() {
+                if preset.path.is_some() && !saved_heading {
+                    ui.separator();
+                    ui.weak("Saved");
+                    saved_heading = true;
+                }
+                if ui.selectable_label(self.rock.preset == Some(i), &preset.name).clicked() {
+                    picked = Some(i);
+                }
+            }
+        });
+        if let Some(i) = picked {
+            self.status = self.rock.pick(i).err().map(|e| (e, true));
+        }
+        ui.horizontal(|ui| {
+            ui.label("Seed");
+            if ui.add(egui::DragValue::new(&mut self.rock.template.seed).speed(1.0)).changed() {
+                self.rock.dirty = true;
+            }
+            if ui.button("Random").clicked() {
+                self.rock.template.seed = random_seed();
+                self.rock.dirty = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.rock.preset.is_some(), egui::Button::new("Reset"))
+                .on_hover_text("Reload the preset, dropping every change made in the panel.")
+                .clicked()
+                && let Some(i) = self.rock.preset
+            {
+                self.status = self.rock.pick(i).err().map(|e| (e, true));
+            }
+            if ui.button("Copy as RON").on_hover_text("Copy the preset as it stands.").clicked() {
+                match ron::ser::to_string_pretty(&self.rock.template, ron::ser::PrettyConfig::default()) {
+                    Ok(text) => ctx.copy_text(text),
+                    Err(e) => eprintln!("could not write the preset as RON: {e}"),
+                }
+            }
+            if ui.button("Frame").on_hover_text("Bring the rock back into view.").clicked() {
+                self.rock_camera();
+            }
+        });
+        if !cfg!(target_arch = "wasm32") {
+            ui.horizontal(|ui| {
+                ui.label("Save as");
+                ui.add(egui::TextEdit::singleline(&mut self.rock.save_name).desired_width(150.0));
+                if ui.button("Save").clicked() {
+                    match rock_view::save_preset(&self.rock.save_name, &self.rock.template) {
+                        Ok(path) => {
+                            self.rock.presets = rock_view::list_presets();
+                            let key = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+                            self.rock.preset = self.rock.presets.iter().position(|p| p.path.is_some() && p.name == key);
+                            self.status = Some((format!("saved {}", path.display()), false));
+                        }
+                        Err(e) => self.status = Some((e, true)),
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Variations");
+                ui.add(egui::DragValue::new(&mut self.rock.variations).range(1..=200).speed(0.2))
+                    .on_hover_text("How many rocks to export: this seed, then each one after it, one file each, each with maps of its own.");
+                if ui
+                    .button("Export GLB")
+                    .on_hover_text("Write the rock, its LODs and its maps, baked at full resolution, to exports/rocks.")
+                    .clicked()
+                {
+                    let dir = Path::new("exports/rocks");
+                    let name = presets::key_for(&self.rock.save_name).unwrap_or_else(|_| self.rock.params.name.clone());
+                    let n = self.rock.variations.max(1);
+                    let format = arbor_core::gltf::Format::Glb;
+                    self.status = Some(
+                        match arbor_core::gltf::export_rock_batch(dir, &name, format, &self.rock.template, n, |_| true) {
+                            Ok(r) => (
+                                format!("exported {} rock(s) to {} ({:.1} MB)", r.trees.len(), dir.display(), r.bytes as f64 / 1e6),
+                                false,
+                            ),
+                            Err(e) => (format!("export failed: {e}"), true),
+                        },
+                    );
+                }
+            });
+        }
+        if let Some((message, failed)) = &self.status {
+            if *failed {
+                ui.colored_label(egui::Color32::LIGHT_RED, message);
+            } else {
+                ui.weak(message);
+            }
+        }
+
+        let mut landed = self.rock.template.instance().template();
+        ui.separator();
+        ui.label("Rock");
+        for group in rock_view::GROUPS {
+            self.rock.dirty |= knobs::group_ui(ui, "rock", &mut self.rock.template, &mut landed, group);
+        }
+        let last = self.rock.mesh.lods.len().saturating_sub(1);
+        egui::ComboBox::from_label("LOD").selected_text(format!("LOD{}", self.rock.lod)).show_ui(ui, |ui| {
+            for l in 0..=last {
+                if ui.selectable_label(self.rock.lod == l, format!("LOD{l}")).clicked() {
+                    self.rock.lod = l;
+                    self.rock.mesh_dirty = true;
+                }
+            }
+        });
+
+        ui.separator();
+        ui.label("Render");
+        egui::ComboBox::from_label("View")
+            .selected_text(match self.render_mode {
+                RenderMode::Shaded => "Shaded",
+                RenderMode::UvChecker => "UV checker",
+                RenderMode::Normals => "Normals",
+                RenderMode::Occlusion => "Occlusion",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.render_mode, RenderMode::Shaded, "Shaded");
+                ui.selectable_value(&mut self.render_mode, RenderMode::UvChecker, "UV checker");
+                ui.selectable_value(&mut self.render_mode, RenderMode::Normals, "Normals");
+                ui.selectable_value(&mut self.render_mode, RenderMode::Occlusion, "Occlusion");
+            });
+        ui.checkbox(&mut self.use_normal_map, "Normal map");
+        if !cfg!(target_arch = "wasm32") {
+            ui.checkbox(&mut self.wireframe, "Wireframe");
+        }
+        ui.checkbox(&mut self.shadows, "Shadows");
+        self.lighting_ui(ui);
+
+        ui.separator();
+        ui.label("Stats");
+        let r = &self.rock;
+        let (lo, hi) = r.aabb();
+        ui.monospace(format!("size:   {:.2} x {:.2} x {:.2} m", hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+        ui.monospace(format!("buried: {:.2} m", -lo[1].min(0.0)));
+        for (i, lod) in r.mesh.lods.iter().enumerate() {
+            ui.monospace(format!("LOD{i}:   {} tris", lod.triangle_count()));
+        }
+        let (t, w, h) = r.params.texture.size();
+        ui.monospace(format!("maps:   {w} x {h} ({t} a face; preview {})", rock_view::PREVIEW_TEXELS.min(t)));
+        ui.monospace(format!("gen:    {:.2} ms, bake {:.0} ms", r.gen_ms, r.bake_ms));
+        ui.monospace(format!("frame:  {:.1} ms", ctx.input(|i| i.stable_dt) * 1000.0));
+        ui.separator();
+        ui.label("Camera: LMB orbit, RMB/MMB pan, wheel zoom");
     }
 
     /// The panel in ground cover mode.
@@ -1393,6 +1606,7 @@ impl App {
             let was = self.view;
             ui.selectable_value(&mut self.view, ViewMode::Tree, "Tree");
             ui.selectable_value(&mut self.view, ViewMode::Cover, "Ground cover");
+            ui.selectable_value(&mut self.view, ViewMode::Rock, "Rock");
             if was != self.view {
                 self.status = None;
                 match self.view {
@@ -1404,6 +1618,12 @@ impl App {
                             self.ground = Ground::Plain;
                         }
                     }
+                    ViewMode::Rock => {
+                        self.rock_camera();
+                        if self.ground == Ground::Photo {
+                            self.ground = Ground::Plain;
+                        }
+                    }
                     ViewMode::Tree => self.frame_camera(),
                 }
             }
@@ -1411,6 +1631,10 @@ impl App {
         ui.separator();
         if self.view == ViewMode::Cover {
             self.cover_controls(ui, ctx);
+            return;
+        }
+        if self.view == ViewMode::Rock {
+            self.rock_controls(ui, ctx);
             return;
         }
 
@@ -1876,6 +2100,9 @@ impl eframe::App for App {
         if self.view == ViewMode::Cover {
             self.sync_cover();
         }
+        if self.view == ViewMode::Rock {
+            self.sync_rock();
+        }
         // Maps being fetched are put in on the frame they arrive.
         self.sync_materials();
         self.sync_environment();
@@ -1910,8 +2137,10 @@ impl eframe::App for App {
 
                 // Ground cover draws its field through the leaf pipeline, and no bark.
                 let cover_mode = self.view == ViewMode::Cover;
+                // A rock is drawn as bark is, and nothing else.
+                let rock_mode = self.view == ViewMode::Rock;
                 let draw_bark = !cover_mode;
-                let mesh_gpu = Arc::clone(&self.mesh_gpu);
+                let mesh_gpu = Arc::clone(if rock_mode { &self.rock_gpu } else { &self.mesh_gpu });
                 let leaves_gpu = Arc::clone(if cover_mode { &self.cover_gpu } else { &self.leaves_gpu });
                 let lines = Arc::clone(&self.lines);
                 let shadow = Arc::clone(&self.shadow);
@@ -1931,10 +2160,12 @@ impl eframe::App for App {
                 };
                 let tree_height = if cover_mode {
                     self.cover.mesh.height.max(0.1)
+                } else if rock_mode {
+                    self.rock.mesh.max[1].max(0.1)
                 } else {
                     self.stats.height.max(1.0)
                 };
-                let wind = if self.wind_on {
+                let wind = if self.wind_on && !rock_mode {
                     let mut wind = WindUniforms::new(
                         if cover_mode { &self.cover.params.wind } else { &self.grown.wind },
                         self.wind_clock,
@@ -1948,22 +2179,35 @@ impl eframe::App for App {
                 } else {
                     WindUniforms::default()
                 };
-                let bark_material = self.bark_material;
+                let bark_material = match (rock_mode, self.rock_material) {
+                    (true, Some(m)) => m,
+                    _ => self.bark_material,
+                };
                 let leaf_material = if cover_mode { self.cover_material } else { self.leaf_material };
-                let bark_look = gpu::BarkLook::from_species(&self.grown.mesh);
+                let bark_look = if rock_mode {
+                    rock_view::RockScene::look()
+                } else {
+                    gpu::BarkLook::from_species(&self.grown.mesh)
+                };
                 let mut leaf_params = if cover_mode {
                     self.cover.leaf_params(self.leaf_translucency, self.coverage_lod)
                 } else {
                     LeafMaterialParams::from_species(&self.grown.leaves, self.leaf_translucency)
                 };
                 leaf_params.coverage_lod = self.coverage_lod;
-                let draw_leaves = (cover_mode || self.show_leaves) && leaf_material.is_some();
+                let draw_leaves = !rock_mode && (cover_mode || self.show_leaves) && leaf_material.is_some();
                 let cam = self.camera;
                 let crown = self.crown;
                 // The shadow is fitted to the tree, so it has to be fitted to where the
                 // wind can take it, or a swaying crown runs off the edge of its own map.
                 let aabb = {
-                    let (lo, hi) = if cover_mode { self.cover.aabb() } else { self.aabb };
+                    let (lo, hi) = if cover_mode {
+                        self.cover.aabb()
+                    } else if rock_mode {
+                        self.rock.aabb()
+                    } else {
+                        self.aabb
+                    };
                     let r = wind.reach();
                     ([lo[0] - r, lo[1], lo[2] - r], [hi[0] + r, hi[1] + r, hi[2] + r])
                 };
@@ -1980,7 +2224,7 @@ impl eframe::App for App {
                     samples: self.msaa,
                 };
                 let wire = self.wireframe && !cfg!(target_arch = "wasm32");
-                let overlay = !cover_mode && (self.show_skeleton || self.show_grid);
+                let overlay = !cover_mode && !rock_mode && (self.show_skeleton || self.show_grid);
                 let use_normal_map = self.use_normal_map;
                 let mode = match self.render_mode {
                     RenderMode::Shaded => 0,

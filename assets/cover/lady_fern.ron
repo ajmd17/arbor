@@ -1,0 +1,120 @@
+// Lady fern, 0.7 to 1.1 m: crowns of finely cut, lance-shaped fronds arching out from
+// the middle, a few older ones browning at the base. The woodland floor fern.
+// Any number may be a (lo, hi) range: each seed lands somewhere in it.
+(
+    name: "lady_fern",
+    seed: 1,
+    footprint: (
+        size: 1.8,
+        tufts: 3,
+        jitter: 0.8,
+        overhang: 0.05,
+    ),
+    tuft: (
+        cards: 12,
+        radius: 0.06,
+        height: (0.8, 1.0),
+        height_variance: 0.2,
+        card_height_variance: 0.25,
+        lean_deg: 26.0,
+        lean_variance_deg: 12.0,
+        curl_deg: 55.0,
+        twist_deg: 8.0,
+        // Young fronds still rising in the middle of the crown.
+        understory: 0.25,
+        understory_height: 0.5,
+        rosette: 1.0,
+    ),
+    card: (
+        width: 1.0,
+        width_top: 1.0,
+        fold: 0.35,
+    ),
+    colour: (
+        dry_fraction: 0.12,
+        mix: 0.08,
+    ),
+    normals: (
+        ground_normal_blend: 0.45,
+        root_blend: 0.08,
+    ),
+    wind: (
+        flexibility: (0.0, 0.55, 0.0, 0.0),
+        flutter: 0.35,
+        frequency: 0.9,
+    ),
+    lod: [
+        (cards: 1.0, segments: 8, width: 1.0, screen_size: 0.0),
+        (cards: 0.6, segments: 4, width: 1.2, screen_size: 0.1),
+        (cards: 0.3, segments: 2, width: 1.55, screen_size: 0.04),
+    ],
+    atlas: (
+        cell_height: 1024,
+        cell_aspect: 0.5,
+        cells: [
+            // Fronds in their prime, finely cut.
+            (
+                weight: 1.0,
+                count: 0,
+                frond: Some((
+                    pinnae: 22,
+                    lobes: 13,
+                    division: 0.85,
+                    color: (0.26, 0.44, 0.12),
+                    tip_color: (0.40, 0.54, 0.15),
+                )),
+                seed: 11,
+            ),
+            // A little narrower and more swept.
+            (
+                weight: 1.0,
+                count: 0,
+                frond: Some((
+                    pinnae: 20,
+                    reach: 0.86,
+                    widest: 0.38,
+                    tip_angle_deg: 36.0,
+                    curve_deg: 18.0,
+                    lobes: 12,
+                    division: 0.8,
+                    color: (0.24, 0.42, 0.12),
+                    tip_color: (0.38, 0.52, 0.15),
+                )),
+                seed: 23,
+            ),
+            // Young fronds: paler and yellower, the pinnae not yet fully spread.
+            (
+                weight: 0.5,
+                count: 0,
+                frond: Some((
+                    pinnae: 20,
+                    reach: 0.8,
+                    angle_deg: 60.0,
+                    lobes: 11,
+                    lobe_angle_deg: 34.0,
+                    division: 0.75,
+                    color: (0.36, 0.52, 0.15),
+                    tip_color: (0.50, 0.60, 0.20),
+                )),
+                seed: 37,
+            ),
+            // Old fronds, browning from the base.
+            (
+                dry: true,
+                weight: 1.0,
+                count: 0,
+                frond: Some((
+                    pinnae: 21,
+                    lobes: 12,
+                    division: 0.85,
+                    color: (0.30, 0.40, 0.14),
+                    tip_color: (0.36, 0.44, 0.16),
+                    color_variance: 0.16,
+                    dead: 0.55,
+                    dead_color: (0.46, 0.33, 0.17),
+                )),
+                seed: 41,
+            ),
+        ],
+    ),
+)
