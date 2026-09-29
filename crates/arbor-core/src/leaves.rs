@@ -90,6 +90,9 @@ struct Card {
     /// How the twig carrying the card sways where the card hangs from it.
     sway: Sway,
     sway_at: SwayAt,
+    /// The way out of the surface a climber's card lies on, which its shading leans
+    /// toward instead of out of the crown. None on a tree.
+    outward: Option<Vec3>,
 }
 
 pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
@@ -131,7 +134,8 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
             continue;
         }
         let sway = field.stem(sk, first);
-        place_on_stem(sk, lp, &tree_rng, &run, variants, &sway, &mut cards);
+        let lift = params.vine.as_ref().map(|v| v.leaf_lift_deg);
+        place_on_stem(sk, lp, &tree_rng, &run, variants, &sway, lift, &mut cards);
     }
 
     if cards.is_empty() {
@@ -154,6 +158,7 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
     mesh
 }
 
+#[allow(clippy::too_many_arguments)]
 fn place_on_stem(
     sk: &Skeleton,
     lp: &LeafParams,
@@ -161,18 +166,25 @@ fn place_on_stem(
     run: &[u32],
     variants: u32,
     sway: &StemSway,
+    // How far a leaf on a climber stands off the surface under it, in degrees; None
+    // for a tree.
+    lift_deg: Option<f32>,
     out: &mut Vec<Card>,
 ) {
     // Walk from the attachment point, the same polyline the bark tube is swept
     // along, so leaves cannot start in the gap between a twig and its parent.
     let first = run[0] as usize;
     let mut points: Vec<(Vec3, f32)> = Vec::with_capacity(run.len() + 1);
+    // The surface under each point, for a climber: zero where there is none.
+    let mut surfaces: Vec<Vec3> = Vec::with_capacity(run.len() + 1);
     if let Some(p) = sk.nodes[first].parent {
         points.push((sk.nodes[p as usize].position, sk.nodes[first].radius));
+        surfaces.push(sk.nodes[p as usize].surface);
     }
     for &i in run {
         let node = &sk.nodes[i as usize];
         points.push((node.position, node.radius));
+        surfaces.push(node.surface);
     }
     if points.len() < 2 {
         return;
@@ -233,6 +245,7 @@ fn place_on_stem(
                 }
             }
             let at = a + dir * travelled;
+            let surface = if surfaces[w + 1] != Vec3::ZERO { surfaces[w + 1] } else { surfaces[w] };
             // The walk starts where the twig leaves its parent, as the sway does, so
             // the distance walked is the distance the sway is read off at.
             let hang = sway.at(walked + travelled);
@@ -267,17 +280,32 @@ fn place_on_stem(
                 let variant = range_f32(&mut rng, 0.0, variants as f32) as u32;
                 let even = cluster_roll
                     + k as f32 * std::f32::consts::PI / lp.cluster_size.max(1) as f32;
-                let mut card = make_card(
-                    lp,
-                    &mut rng,
-                    at,
-                    dir,
-                    frame,
-                    radius,
-                    even,
-                    base_azimuth + fan,
-                    variant.min(variants - 1) as f32 / variants as f32,
-                );
+                let atlas_v = variant.min(variants - 1) as f32 / variants as f32;
+                let mut card = match lift_deg {
+                    Some(lift) if surface != Vec3::ZERO => make_clinging_card(
+                        lp,
+                        &mut rng,
+                        at,
+                        dir,
+                        surface,
+                        radius,
+                        lift,
+                        base_azimuth,
+                        fan,
+                        atlas_v,
+                    ),
+                    _ => make_card(
+                        lp,
+                        &mut rng,
+                        at,
+                        dir,
+                        frame,
+                        radius,
+                        even,
+                        base_azimuth + fan,
+                        atlas_v,
+                    ),
+                };
                 card.sway = hang;
                 card.sway_at = hang_at;
                 out.push(card);
@@ -344,6 +372,72 @@ fn make_card(
         atlas_v,
         sway: Sway::default(),
         sway_at: SwayAt::default(),
+        outward: None,
+    }
+}
+
+/// A card on a stem lying over a surface with outward normal `n`.
+///
+/// A leaf on a tree turns its face to the sky wherever its twig points. A leaf on a
+/// climber turns it out from the wall, because that is where the light comes from, and
+/// every leaf on the plant doing so is what lays ivy over a wall like shingles. So the
+/// card is laid in the plane of the surface: out to one side of the stem by the crotch
+/// angle, alternating sides as `phyllotaxis_deg` turns, pulled down across the surface
+/// by its weight, then lifted off it by `lift_deg`, with its width running across the
+/// surface so its face looks out along `n`.
+#[allow(clippy::too_many_arguments)]
+fn make_clinging_card(
+    lp: &LeafParams,
+    rng: &mut crate::seed::PortableRng,
+    on_twig: Vec3,
+    twig_dir: Vec3,
+    n: Vec3,
+    twig_radius: f32,
+    lift_deg: f32,
+    // Where this anchor has turned to round the stem; its sign picks the side.
+    azimuth: f32,
+    // This card's own turn off the anchor's shared direction, within a cluster.
+    fan: f32,
+    atlas_v: f32,
+) -> Card {
+    let t = (twig_dir - n * twig_dir.dot(n)).normalize_or(ortho_of(n));
+    let across = n.cross(t);
+    let side = if azimuth.cos() >= 0.0 { 1.0 } else { -1.0 };
+    let crotch = (lp.crotch_angle_deg
+        + range_f32(rng, -lp.crotch_variance_deg, lp.crotch_variance_deg))
+    .to_radians()
+        + fan * 0.25;
+    let mut axis = (t * crotch.cos() + across * (side * crotch.sin())).normalize_or(t);
+
+    // Weight, across the surface: down a wall, and nowhere on the flat.
+    let downhill = -(Vec3::Y - n * n.y);
+    if downhill.length_squared() > 1e-4 && lp.droop_deg.abs() > 1e-3 {
+        let droop = lp.droop_deg.to_radians();
+        axis = (axis + downhill.normalize() * droop.sin()).normalize_or(axis);
+    }
+    let lift = (lift_deg * range_f32(rng, 0.5, 1.5)).to_radians();
+    axis = (axis * lift.cos() + n * lift.sin()).normalize_or(axis);
+
+    // Width across the leaf and in the surface, so the face (side x axis) looks out.
+    let mut side_v = axis.cross(n).normalize_or(across);
+    let twist = range_f32(rng, -lp.twist_deg, lp.twist_deg).to_radians();
+    if twist.abs() > 1e-4 {
+        let perp = axis.cross(side_v);
+        side_v = (side_v * twist.cos() + perp * twist.sin()).normalize_or(side_v);
+    }
+
+    let scale = 1.0 + range_f32(rng, -lp.size_variance, lp.size_variance);
+    Card {
+        origin: on_twig + n * (twig_radius * SURFACE_BIAS),
+        axis,
+        side: side_v,
+        length: (lp.card_length * scale).max(1e-3),
+        width: (lp.card_width * scale).max(1e-3),
+        hue: range_f32(rng, -1.0, 1.0),
+        atlas_v,
+        sway: Sway::default(),
+        sway_at: SwayAt::default(),
+        outward: Some(n),
     }
 }
 
@@ -365,16 +459,24 @@ fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, ra
     let leaf_center = card.origin + tip * 0.5;
 
     // The blend that turns a flat plane into part of a soft canopy: lean the shading
-    // normal toward the outward direction of the crown.
-    let outward = (leaf_center - center).normalize_or(Vec3::Y);
+    // normal toward the outward direction of the crown — or, for a leaf lying over a
+    // wall, out of the wall.
+    let outward = card
+        .outward
+        .unwrap_or_else(|| (leaf_center - center).normalize_or(Vec3::Y));
     let mut flat = card.side.cross(card.axis).normalize_or(outward);
     if flat.dot(outward) < 0.0 {
         flat = -flat;
     }
     let blended = flat.lerp(outward, lp.normal_blend.clamp(0.0, 1.0));
 
-    // Leaves buried in the crown see less sky than the ones on the outside.
-    let depth = (leaf_center - center).length() / radius;
+    // Leaves buried in the crown see less sky than the ones on the outside. On a wall
+    // the buried ones are those lying flattest against it, under the leaves that stand
+    // off it.
+    let depth = match card.outward {
+        Some(n) => ((leaf_center - card.origin).dot(n) / (card.length * 0.35)).clamp(0.0, 1.0),
+        None => (leaf_center - center).length() / radius,
+    };
     let shade = 1.0 - lp.interior_shade.clamp(0.0, 1.0) * (1.0 - depth.clamp(0.0, 1.0));
     let h = card.hue * lp.hue_variance;
     let tint = [

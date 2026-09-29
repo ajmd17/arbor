@@ -9,14 +9,14 @@ use crate::seed::{child_path, range_f32, PortableRng, TreeRng};
 use crate::skeleton::Skeleton;
 use crate::species::{ChildPattern, SpeciesParams, StemParams};
 
-const MAX_NODES: usize = 150_000;
+pub(crate) const MAX_NODES: usize = 150_000;
 const MAX_SEGMENTS: usize = 512;
-const MIN_VIGOR: f32 = 0.05;
-const ROOT_PATH: u64 = 1;
-const MIN_RADIUS: f32 = 0.004;
+pub(crate) const MIN_VIGOR: f32 = 0.05;
+pub(crate) const ROOT_PATH: u64 = 1;
+pub(crate) const MIN_RADIUS: f32 = 0.004;
 /// The root node and the trunk share a stem id so the trunk meshes as one
 /// unbroken tube starting at the ground.
-const TRUNK_STEM: u32 = 0;
+pub(crate) const TRUNK_STEM: u32 = 0;
 /// Share of the bend direction re-rolled each segment. Keeping most of the previous
 /// bend makes the deflection correlated, which reads as a smooth arc, not noise.
 const BEND_WANDER: f32 = 0.22;
@@ -70,10 +70,10 @@ const TIP_REACH: f32 = 1.0;
 /// Siblings leaving one node all see the same length ahead of them, so a hard cap would
 /// pin every one it binds to the same number and grow them as a wheel of identical
 /// spokes.
-const TIP_REACH_SPREAD: f32 = 0.3;
+pub(crate) const TIP_REACH_SPREAD: f32 = 0.3;
 /// Salt for the draw above. Taken from a hash of the stem's path rather than from its
 /// random stream, so it does not move a single other draw in the tree.
-const AHEAD_SALT: u64 = 0xA4EA_D5A1_7E57_0001;
+pub(crate) const AHEAD_SALT: u64 = 0xA4EA_D5A1_7E57_0001;
 /// Bare wood a fork needs past it on the stem it leaves, in the stem's own segments.
 /// A lateral needs one: a stem's last season carries no side shoots yet. A fork needs
 /// two, because one segment past a fork is not a stem carrying on but a stub beside it.
@@ -102,7 +102,7 @@ const DOMINANCE_SHAPE: f32 = 3.0;
 /// for a twiglet — so a suppressed limb came out 15% as long but pinned to the thickness
 /// of a wire, at nearly four times the length-to-radius of its healthy neighbours. Those
 /// are the stringy bits.
-const SUPPRESSION_FLOOR: f32 = 0.15;
+pub(crate) const SUPPRESSION_FLOOR: f32 = 0.15;
 
 /// The most a stem may grow past what its level declares, as a multiple of it.
 ///
@@ -116,7 +116,7 @@ const SUPPRESSION_FLOOR: f32 = 0.15;
 /// stem of 4.9 m. Those are the stray hairs — single twigs two or three times the length
 /// of everything around them, running out of the crown with nothing on them. 1.15 is the
 /// most that can be allowed while the whorl still reads as siblings rather than spokes.
-const MAX_DRIVE: f32 = 1.15;
+pub(crate) const MAX_DRIVE: f32 = 1.15;
 
 /// A child settled on while its parent was still growing, held back until it has
 /// finished.
@@ -210,8 +210,16 @@ impl GrowCtx<'_> {
 }
 
 pub fn grow(params: &SpeciesParams) -> Skeleton {
+    if let Some(vine) = &params.vine {
+        return crate::vines::grow_vine(params, vine);
+    }
     let mut skeleton = Skeleton::default();
-    let root = skeleton.push_node(None, Vec3::ZERO, 0, ROOT_PATH, 1.0, 0.0, TRUNK_STEM);
+    let basal = basal_stems(params);
+    // A clump's stems come up from a stool just under the ground, so the tubes that
+    // join them to it are buried and each stem is seen rising out of the soil apart
+    // from its neighbours rather than all of them fanning out of one point.
+    let root_at = if basal.is_empty() { Vec3::ZERO } else { -Vec3::Y * STOOL_DEPTH };
+    let root = skeleton.push_node(None, root_at, 0, ROOT_PATH, 1.0, 0.0, TRUNK_STEM);
     let levels_total = levels_total(params);
     let nominal = nominal_vigor(params);
     let ctx = GrowCtx {
@@ -222,21 +230,47 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
         nominal,
     };
     let tree_rng = TreeRng::new(params.seed);
-    grow_stem(
-        &ctx,
-        &mut skeleton,
-        &tree_rng,
-        root,
-        Vec3::Y,
-        1.0,
-        0,
-        ROOT_PATH,
-        0,
-        TRUNK_STEM,
-        Vec3::ZERO,
-        f32::MAX,
-        f32::INFINITY,
-    );
+    if basal.is_empty() {
+        grow_stem(
+            &ctx,
+            &mut skeleton,
+            &tree_rng,
+            root,
+            Vec3::Y,
+            1.0,
+            0,
+            ROOT_PATH,
+            0,
+            TRUNK_STEM,
+            Vec3::ZERO,
+            f32::MAX,
+            f32::INFINITY,
+        );
+    }
+    for (k, stem) in basal.iter().enumerate() {
+        // The first carries on the root's own stem, so the plant has one; the rest
+        // leave it at the root like forks.
+        let id = if k == 0 { TRUNK_STEM } else { skeleton.nodes.len() as u32 };
+        let path = child_path(ROOT_PATH, k as u32 + 1);
+        let foot = skeleton.push_node(Some(root), stem.foot, 0, path, stem.vigor, 0.0, id);
+        // Every stem of a clump is shaped by the crown as a fork is, and none holds its
+        // own course as a tree's leader does: there is no leader to hang the crown off.
+        grow_stem(
+            &ctx,
+            &mut skeleton,
+            &tree_rng,
+            foot,
+            stem.dir,
+            stem.vigor,
+            0,
+            path,
+            1,
+            id,
+            Vec3::ZERO,
+            f32::MAX,
+            f32::INFINITY,
+        );
+    }
     resolve_radii(params, &mut skeleton);
     let shade_keep = mark_dieback(params, &mut skeleton);
     // Reads the radii, so it has to follow them, and it is its own pass rather than
@@ -245,6 +279,55 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
     break_dead_wood(params, &mut skeleton, shade_keep.as_deref());
     sag_dead_limbs(params, &mut skeleton);
     skeleton
+}
+
+/// How far under the ground a clump's stool sits, in metres.
+const STOOL_DEPTH: f32 = 0.12;
+/// Salt for the draws that lay out a clump's stems, apart from every growth stream.
+const BASAL_SALT: u64 = 0xBA5A_1C1A_0B57_0001;
+
+/// One stem of a clump: where it comes out of the ground, which way it sets off, and
+/// the drive it starts with.
+struct BasalStem {
+    foot: Vec3,
+    dir: Vec3,
+    vigor: f32,
+}
+
+/// The stems a shrub puts up from its root, or none for a tree.
+///
+/// Laid round the stool on a sunflower spiral so they neither bunch nor line up, and
+/// leaning out the further they stand from its middle: the outer stems of a clump are
+/// the ones pushed out by those inside them, which is what opens it into a vase.
+fn basal_stems(params: &SpeciesParams) -> Vec<BasalStem> {
+    let b = &params.basal;
+    let mut rng = TreeRng::new(params.seed ^ BASAL_SALT).stream(ROOT_PATH);
+    let spread = b.count_variance as f32;
+    let count = (b.count as f32 + range_f32(&mut rng, -spread, spread + 1.0).floor()).max(1.0)
+        as u32;
+    if b.count <= 1 || count <= 1 {
+        return Vec::new();
+    }
+    let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+    let turn = range_f32(&mut rng, 0.0, std::f32::consts::TAU);
+    (0..count)
+        .map(|k| {
+            // Out from the middle as the square root, so the stems cover the stool
+            // evenly rather than crowding its centre.
+            let out = ((k as f32 + 0.5) / count as f32).sqrt();
+            let az = turn + golden * k as f32 + range_f32(&mut rng, -0.3, 0.3);
+            let radial = Vec3::new(az.cos(), 0.0, az.sin());
+            let lean = (b.lean_deg * (0.25 + 0.75 * out)
+                + range_f32(&mut rng, -b.lean_variance_deg, b.lean_variance_deg))
+            .to_radians()
+            .max(0.0);
+            BasalStem {
+                foot: radial * (b.spread * out) - Vec3::Y * 0.02,
+                dir: (Vec3::Y * lean.cos() + radial * lean.sin()).normalize(),
+                vigor: 1.0 + range_f32(&mut rng, -b.vigor_variance, b.vigor_variance),
+            }
+        })
+        .collect()
 }
 
 /// How hemmed in every node is by the rest of its own tree, from 0 to 1.
@@ -361,7 +444,7 @@ fn shaded_share(children: &crate::species::ChildParams, t: f32) -> f32 {
 /// it breaks off, indexed by stem id: infinite for everything but the shaded, which are
 /// cut back by their parent's `shade_keep`. The breaking itself is left to
 /// `break_dead_wood`, which has to run after the radii are known anyway.
-fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> Option<Vec<f32>> {
+pub(crate) fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> Option<Vec<f32>> {
     let levels = std::iter::once(&params.trunk).chain(params.branch_levels.iter());
     let (any_dieback, any_shade) = levels.fold((false, false), |(d, s), sp| {
         (d || sp.dieback > 0.0, s || sp.children.shade_line > 0.0)
@@ -459,7 +542,7 @@ fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> Option<Vec<f
 /// A stem shaded out low on its parent is cut back further, to the length `shade_keep`
 /// gave it in `keep` (indexed by stem id), since it died long ago and stopped growing
 /// then.
-fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton, keep: Option<&[f32]>) {
+pub(crate) fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton, keep: Option<&[f32]>) {
     // The radius the stem started at, carried along its run.
     let mut stem_base = vec![0.0f32; skeleton.nodes.len()];
     let arc = keep.map(|_| stem_arcs(skeleton).0);
@@ -566,7 +649,7 @@ fn sag_dead_limbs(params: &SpeciesParams, skeleton: &mut Skeleton) {
 
 /// One value in 0..1 from a seed and a path, so dieback is the same every time a tree
 /// is grown and different for every stem in it.
-fn hash_unit(seed: u64, path: u64) -> f32 {
+pub(crate) fn hash_unit(seed: u64, path: u64) -> f32 {
     let mut x = seed ^ path.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -574,7 +657,7 @@ fn hash_unit(seed: u64, path: u64) -> f32 {
     (x >> 11) as f32 / (1u64 << 53) as f32
 }
 
-fn stem_params(params: &SpeciesParams, level: u8) -> Option<&StemParams> {
+pub(crate) fn stem_params(params: &SpeciesParams, level: u8) -> Option<&StemParams> {
     if level == 0 {
         Some(&params.trunk)
     } else {
@@ -910,7 +993,7 @@ fn grow_stem(
 /// How far past the length still ahead of it a child of a stem at `level` may run; see
 /// `ChildParams::tip_reach`. None is no limit, which is the trunk's default: the crown
 /// envelope shapes its limbs.
-fn tip_reach(sp: &StemParams, level: u8) -> Option<f32> {
+pub(crate) fn tip_reach(sp: &StemParams, level: u8) -> Option<f32> {
     if sp.children.tip_reach > 0.0 {
         Some(sp.children.tip_reach)
     } else if level > 0 {
@@ -1076,7 +1159,7 @@ fn spawn_children(
     }
 }
 
-fn child_dir(forward: Vec3, frame: Vec3, azimuth: f32, crotch: f32) -> Vec3 {
+pub(crate) fn child_dir(forward: Vec3, frame: Vec3, azimuth: f32, crotch: f32) -> Vec3 {
     let f = norm_or_up(forward);
     let u = ortho_unit(frame, f);
     let v = f.cross(u);
@@ -1153,7 +1236,7 @@ fn steer(
 /// Never more than `LATERAL_MAX_SHARE` of the stem, ramping down over the last
 /// `LATERAL_TIP_SHARE` of it, and never more than `ahead_share` times the stem still to
 /// come past it when that is given.
-fn lateral_cap(grown: f32, at: f32, ahead_share: Option<f32>) -> f32 {
+pub(crate) fn lateral_cap(grown: f32, at: f32, ahead_share: Option<f32>) -> f32 {
     if !grown.is_finite() || grown <= 0.0 {
         return f32::INFINITY;
     }
@@ -1170,7 +1253,7 @@ fn lateral_cap(grown: f32, at: f32, ahead_share: Option<f32>) -> f32 {
 /// turning past it. Rotating, rather than adding a vector and renormalising, is what
 /// makes `angle` mean the same thing however far apart the two directions are, and
 /// that is what lets the callers bound it.
-fn turn_toward(dir: Vec3, goal: Vec3, angle: f32) -> Vec3 {
+pub(crate) fn turn_toward(dir: Vec3, goal: Vec3, angle: f32) -> Vec3 {
     if angle <= 0.0 {
         return dir;
     }
@@ -1221,19 +1304,19 @@ fn horizontal(v: Vec3) -> Vec3 {
     Vec3::new(v.x, 0.0, v.z)
 }
 
-fn norm_or_up(v: Vec3) -> Vec3 {
+pub(crate) fn norm_or_up(v: Vec3) -> Vec3 {
     let len = v.length();
     if len > 1e-8 { v / len } else { Vec3::Y }
 }
 
-fn rand_perpendicular(rng: &mut PortableRng, dir: Vec3) -> Vec3 {
+pub(crate) fn rand_perpendicular(rng: &mut PortableRng, dir: Vec3) -> Vec3 {
     let a = ortho_of(dir);
     let b = dir.cross(a);
     let ang = range_f32(rng, 0.0, std::f32::consts::TAU);
     a * ang.cos() + b * ang.sin()
 }
 
-fn levels_total(params: &SpeciesParams) -> u8 {
+pub(crate) fn levels_total(params: &SpeciesParams) -> u8 {
     params
         .max_levels
         .min(params.branch_levels.len() as u8 + 1)
@@ -1254,7 +1337,7 @@ fn levels_total(params: &SpeciesParams) -> u8 {
 /// what made the stray hairs: level-2 stems were carrying vigor around 0.17 against a
 /// nominal of 0.28, so they came out at 19% of their declared radius — a twig a fifth
 /// of its proper thickness, which at any length reads as a wire rather than a branch.
-fn nominal_vigor(params: &SpeciesParams) -> Vec<f32> {
+pub(crate) fn nominal_vigor(params: &SpeciesParams) -> Vec<f32> {
     let total = levels_total(params);
     let mut nominal = Vec::with_capacity(total as usize + 1);
     nominal.push(1.0f32);
@@ -1269,7 +1352,7 @@ fn nominal_vigor(params: &SpeciesParams) -> Vec<f32> {
 /// Thickness is resolved in two passes: a top-down pass giving every stem a base
 /// radius that tapers along its own length, then a bottom-up pass that widens any
 /// node carrying more cross-section than its taper alone would provide.
-fn resolve_radii(params: &SpeciesParams, skeleton: &mut Skeleton) {
+pub(crate) fn resolve_radii(params: &SpeciesParams, skeleton: &mut Skeleton) {
     let n = skeleton.nodes.len();
     if n == 0 {
         return;
@@ -1697,7 +1780,8 @@ mod tests {
                 }
                 checked += 1;
             }
-            assert!(checked > 100, "{name}: only {checked} children to check");
+            // Fifty, not more: the smallest vines carry under a hundred.
+            assert!(checked > 50, "{name}: only {checked} children to check");
         }
     }
 
@@ -1732,7 +1816,8 @@ mod tests {
         for (name, src) in crate::species::builtin_presets() {
             let params = parse_species(src).unwrap();
             let (checked, over) = offenders(&params);
-            assert!(checked > 100, "{name}: only {checked} children to check");
+            // Fifty, not more: the smallest vines carry under a hundred.
+            assert!(checked > 50, "{name}: only {checked} children to check");
             assert!(
                 over.is_empty(),
                 "{name}: {} children outgrew the branch ahead of them, e.g. (level, length, \

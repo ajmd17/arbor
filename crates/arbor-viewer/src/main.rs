@@ -399,6 +399,10 @@ struct App {
     lines: Arc<Mutex<GpuLines>>,
     mesh_gpu: Arc<Mutex<GpuMesh>>,
     leaves_gpu: Arc<Mutex<GpuLeaves>>,
+    /// What a vine is grown over, drawn plain behind it so it is not seen hanging in
+    /// the air. Empty for anything that stands up on its own.
+    support_gpu: Arc<Mutex<GpuMesh>>,
+    support_material: MaterialTextures,
     shadow: Arc<ShadowTarget>,
     depth_pass: Arc<DepthPass>,
     leaf_depth_pass: Arc<LeafDepthPass>,
@@ -549,6 +553,10 @@ impl App {
         mesh_gpu.upload(&gl, &mesh);
         let mut leaves_gpu = GpuLeaves::new(&gl);
         leaves_gpu.upload(&gl, &leaves);
+        let mut support_gpu = GpuMesh::new(&gl);
+        support_gpu.upload(&gl, &support_mesh(&grown));
+        // Weathered render: a plain, pale, rough grey, so the vine is what is looked at.
+        let support_material = unsafe { gpu::flat_material(&gl, [150, 146, 138], 235) };
         let lines = GpuLines::new(&gl);
         // Big enough that the edge of a leaf's shadow is not a staircase. The web
         // makes do with less memory.
@@ -578,6 +586,8 @@ impl App {
             lines: Arc::new(Mutex::new(lines)),
             mesh_gpu: Arc::new(Mutex::new(mesh_gpu)),
             leaves_gpu: Arc::new(Mutex::new(leaves_gpu)),
+            support_gpu: Arc::new(Mutex::new(support_gpu)),
+            support_material,
             shadow: Arc::new(shadow),
             depth_pass: Arc::new(depth_pass),
             leaf_depth_pass: Arc::new(leaf_depth_pass),
@@ -826,6 +836,7 @@ impl App {
         self.leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
         self.crown = crown_bounds(&leaves);
         self.leaves_gpu.lock().unwrap().upload(&self.gl, &leaves);
+        self.support_gpu.lock().unwrap().upload(&self.gl, &support_mesh(&self.grown));
         self.sync_materials();
         self.gen_ms = t.elapsed().as_secs_f32() * 1000.0;
         self.stats = self.skeleton.stats();
@@ -991,10 +1002,85 @@ impl App {
         }
     }
 
+    /// Whether the plant climbs, what over, and how it holds on. Reports a change.
+    fn vine_ui(&mut self, ui: &mut egui::Ui, landed: &mut SpeciesTemplate) -> bool {
+        use arbor_core::{Support, VineParams, VineStart};
+        let mut changed = false;
+        let mut climbs = self.params.vine.is_some();
+        if ui
+            .checkbox(&mut climbs, "Climber")
+            .on_hover_text("Grow over a support (a wall, a post or the ground) instead of standing up. The trunk becomes the runners and the levels their shoots; the crown envelope is not used.")
+            .changed()
+        {
+            self.params.vine = climbs.then(VineParams::defaults);
+            landed.vine = self.params.vine.clone();
+            changed = true;
+        }
+        let (Some(vine), Some(vine_at)) = (self.params.vine.as_mut(), landed.vine.as_mut()) else {
+            return changed;
+        };
+        egui::CollapsingHeader::new("Support").id_salt("vine support").show(ui, |ui| {
+            let kind = match vine.support {
+                Support::Wall { .. } => 0,
+                Support::Pillar { .. } => 1,
+                Support::Ground => 2,
+            };
+            let mut picked = kind;
+            egui::ComboBox::from_id_salt("support kind")
+                .selected_text(["Wall", "Post", "Ground"][kind])
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut picked, 0, "Wall");
+                    ui.selectable_value(&mut picked, 1, "Post");
+                    ui.selectable_value(&mut picked, 2, "Ground");
+                });
+            if picked != kind {
+                vine.support = match picked {
+                    0 => Support::Wall { width: 4.0, height: 3.0, thickness: 0.3 },
+                    1 => Support::Pillar { radius: 0.15, height: 3.0 },
+                    _ => Support::Ground,
+                };
+                changed = true;
+            }
+            let mut size = |ui: &mut egui::Ui, v: &mut f32, label: &str, max: f32| {
+                changed |= ui
+                    .add(egui::Slider::new(v, 0.02..=max).clamping(egui::SliderClamping::Edits).text(label))
+                    .changed();
+            };
+            match &mut vine.support {
+                Support::Wall { width, height, thickness } => {
+                    size(ui, width, "Width", 20.0);
+                    size(ui, height, "Height", 15.0);
+                    size(ui, thickness, "Thickness", 2.0);
+                }
+                Support::Pillar { radius, height } => {
+                    size(ui, radius, "Radius", 2.0);
+                    size(ui, height, "Height", 15.0);
+                }
+                Support::Ground => {}
+            }
+            let mut top = vine.start == VineStart::Top;
+            if ui
+                .checkbox(&mut top, "Planted at the top")
+                .on_hover_text("Root the plant at the top edge of its support, to trail down it, rather than at its foot to climb.")
+                .changed()
+            {
+                vine.start = if top { VineStart::Top } else { VineStart::Foot };
+                changed = true;
+            }
+        });
+        changed |= knobs::group_ui(ui, "vine", vine, vine_at, &knobs::VINE);
+        changed
+    }
+
     fn frame_camera(&mut self) {
         let h = self.stats.height.max(1.0);
+        // A low, spreading shrub is framed by its spread rather than its height, or the
+        // camera starts inside it. A tree is taller than three quarters of its spread.
+        let (lo, hi) = self.aabb;
+        let spread = (hi[0] - lo[0]).max(hi[2] - lo[2]).max(0.0);
+        let size = h.max(spread * 0.75);
         self.camera.target = Vec3::new(0.0, h * 0.45, 0.0);
-        self.camera.distance = h * 1.9;
+        self.camera.distance = size * 1.9;
     }
 
     /// Puts the camera at one of ground cover's two viewpoints.
@@ -1706,6 +1792,8 @@ impl App {
             &mut landed.envelope,
             &knobs::ENVELOPE,
         );
+        self.dirty |= knobs::group_ui(ui, "basal", &mut self.params.basal, &mut landed.basal, &knobs::BASAL);
+        self.dirty |= self.vine_ui(ui, &mut landed);
 
         ui.separator();
         ui.label("Branching");
@@ -2023,6 +2111,15 @@ impl App {
 }
 
 /// The bounding box of a canopy's cards, empty (min above max) for none.
+/// The wall or post a vine grows over, or nothing for a plant that stands up by itself.
+fn support_mesh(params: &SpeciesParams) -> arbor_core::Mesh {
+    params
+        .vine
+        .as_ref()
+        .map(|v| v.support.mesh())
+        .unwrap_or_default()
+}
+
 fn crown_bounds(leaves: &arbor_core::LeafMesh) -> (Vec3, Vec3) {
     leaves.positions.iter().fold(
         (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
@@ -2146,6 +2243,11 @@ impl eframe::App for App {
                 let draw_bark = !cover_mode;
                 let mesh_gpu = Arc::clone(if rock_mode { &self.rock_gpu } else { &self.mesh_gpu });
                 let leaves_gpu = Arc::clone(if cover_mode { &self.cover_gpu } else { &self.leaves_gpu });
+                // Only a vine in tree mode has a support; everywhere else it is empty or
+                // belongs to a scene not on screen.
+                let draw_support = !cover_mode && !rock_mode;
+                let support_gpu = Arc::clone(&self.support_gpu);
+                let support_material = self.support_material;
                 let lines = Arc::clone(&self.lines);
                 let shadow = Arc::clone(&self.shadow);
                 let depth_pass = Arc::clone(&self.depth_pass);
@@ -2244,6 +2346,7 @@ impl eframe::App for App {
                         let gl = painter.gl();
                         let mesh_gpu = mesh_gpu.lock().unwrap();
                         let leaves_gpu = leaves_gpu.lock().unwrap();
+                        let support_gpu = support_gpu.lock().unwrap();
                         let lines = lines.lock().unwrap();
                         let mut renderer = renderer.lock().unwrap();
                         let view_proj = cam.view_proj();
@@ -2315,6 +2418,10 @@ impl eframe::App for App {
                                 if draw_bark {
                                     mesh_gpu.bind_and_draw(gl);
                                 }
+                                if draw_support {
+                                    // Still in any wind: nothing on it is bound to sway.
+                                    support_gpu.bind_and_draw(gl);
+                                }
                                 gl.use_program(None);
                                 // Leaves need their own alpha-tested depth pass or
                                 // the canopy casts the shadow of its solid quads.
@@ -2343,6 +2450,10 @@ impl eframe::App for App {
                                 wind.bind(gl, depth_pass.program);
                                 if draw_bark {
                                     mesh_gpu.bind_and_draw(gl);
+                                }
+                                if draw_support {
+                                    // Still in any wind: nothing on it is bound to sway.
+                                    support_gpu.bind_and_draw(gl);
                                 }
                                 gl.use_program(None);
                                 if let (true, Some(leaf_mat)) = (draw_leaves, leaf_material) {
@@ -2401,6 +2512,21 @@ impl eframe::App for App {
                                         mode,
                                         use_normal_map,
                                         material: &bark_material,
+                                        wind: &wind,
+                                    },
+                                );
+                            }
+
+                            if draw_support {
+                                support_gpu.draw(
+                                    gl,
+                                    &MeshDrawParams {
+                                        bark: gpu::BarkLook::plain(),
+                                        lighting: &lighting,
+                                        view_proj,
+                                        mode,
+                                        use_normal_map,
+                                        material: &support_material,
                                         wind: &wind,
                                     },
                                 );
@@ -2546,6 +2672,10 @@ mod tests {
             check_counts(&mut bad, name, &mut p, std::slice::from_ref(&knobs::SPLIT_DEPTH));
             within(&mut bad, &format!("{name} max_levels"), u32::from(p.max_levels), knobs::BRANCH_LEVELS);
             check_groups(&mut bad, name, &mut p.envelope, std::slice::from_ref(&knobs::ENVELOPE));
+            check_groups(&mut bad, name, &mut p.basal, std::slice::from_ref(&knobs::BASAL));
+            if let Some(vine) = p.vine.as_mut() {
+                check_groups(&mut bad, name, vine, std::slice::from_ref(&knobs::VINE));
+            }
             for level in 0..knobs::level_count(&p) {
                 let at = format!("{name} level {level}");
                 if let Some(spawn) = knobs::spawn_mut(&mut p, level) {

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::envelope::EnvelopeParams;
 use crate::ranged::{key, map_array, Ranged, Scalar};
+use crate::vines::VineParams;
 
 pub const PINE_RON: &str = include_str!("../../../assets/species/pine.ron");
 pub const OAK_RON: &str = include_str!("../../../assets/species/oak.ron");
@@ -10,6 +11,12 @@ pub const SPRUCE_RON: &str = include_str!("../../../assets/species/spruce.ron");
 pub const DOUGLAS_FIR_RON: &str = include_str!("../../../assets/species/douglas_fir.ron");
 pub const DOUGLAS_FIR_OPEN_RON: &str =
     include_str!("../../../assets/species/douglas_fir_open.ron");
+pub const HAZEL_RON: &str = include_str!("../../../assets/species/hazel.ron");
+pub const BOXWOOD_RON: &str = include_str!("../../../assets/species/boxwood.ron");
+pub const JUNIPER_RON: &str = include_str!("../../../assets/species/juniper.ron");
+pub const IVY_RON: &str = include_str!("../../../assets/species/ivy.ron");
+pub const TWINING_VINE_RON: &str = include_str!("../../../assets/species/twining_vine.ron");
+pub const HANGING_VINE_RON: &str = include_str!("../../../assets/species/hanging_vine.ron");
 
 /// Where presets saved from the viewer are kept, relative to the repository root —
 /// which is where the viewer and the CLI both expect to be run from. Unlike the
@@ -25,6 +32,12 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
         ("spruce", SPRUCE_RON),
         ("fir", DOUGLAS_FIR_RON),
         ("fir_open", DOUGLAS_FIR_OPEN_RON),
+        ("hazel", HAZEL_RON),
+        ("boxwood", BOXWOOD_RON),
+        ("juniper", JUNIPER_RON),
+        ("ivy", IVY_RON),
+        ("twining_vine", TWINING_VINE_RON),
+        ("hanging_vine", HANGING_VINE_RON),
     ]
 }
 
@@ -59,6 +72,9 @@ pub struct SpeciesParams<V = f32> {
     pub max_levels: u8,
     pub max_split_depth: u32,
     pub trunk: StemParams<V>,
+    /// Stems put up from the root. One, the default, is a tree; a shrub is several,
+    /// each grown as `trunk` describes.
+    pub basal: BasalParams<V>,
     pub branch_levels: Vec<StemParams<V>>,
     pub gravity_multiplier: V,
     pub phototropism_multiplier: V,
@@ -67,6 +83,10 @@ pub struct SpeciesParams<V = f32> {
     pub wind: WindParams<V>,
     pub mesh: MeshParams<V>,
     pub envelope: EnvelopeParams<V>,
+    /// Set for a climber, which grows over a support instead of standing up: the
+    /// levels are its runners and shoots, and the crown envelope is not used. See
+    /// `vines`.
+    pub vine: Option<VineParams<V>>,
 }
 
 impl Default for SpeciesParams {
@@ -77,6 +97,7 @@ impl Default for SpeciesParams {
             max_levels: 4,
             max_split_depth: 2,
             trunk: StemParams::default(),
+            basal: BasalParams::default(),
             branch_levels: vec![StemParams::branch_default(1)],
             gravity_multiplier: 1.0,
             phototropism_multiplier: 1.0,
@@ -85,6 +106,7 @@ impl Default for SpeciesParams {
             wind: WindParams::default(),
             mesh: MeshParams::default(),
             envelope: EnvelopeParams::default(),
+            vine: None,
         }
     }
 }
@@ -103,6 +125,7 @@ impl<V: Scalar> SpeciesParams<V> {
             max_levels: self.max_levels,
             max_split_depth: self.max_split_depth,
             trunk: self.trunk.map(&key(at, "trunk"), f),
+            basal: self.basal.map(&key(at, "basal"), f),
             branch_levels: self
                 .branch_levels
                 .iter()
@@ -119,6 +142,7 @@ impl<V: Scalar> SpeciesParams<V> {
             wind: self.wind.map(&key(at, "wind"), f),
             mesh: self.mesh.map(&key(at, "mesh"), f),
             envelope: self.envelope.map(&key(at, "envelope"), f),
+            vine: self.vine.as_ref().map(|v| v.map(&key(at, "vine"), f)),
         }
     }
 }
@@ -168,6 +192,67 @@ impl SpeciesParams {
             env.stretched(leader_length / self.envelope.for_trunk_length)
         } else {
             env
+        }
+    }
+}
+
+/// The stems a plant puts up from its root.
+///
+/// A tree is one stem that grows a crown. A shrub is a clump of them coming up
+/// together from one stool, each leaning out a little further than the one inside it,
+/// so the plant is a vase or a dome of stems before it has a single branch. Every stem
+/// is grown as `trunk` describes, and each is shaped by the crown envelope like a fork
+/// rather than holding its own course as a tree's leader does: there is no leader.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    default = "BasalParams::defaults",
+    bound(deserialize = "V: Scalar + Deserialize<'de>")
+)]
+pub struct BasalParams<V = f32> {
+    /// Stems from the root. One is a tree, and everything else here is ignored.
+    pub count: u32,
+    /// Stems more or fewer than `count`, drawn for each plant.
+    pub count_variance: u32,
+    /// How far from upright the outermost stems of the clump lean, in degrees. The
+    /// ones inside it lean less, which is what opens a clump into a vase.
+    pub lean_deg: V,
+    /// Random spread on each stem's lean, in degrees.
+    pub lean_variance_deg: V,
+    /// Radius of the stool the stems come up from, in metres.
+    pub spread: V,
+    /// Spread of drive between stems, as a fraction either way. An old clump has a
+    /// few stems that have outgrown the rest.
+    pub vigor_variance: V,
+}
+
+impl Default for BasalParams {
+    fn default() -> Self {
+        Self {
+            count: 1,
+            count_variance: 0,
+            lean_deg: 20.0,
+            lean_variance_deg: 6.0,
+            spread: 0.15,
+            vigor_variance: 0.25,
+        }
+    }
+}
+
+impl<V: Scalar> BasalParams<V> {
+    /// The defaults, as either kind of number.
+    pub fn defaults() -> Self {
+        BasalParams::default().map("", &mut |_, v| V::fixed(v))
+    }
+
+    /// Every number in this passed through `f`, which is told the key each is known by.
+    pub fn map<W>(&self, at: &str, f: &mut impl FnMut(&str, V) -> W) -> BasalParams<W> {
+        BasalParams {
+            count: self.count,
+            count_variance: self.count_variance,
+            lean_deg: f(&key(at, "lean_deg"), self.lean_deg),
+            lean_variance_deg: f(&key(at, "lean_variance_deg"), self.lean_variance_deg),
+            spread: f(&key(at, "spread"), self.spread),
+            vigor_variance: f(&key(at, "vigor_variance"), self.vigor_variance),
         }
     }
 }

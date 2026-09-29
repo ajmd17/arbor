@@ -545,6 +545,18 @@ pub unsafe fn load_material<S: MapSource + ?Sized>(
     }
 }
 
+/// One flat colour and roughness, with no relief: for props that stand in for
+/// something the scene would really supply, such as the wall a vine grows over.
+pub unsafe fn flat_material(gl: &glow::Context, albedo: [u8; 3], roughness: u8) -> MaterialTextures {
+    unsafe {
+        MaterialTextures {
+            albedo: create_texture(gl, &[albedo[0], albedo[1], albedo[2], 255], 1, 1, true),
+            normal: create_texture(gl, &[128, 128, 255, 255], 1, 1, false),
+            roughness: create_texture(gl, &[roughness, 255, 255, 255], 1, 1, false),
+        }
+    }
+}
+
 /// Plain bark to draw with while the real maps are on their way, which on the web they
 /// are for a moment.
 pub unsafe fn placeholder_material(gl: &glow::Context) -> MaterialTextures {
@@ -782,6 +794,20 @@ pub struct BarkLook {
 }
 
 impl BarkLook {
+    /// The material as its maps have it: no moss, no tint, no weathering.
+    pub fn plain() -> Self {
+        Self {
+            moss_color: Vec3::ZERO,
+            moss_height: 0.0,
+            moss_amount: 0.0,
+            darken_low: 0.0,
+            tint: Vec3::ONE,
+            dead_color: Vec3::ONE,
+            dead_weathering: 0.0,
+            baked_occlusion: 0.0,
+        }
+    }
+
     pub fn from_species(mp: &arbor_core::species::MeshParams) -> Self {
         Self {
             moss_color: Vec3::from(mp.moss_color),

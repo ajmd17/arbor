@@ -1,8 +1,8 @@
 # Arbor
 
 Procedural tree model generator in Rust. Aim is to generate ~7k-20k tri models.
-It also makes the things that grow and lie around trees: ground cover (grasses,
-wildflowers and ferns) and rocks.
+It also makes the things that grow and lie around trees: shrubs, climbing and
+trailing vines, ground cover (grasses, wildflowers and ferns) and rocks.
 
 ![screenshot](docs/screenshot.png)
 
@@ -256,6 +256,32 @@ To sway a vertex, start at its row with its `t`. The stem there swings the verte
 its pivot by `reach × cantilever(t) × flexibility[order + 1]` metres, where
 `cantilever(x) = x²(6 − 4x + x²)/3`. Then move to the carrying stem's row and its
 `t`, and repeat until row 0.
+
+## Shrubs and vines
+
+Both are species like the trees, so they are picked, edited, saved and exported the
+same way, and export with the same wind data.
+
+**Shrubs** (`hazel`, `boxwood`, `juniper`) put up a clump of stems from the root
+instead of one trunk: `basal.count` of them, laid round a stool `basal.spread` across
+and leaning out by up to `basal.lean_deg`, each grown as `trunk` describes and shaped
+by the crown envelope. `basal.count: 1`, the default, is a tree.
+
+**Vines** (`ivy`, `twining_vine`, `hanging_vine`) set `vine`, and grow over a support
+instead of standing up: a `Wall`, a `Pillar` or the `Ground`, described in metres
+with its foot at the origin, so the vine drops onto a wall of the same size placed at
+the same point. The support is drawn in the viewer but not exported. The trunk is
+the runners and the levels their shoots. Each stem is held to the surface by
+`adhesion`, pulled up or down along it by its level's `phototropism` and `gravity`,
+wound round it by `twine`, and stops where another stem already covers the ground
+(`crowding`) or once it has lost the support for `free_length` metres. Planted at the
+`Top` instead of the `Foot`, the runners run along under the top edge and the next
+level hangs from them, so the strands sway from the ledge. Leaves on a clinging stem
+lie in the plane of the surface with their faces turned out.
+
+The ivy, hazel, box and heart-shaped leaf sets are painted rather than photographed
+(`leaf_art.rs`); `cargo run --release -p arbor-core --example paint_leaves` repaints
+them into `assets/textures`.
 
 ## Ground cover
 

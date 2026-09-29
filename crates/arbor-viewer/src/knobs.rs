@@ -18,7 +18,8 @@
 //! seed. The panel edits the species, ranges and all, and says under each range where
 //! the tree on screen landed.
 
-use arbor_core::species::{BarkIrregularity, ChildParams, ChildPattern, LeafParams, MeshParams, StemParams, WindParams};
+use arbor_core::species::{BarkIrregularity, BasalParams, ChildParams, ChildPattern, LeafParams, MeshParams, StemParams, WindParams};
+use arbor_core::VineParams;
 use arbor_core::{EnvelopeParams, Ranged, SpeciesParams, SpeciesTemplate};
 use eframe::egui;
 
@@ -71,13 +72,49 @@ const fn log_knob<T>(
 /// Crown shape and the multipliers that act on every level at once. These are the
 /// quick controls, shown open at the top of the panel.
 pub static SHAPE: &[Knob<SpeciesTemplate>] = &[
-    knob("Trunk length", (2.0, 60.0), "Declared length of the trunk, in metres. The crown envelope stretches along it, so the crown stays on the tree; it does not get wider, which is what Envelope scale is for.", |p| &mut p.trunk.length),
+    log_knob("Trunk length", (0.3, 60.0), "Declared length of the trunk, in metres: of every stem, for a shrub, and of the runners, for a vine. The crown envelope stretches along it, so the crown stays on the tree; it does not get wider, which is what Envelope scale is for.", |p| &mut p.trunk.length),
     knob("Envelope scale", (0.4, 2.5), "Scales the crown envelope that steers and prunes every branch.", |p| &mut p.envelope_scale),
     knob("Gravity", (0.0, 4.0), "Multiplies every level's gravity at once.", |p| &mut p.gravity_multiplier),
     knob("Phototropism", (0.0, 4.0), "Multiplies every level's pull toward the light at once.", |p| &mut p.phototropism_multiplier),
 ];
 
 pub const BRANCH_LEVELS: (u32, u32) = (1, 6);
+
+/// The stems a plant puts up from its root: one for a tree, a clump for a shrub.
+pub static BASAL: Group<BasalParams<Ranged>> = Group {
+    title: "Stems from the root",
+    knobs: &[
+        knob("Lean", (0.0, 90.0), "How far from upright the outermost stems of a clump lean, in degrees. Those inside it lean less, which opens the clump into a vase.", |b| &mut b.lean_deg),
+        knob("Lean variance", (0.0, 45.0), "Random spread on each stem's lean, in degrees.", |b| &mut b.lean_variance_deg),
+        knob("Stool radius", (0.0, 2.0), "Radius of the patch of ground the stems come up from, in metres.", |b| &mut b.spread),
+        knob("Vigor variance", (0.0, 1.0), "Spread of drive between stems, as a fraction either way. An old clump has a few stems that have outgrown the rest.", |b| &mut b.vigor_variance),
+    ],
+    counts: &[
+        Count { label: "Stems", range: (1, 40), help: "Stems from the root. One is a tree; several, each grown as the trunk describes, a shrub.", get: |b| &mut b.count },
+        Count { label: "Stems variance", range: (0, 20), help: "Stems more or fewer than that, drawn for each plant.", get: |b| &mut b.count_variance },
+    ],
+};
+
+/// How a climber holds to what it grows over.
+pub static VINE: Group<VineParams<Ranged>> = Group {
+    title: "Climbing",
+    knobs: &[
+        knob("Heading", (0.0, 180.0), "Which way the runners set off across the support, in degrees from straight up it: 0 climbs, 90 runs sideways, 180 heads down.", |v| &mut v.heading_deg),
+        knob("Fan", (0.0, 90.0), "Random spread either side of that heading, in degrees.", |v| &mut v.fan_deg),
+        knob("Adhesion", (0.0, 1.0), "How hard a stem holds to its support. 0 hangs free; 1 lies on the surface wherever it can reach it.", |v| &mut v.adhesion),
+        log_knob("Reach", (0.01, 1.0), "How far off the surface a stem can still find it, in metres.", |v| &mut v.reach),
+        knob("Twine", (-0.5, 0.5), "Sideways pull round the support per segment, for a vine that winds. The sign is the hand of the spiral.", |v| &mut v.twine),
+        knob("Stand off", (0.0, 1.0), "Share of side shoots that grow out away from the support rather than along it.", |v| &mut v.stand_off),
+        knob("Stand-off angle", (0.0, 90.0), "How far those shoots lean out from the surface, in degrees.", |v| &mut v.stand_off_deg),
+        knob("Free length", (0.0, 3.0), "How far a clinging stem that has lost its support grows on before it gives up, in metres. Zero never gives up: a trailer hanging free.", |v| &mut v.free_length),
+        knob("Crowding", (0.0, 2.0), "Metres a tip may run through ground another stem already holds before it stops. Spreads a vine into an even cover. Zero never stops.", |v| &mut v.crowding),
+        log_knob("Crowding cell", (0.02, 0.5), "Size of the cells that ground is measured in, in metres.", |v| &mut v.crowding_cell),
+        knob("Leaf lift", (0.0, 90.0), "How far a leaf on a clinging stem stands off the surface, in degrees. Near 0 they lie flat like shingles.", |v| &mut v.leaf_lift_deg),
+    ],
+    counts: &[
+        Count { label: "Runners", range: (1, 24), help: "Stems the plant puts out from its root.", get: |v| &mut v.runners },
+    ],
+};
 
 pub static SPLIT_DEPTH: Count<SpeciesTemplate> = Count {
     label: "Fork depth",

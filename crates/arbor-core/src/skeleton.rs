@@ -27,6 +27,12 @@ pub struct SkeletonNode {
     /// and falls, leaving a stub. Broken nodes are skipped by everything downstream, so
     /// they are absent rather than merely dead.
     pub broken: bool,
+    /// Outward normal of the surface a climber is holding to here, or zero where the
+    /// stem is free of it: every node of a tree, and a vine's shoots once they have
+    /// left the wall. Foliage turns its face along this, which is what makes ivy lie
+    /// flat over a wall with its leaves overlapping like shingles instead of standing
+    /// out in every direction the way a tree's do.
+    pub surface: Vec3,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -59,6 +65,7 @@ impl Skeleton {
             stem,
             dead: false,
             broken: false,
+            surface: Vec3::ZERO,
         });
         if let Some(p) = parent {
             self.nodes[p as usize].children.push(index);
