@@ -104,8 +104,9 @@ struct Startup {
     /// Ground cover: tint each clump by its LOD, and the field's size.
     lod_tint: bool,
     field: Option<f32>,
-    /// Open in rock mode, on this preset.
+    /// Open in rock mode, on this preset, showing this LOD.
     rock: Option<String>,
+    rock_lod: Option<usize>,
 }
 
 /// What the viewer is showing: a tree, a clump of ground cover planted over a field, or
@@ -245,6 +246,7 @@ fn main() -> eframe::Result<()> {
         lod_tint: args.iter().any(|a| a == "--lod-tint"),
         field: num("--field"),
         rock: flag("--rock").cloned(),
+        rock_lod: flag("--lod").and_then(|s| s.parse().ok()),
     };
 
     let options = eframe::NativeOptions {
@@ -687,6 +689,10 @@ impl App {
         if app.view == ViewMode::Rock {
             app.rock_camera();
             app.ground = Ground::Plain;
+            if let Some(lod) = startup.rock_lod {
+                app.rock.lod = lod.min(app.rock.mesh.lods.len().saturating_sub(1));
+                app.rock.mesh_dirty = true;
+            }
         }
         app.cover.tint_lods = startup.lod_tint;
         if let Some(f) = startup.field {
@@ -1060,11 +1066,11 @@ impl App {
             self.rock_gpu.lock().unwrap().upload(&self.gl, &mesh);
             self.rock.mesh_dirty = false;
         }
-        if self.rock.maps_stale() {
+        if let Some(size) = self.rock.bake_due(self.capture.is_some()) {
             if let Some(old) = self.rock_material.take() {
                 old.delete(&self.gl);
             }
-            self.rock_material = Some(unsafe { self.rock.bake_material(&self.gl) });
+            self.rock_material = Some(unsafe { self.rock.bake_material(&self.gl, size) });
         }
     }
 
@@ -1216,8 +1222,8 @@ impl App {
         for (i, lod) in r.mesh.lods.iter().enumerate() {
             ui.monospace(format!("LOD{i}:   {} tris", lod.triangle_count()));
         }
-        let (t, w, h) = r.params.texture.size();
-        ui.monospace(format!("maps:   {w} x {h} ({t} a face; preview {})", rock_view::PREVIEW_TEXELS.min(t)));
+        let t = r.params.texture.size();
+        ui.monospace(format!("maps:   {t} x {t} (showing {})", r.baked_size));
         ui.monospace(format!("gen:    {:.2} ms, bake {:.0} ms", r.gen_ms, r.bake_ms));
         ui.monospace(format!("frame:  {:.1} ms", ctx.input(|i| i.stable_dt) * 1000.0));
         ui.separator();
@@ -2102,6 +2108,10 @@ impl eframe::App for App {
         }
         if self.view == ViewMode::Rock {
             self.sync_rock();
+            // The full bake waits for the sliders to be still; keep drawing until it lands.
+            if self.rock.bake_pending() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
         }
         // Maps being fetched are put in on the frame they arrive.
         self.sync_materials();

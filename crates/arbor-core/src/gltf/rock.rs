@@ -27,8 +27,8 @@ pub struct RockTextures {
 }
 
 impl RockTextures {
-    pub fn bake(params: &RockParams) -> Result<Self, String> {
-        Self::encode(&bake_rock(params))
+    pub fn bake(params: &RockParams, mesh: &RockMesh) -> Result<Self, String> {
+        Self::encode(&bake_rock(params, mesh))
     }
 
     pub fn encode(maps: &RockMaps) -> Result<Self, String> {
@@ -92,7 +92,7 @@ pub fn export_rock_batch(
         at_seed.seed = template.seed.wrapping_add(u64::from(i));
         let params = at_seed.instance();
         let mesh = build_rock(&params);
-        let textures = RockTextures::bake(&params)?;
+        let textures = RockTextures::bake(&params, &mesh)?;
         let path = dir.join(batch_file(stem, format, params.seed, count));
         let written = write_rock(&path, &mesh, &params, &textures)?;
         report.bytes += written.bytes;
@@ -178,9 +178,9 @@ mod tests {
     #[test]
     fn a_rock_exports_as_a_valid_glb_with_every_lod() {
         let mut p = parse_rock_template(BOULDER_RON).unwrap().instance();
-        p.texture.resolution = 48;
+        p.texture.size = 64;
         let mesh = build_rock(&p);
-        let glb = rock_glb(&mesh, &p, &RockTextures::bake(&p).unwrap());
+        let glb = rock_glb(&mesh, &p, &RockTextures::bake(&p, &mesh).unwrap());
         let (doc, bin) = chunks(&glb);
         let meshes = validate(&doc, bin);
         assert_eq!(meshes.len(), mesh.lods.len());

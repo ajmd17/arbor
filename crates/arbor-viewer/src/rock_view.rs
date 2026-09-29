@@ -1,8 +1,9 @@
 //! Rock mode: one rock, sunk into the ground as it was built to be, drawn through the
 //! bark pipeline, which already does what stone needs: its maps, shadows and occlusion.
 //!
-//! The maps are baked at a preview resolution while the sliders move, since a full bake
-//! takes a second; an export bakes them at the preset's own.
+//! The maps are baked small while the sliders move, then again at the preset's own size
+//! (or less on the web) once they have been still a moment, so what is looked at closely
+//! is what an export writes.
 
 use std::path::Path;
 
@@ -16,8 +17,12 @@ use eframe::glow;
 use crate::gpu::{self, BarkLook, MaterialTextures};
 use crate::knobs::{Group, Knob};
 
-/// Texels per face edge the preview's maps are baked at.
-pub const PREVIEW_TEXELS: u32 = 256;
+/// Texels a side the maps are baked at while the sliders move, and at most once they
+/// stop: less on the web, which has one thread to bake them on.
+pub const QUICK_SIZE: u32 = if cfg!(target_arch = "wasm32") { 256 } else { 512 };
+pub const PREVIEW_SIZE: u32 = if cfg!(target_arch = "wasm32") { 1024 } else { 2048 };
+/// How long the sliders must be still before the full bake.
+const SETTLE_SECONDS: f32 = 0.35;
 
 /// A rock preset the panel can load.
 pub struct RockPreset {
@@ -87,8 +92,11 @@ pub struct RockScene {
     pub mesh: RockMesh,
     /// The LOD drawn.
     pub lod: usize,
-    /// The rock the maps on the GPU were baked for.
+    /// The rock the maps on the GPU were baked for, the size they were baked at, and
+    /// when the rock last changed.
     pub baked: Option<RockParams>,
+    pub baked_size: u32,
+    pub changed: web_time::Instant,
     pub dirty: bool,
     /// The mesh on the GPU is out of date.
     pub mesh_dirty: bool,
@@ -121,6 +129,8 @@ impl RockScene {
             mesh,
             lod: 0,
             baked: None,
+            baked_size: 0,
+            changed: web_time::Instant::now(),
             dirty: true,
             mesh_dirty: true,
             variations: 1,
@@ -153,6 +163,7 @@ impl RockScene {
         self.lod = self.lod.min(self.mesh.lods.len().saturating_sub(1));
         self.mesh_dirty = true;
         self.dirty = false;
+        self.changed = web_time::Instant::now();
         self.gen_ms = t.elapsed().as_secs_f32() * 1000.0;
     }
 
@@ -176,21 +187,38 @@ impl RockScene {
         (self.mesh.min, self.mesh.max)
     }
 
-    /// Whether the maps on the GPU are out of date.
-    pub fn maps_stale(&self) -> bool {
-        self.baked.as_ref() != Some(&self.params)
+    /// The size the maps want baking at now, if they want baking: small straight after a
+    /// change, full size once the rock has been still a moment, or at once when `hurry`.
+    pub fn bake_due(&self, hurry: bool) -> Option<u32> {
+        let full = PREVIEW_SIZE.min(self.params.texture.size());
+        let quick = QUICK_SIZE.min(full);
+        let settled = hurry || self.changed.elapsed().as_secs_f32() >= SETTLE_SECONDS;
+        if self.baked.as_ref() != Some(&self.params) {
+            Some(if settled { full } else { quick })
+        } else if self.baked_size < full && settled {
+            Some(full)
+        } else {
+            None
+        }
     }
 
-    /// Bakes the maps at the preview resolution and puts them on the GPU.
-    pub unsafe fn bake_material(&mut self, gl: &glow::Context) -> MaterialTextures {
+    /// Whether a full bake is still to come, so the viewer keeps drawing until it has.
+    pub fn bake_pending(&self) -> bool {
+        self.baked.as_ref() != Some(&self.params) || self.baked_size < PREVIEW_SIZE.min(self.params.texture.size())
+    }
+
+    /// Bakes the maps `size` texels a side and puts them on the GPU.
+    pub unsafe fn bake_material(&mut self, gl: &glow::Context, size: u32) -> MaterialTextures {
         let t = web_time::Instant::now();
-        let maps = bake_rock_at(&self.params, PREVIEW_TEXELS.min(self.params.texture.resolution));
+        let maps = bake_rock_at(&self.params, &self.mesh, size);
         self.baked = Some(self.params.clone());
+        self.baked_size = size;
         self.bake_ms = t.elapsed().as_secs_f32() * 1000.0;
-        // The bark shader reads roughness from red, where the export packs occlusion.
+        // The bark shader reads roughness from red, where the export packs occlusion,
+        // and takes the occlusion from green, where the export packs roughness.
         let mut rough = maps.orm.pixels.clone();
         for px in rough.chunks_exact_mut(4) {
-            px[0] = px[1];
+            px.swap(0, 1);
         }
         unsafe {
             MaterialTextures {
@@ -201,7 +229,8 @@ impl RockScene {
         }
     }
 
-    /// Bark's weathering and moss off: the maps carry everything the stone looks like.
+    /// Bark's weathering and moss off: the maps carry everything the stone looks like,
+    /// its occlusion among it.
     pub fn look() -> BarkLook {
         BarkLook {
             moss_color: glam::Vec3::ZERO,
@@ -211,6 +240,7 @@ impl RockScene {
             tint: glam::Vec3::ONE,
             dead_color: glam::Vec3::ZERO,
             dead_weathering: 0.0,
+            baked_occlusion: 1.0,
         }
     }
 }
@@ -231,15 +261,23 @@ pub static SHAPE: Group<RockTemplate> = Group {
     title: "Shape",
     knobs: &[
         knob("Width", (0.1, 6.0), "Metres across, before noise.", |p| &mut p.shape.width),
-        knob("Height", (0.1, 4.0), "Metres high, before noise.", |p| &mut p.shape.height),
+        knob("Height", (0.1, 4.0), "Metres high, before noise and the flat bottom.", |p| &mut p.shape.height),
         knob("Depth", (0.1, 6.0), "Metres deep, before noise.", |p| &mut p.shape.depth),
         knob("Facets", (0.0, 32.0), "Planes the rock is cut by: its broad faces.", |p| &mut p.shape.facets),
-        knob("Facet depth", (0.0, 0.8), "How deep those planes cut, as a share of the radius.", |p| &mut p.shape.facet_depth),
+        knob("Facet depth", (0.0, 0.8), "How deep those planes cut, as a share of how far the rock reaches that way.", |p| &mut p.shape.facet_depth),
         knob("Sharpness", (2.0, 80.0), "How crisply the faces meet: low rounds the edges like a river stone, high leaves them like fresh rubble.", |p| &mut p.shape.sharpness),
+        knob("Wear", (0.0, 1.0), "How unevenly the edges are worn: at 1 some stay four times as crisp as others.", |p| &mut p.shape.wear),
         knob("Bulge", (0.0, 0.3), "Swelling and denting of the whole, as a share of the radius.", |p| &mut p.shape.bulge),
         knob("Bulge scale", (0.2, 4.0), "How many swells fit round the rock.", |p| &mut p.shape.bulge_scale),
-        knob("Ridges", (0.0, 0.15), "Ridges and grooves over the faces.", |p| &mut p.shape.ridges),
+        knob("Undulation", (0.0, 0.1), "Broad rolls and hollows over the faces, as a share of the radius.", |p| &mut p.shape.undulation),
+        knob("Chips", (0.0, 0.12), "How deep chips are struck off the crisper edges, as a share of the radius.", |p| &mut p.shape.chips),
+        knob("Chip size", (0.05, 1.0), "How far each chip runs along its edge, as a share of the radius.", |p| &mut p.shape.chip_size),
+        knob("Flaking", (0.0, 1.0), "Share of the rock broken into plates flaking off it, stacked a step above one another.", |p| &mut p.shape.flaking),
+        knob("Flake step", (0.0, 0.05), "Height of each plate's step, as a share of the radius.", |p| &mut p.shape.flake_step),
+        knob("Flake size", (0.05, 2.0), "Size of a plate, as a share of the radius.", |p| &mut p.shape.flake_size),
+        knob("Bedded", (0.0, 1.0), "How far the plates lie along the bedding: shells following the surface at 0, layers of slate at 1.", |p| &mut p.shape.bedded),
         knob("Fracture", (0.0, 0.1), "Stepped ledges where the stone has split along its bedding.", |p| &mut p.shape.fracture),
+        knob("Flat top", (0.0, 1.0), "Where the top is cut flat along the bedding, as a share of the half height: 0 for none.", |p| &mut p.shape.flat_top),
         knob("Flat bottom", (0.0, 0.9), "Share of the height cut flat where it sits on the ground.", |p| &mut p.shape.flat_bottom),
         knob("Bury", (0.0, 0.9), "Share of the height below the origin, so a rock set on the ground is sunk into it.", |p| &mut p.shape.bury),
     ],
@@ -249,11 +287,14 @@ pub static SHAPE: Group<RockTemplate> = Group {
 pub static SURFACE: Group<RockTemplate> = Group {
     title: "Surface",
     knobs: &[
-        knob("Grain", (0.0, 0.05), "Fine unevenness of the stone. Maps only.", |p| &mut p.surface.grain),
-        knob("Cracks", (0.0, 0.05), "Depth of the cracks. Maps only.", |p| &mut p.surface.cracks),
-        knob("Crack spread", (0.0, 1.0), "Share of the rock the cracks run over.", |p| &mut p.surface.crack_spread),
-        knob("Strata", (0.0, 0.03), "Fine banding across the bedding. Maps only.", |p| &mut p.surface.strata),
+        knob("Grain", (0.0, 0.006), "Height of the fine unevenness of the stone, metres. Maps only.", |p| &mut p.surface.grain),
+        knob("Pitting", (0.0, 1.0), "Share of the stone pitted with small holes. Maps only.", |p| &mut p.surface.pitting),
+        knob("Cracks", (0.0, 8.0), "Joint cracks through the stone, showing as near straight lines. Maps only.", |p| &mut p.surface.cracks),
+        knob("Crack width", (0.0, 0.02), "How wide the cracks open, metres.", |p| &mut p.surface.crack_width),
+        knob("Strata", (0.0, 1.5), "Bands of bedding across the stone, in colour and in relief.", |p| &mut p.surface.strata),
         knob("Cavity", (0.0, 2.0), "How strongly hollows and cracks are darkened and occluded.", |p| &mut p.surface.cavity),
+        knob("Crunch", (0.0, 0.012), "Height of the knobbly, broken relief a few centimetres across, metres. Maps only.", |p| &mut p.surface.crunch),
+        knob("Foliation", (0.0, 1.0), "How far the grain is drawn out into parallel lines, as in gneiss. Maps only.", |p| &mut p.surface.foliation),
     ],
     counts: &[],
 };
@@ -265,7 +306,7 @@ pub static MOSS: Group<RockTemplate> = Group {
         knob("Upward", (0.0, 2.0), "How far moss keeps to what faces up, against creeping up from the ground.", |p| &mut p.moss.upward),
         knob("Patchiness", (0.05, 3.0), "How broken up the moss is.", |p| &mut p.moss.patchiness),
         knob("Softness", (0.01, 1.0), "How soft the edge of a patch is.", |p| &mut p.moss.softness),
-        knob("Crevices", (0.0, 1.0), "How far moss gathers in hollows and cracks.", |p| &mut p.moss.crevices),
+        knob("Crevices", (0.0, 1.0), "How far moss gathers in hollows, cracks and along ledges.", |p| &mut p.moss.crevices),
         knob("Dry", (0.0, 1.0), "Share of the moss dried to a paler olive.", |p| &mut p.moss.dry),
     ],
     counts: &[],

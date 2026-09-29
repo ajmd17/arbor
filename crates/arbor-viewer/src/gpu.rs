@@ -762,6 +762,7 @@ pub struct GpuMesh {
     u_metallic: glow::UniformLocation,
     u_mode: glow::UniformLocation,
     u_use_normal_map: glow::UniformLocation,
+    u_baked_occlusion: glow::UniformLocation,
 }
 
 /// Colour of the moss on the bark, how far up it reaches, how much of the bark it
@@ -775,6 +776,9 @@ pub struct BarkLook {
     pub tint: Vec3,
     pub dead_color: Vec3,
     pub dead_weathering: f32,
+    /// How far the green of the roughness map is taken as occlusion baked into the
+    /// maps: rocks carry it there, bark does not.
+    pub baked_occlusion: f32,
 }
 
 impl BarkLook {
@@ -787,6 +791,7 @@ impl BarkLook {
             tint: Vec3::from(mp.bark_tint),
             dead_color: Vec3::from(mp.dead_wood_color),
             dead_weathering: mp.dead_wood_weathering,
+            baked_occlusion: 0.0,
         }
     }
 }
@@ -865,6 +870,7 @@ impl GpuMesh {
                 u_metallic: u("u_metallic"),
                 u_mode: u("u_mode"),
                 u_use_normal_map: u("u_use_normal_map"),
+                u_baked_occlusion: u("u_baked_occlusion"),
                 program,
             }
         }
@@ -923,6 +929,7 @@ impl GpuMesh {
             gl.uniform_1_f32(Some(&self.u_moss_height), p.bark.moss_height);
             gl.uniform_1_f32(Some(&self.u_moss_amount), p.bark.moss_amount);
             gl.uniform_1_f32(Some(&self.u_bark_darken_low), p.bark.darken_low);
+            gl.uniform_1_f32(Some(&self.u_baked_occlusion), p.bark.baked_occlusion);
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
             gl.uniform_1_i32(
                 Some(&self.u_use_normal_map),

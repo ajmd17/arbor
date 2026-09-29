@@ -390,7 +390,7 @@ fn rock_main(args: &[String]) {
 
     if maps {
         let t = std::time::Instant::now();
-        let baked = bake_rock(&params);
+        let baked = bake_rock(&params, &mesh);
         std::fs::create_dir_all(&out).ok();
         for (map, bitmap) in [("albedo", &baked.albedo), ("normal", &baked.normal), ("orm", &baked.orm)] {
             let path = out.join(format!("{}_{map}.png", params.name));

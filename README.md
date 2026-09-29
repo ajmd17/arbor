@@ -83,7 +83,7 @@ over a field; `--cover-view <eye|far>` picks the eye-height or 45 m viewpoint,
 `--field <metres>` the size of the field, and `--lod-tint` colours each clump by the
 LOD its screen size picks (white, red, blue).
 
-Rocks: `--rock <preset>` opens in rock mode.
+Rocks: `--rock <preset>` opens in rock mode, `--lod N` on its Nth LOD.
 
 A screenshot is taken in still air unless `--wind` asks otherwise, and then on a
 stopped clock (`--wind-time`, default 0), so the same command always gives the same
@@ -280,29 +280,43 @@ and `ARBOR_ground_cover` extensions an engine needs to sway it and plant it.
 
 ## Rocks
 
-A rock is a sphere cut by a handful of planes (`facets`, `facet_depth`, softened by
-`sharpness`), swelled and dented by noise, stepped into ledges across its bedding
-(`fracture`), cut flat underneath and sunk a little below its origin (`bury`), so one
-set on the ground already sits in it. Its maps are painted from the same surface at
-far finer detail: grain, cracks and strata only the maps carry, speckle, lichen and
-water streaks on the stone, occlusion in the hollows, and moss where the stone faces
-up, in its cracks and creeping up from the ground (`moss.amount` runs from none at -1
-to nearly all of it at 1). Presets live in `assets/rocks`: `boulder`,
-`mossy_boulder`, `slab` and `stone`. Any number in `shape`, `surface` or `moss` may be
-a range.
+A rock is an ellipsoid cut by a handful of planes into broad faces (`facets`,
+`facet_depth`), their edges worn round (`sharpness`) by amounts that vary from edge to
+edge (`wear`), rolled into lumps and hollows (`undulation`), chipped where an edge is
+crisp enough to chip (`chips`, `chip_size`), stepped into ledges down its sides where it
+is bedded (`fracture`), cut flat on top along the bedding for a slab (`flat_top`) and
+underneath (`flat_bottom`), and sunk a little below its origin (`bury`), so one set on
+the ground already sits in it.
+
+Its maps carry what the mesh should not: plates flaking off the stone (`flaking`,
+`flake_step`, `flake_size`, and `bedded` from exfoliating shells to layers of slate),
+broken along angular edges and thick in some stretches, thin in others; grain, clustered
+pits and joint cracks, all held to what the texels can show so none of it aliases. They
+are painted like a photograph of stone: a warmer crust on what faces up and stands proud,
+the stone beneath where it has flaked, darker in every hollow and crack, paler on lips
+and edges, mottled, grained, stained, lichened, streaked, soiled at the foot, and mossed
+(`moss.amount` runs from none at -1 to nearly all of it at 1) in a mosaic of cushions
+with the stone showing between and litter caught in them. Presets live in
+`assets/rocks`: `boulder`, `mossy_boulder`, `slab` and `stone`. Any number in `shape`,
+`surface` or `moss` may be a range.
 
 ```bash
 cargo run --release -p arbor-cli -- rock boulder --seed 7 --variations 10 --maps
 ```
 
-The mesh is a cube pushed out to the surface, so there is nothing to unwrap: the maps
-are the cube's six faces in a three by two sheet, each padded by carrying the face on
-past its edge. Every seed is its own stone, maps and all. The export carries its LODs
-by `MSFT_lod`, the standard metallic-roughness material with occlusion packed into the
-red of the roughness map, and `ARBOR_rock` on every primitive: `bury` and `height` in
-metres, and `lods`, the screen size each LOD takes over at. The viewer bakes its maps
-at 256 texels a face while the sliders move; an export bakes them at the preset's
-`texture.resolution`.
+The surface is sampled finely through a cube pushed out onto it, then each LOD is cut
+down to its `triangles` by collapsing edges, least error first, so the budget goes to
+the silhouette rather than flat faces (a boulder is 1600 / 600 / 200 / 70: past that the
+maps carry the detail). Each cube face is one chart; collapses keep the seams between
+charts on their lines, so every LOD stays closed and shares the one set of maps. The
+charts are packed into one square sheet (`texture.size`, 2048 for the big rocks), each
+sized to the stone it covers. Normals are baked against LOD0 itself, in the frame the
+renderer interpolates. Every seed is its own stone, maps and all. The export carries its
+LODs by `MSFT_lod`, the standard metallic-roughness material with occlusion packed into
+the red of the roughness map, and `ARBOR_rock` on every primitive: `bury` and `height`
+in metres, and `lods`, the screen size each LOD takes over at. The viewer bakes the maps
+at 512 while the sliders move and at the preset's own size (up to 2048; 1024 on the web)
+once they have been still a moment, and shows the baked occlusion.
 
 ## Tools
 
