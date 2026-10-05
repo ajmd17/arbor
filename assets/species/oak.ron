@@ -255,9 +255,13 @@
         hue_variance: 0.18,
         interior_shade: 0.55,
         cluster: Some((
-            count: 128,
+            // 220 leaves where the leaf this was first built from took 128. A scanned
+            // English oak leaf is cut far deeper between its lobes and covers a third
+            // less of its own outline, and this bakes the cell back to the half-covered
+            // card the canopy was tuned at.
+            count: 220,
             shoots: 3,
-            leaf_length: 0.19,
+            leaf_length: 0.20,
             base_angle_deg: 92.0,
             tip_angle_deg: 66.0,
             tip_scale: 0.8,
@@ -273,14 +277,25 @@
             variants: 4,
             shoot_base: 0.94,
             shoot_tip: 0.14,
-            source_aspect: 0.808,
+            source_aspect: 0.667,
+            sources: 6,
             cell_size: 1024,
         )),
+        // The bake's source: six English oak leaves stacked down the sheet, off Raw
+        // Catalog's Atlas-1090-A, with the map of the light each lets through. The
+        // sheet was scanned from above only, so the underside in the right-hand column
+        // is the same leaf made paler and greyer. To rebuild it:
+        //
+        //   import_textures oak_scan_sheet --size 4096 --rawcatalog 2963_green-oak-leaves
+        //   repack_atlas oak_scan_sheet leaf_english_oak --keep 8 --pick 0,1,2,4,5,6
+        //       --cell 384x576 --back 0.6,1.2
+        //
+        // after which the sheet can be deleted.
         atlas_cols: 2,
         atlas_rows: 1,
-        atlas_front: 1,
-        atlas_back: 0,
-        texture: "leaf_oak",
+        atlas_front: 0,
+        atlas_back: 1,
+        texture: "leaf_english_oak",
     ),
     wind: (
         flutter: 0.5,

@@ -11,6 +11,9 @@
 //! the hue of pixels inside `--band` (degrees) by `--hue`, scales their saturation and
 //! value, and feathers the edge of the band so nothing on the boundary is cut in two.
 //! Twigs, bud scales and dry needles sit below the band and come through untouched.
+//!
+//! A set's translucency map, where it has one, is moved with its albedo: the light
+//! through a needle is the colour of the needle.
 
 use image::Rgba;
 
@@ -42,36 +45,41 @@ fn main() {
     let val_k = num("--val", 1.0);
     let feather = num("--feather", 12.0).max(0.1);
 
-    let path = format!("{DIR}/{name}_albedo.png");
-    let mut img = texture::open(&path);
-    let mut moved = 0usize;
-    for p in img.pixels_mut() {
-        let [r, g, b, a] = p.0;
-        let (h, s, v) = rgb_to_hsv(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-        // How far inside the band this hue sits, ramping over `feather` at each edge. A
-        // grey has no hue worth moving, so saturation gates it as well.
-        let inside = ((h - lo) / feather).min((hi - h) / feather).clamp(0.0, 1.0);
-        let w = inside * (s / 0.12).clamp(0.0, 1.0);
-        if w <= 0.0 {
+    for map in ["albedo", "translucency"] {
+        let path = format!("{DIR}/{name}_{map}.png");
+        if !std::path::Path::new(&path).exists() {
             continue;
         }
-        moved += 1;
-        let h2 = (h + shift * w).rem_euclid(360.0);
-        let s2 = (s * (1.0 + (sat_k - 1.0) * w)).clamp(0.0, 1.0);
-        let v2 = (v * (1.0 + (val_k - 1.0) * w)).clamp(0.0, 1.0);
-        let (r2, g2, b2) = hsv_to_rgb(h2, s2, v2);
-        *p = Rgba([
-            (r2 * 255.0).round() as u8,
-            (g2 * 255.0).round() as u8,
-            (b2 * 255.0).round() as u8,
-            a,
-        ]);
+        let mut img = texture::open(&path);
+        let mut moved = 0usize;
+        for p in img.pixels_mut() {
+            let [r, g, b, a] = p.0;
+            let (h, s, v) = rgb_to_hsv(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+            // How far inside the band this hue sits, ramping over `feather` at each edge. A
+            // grey has no hue worth moving, so saturation gates it as well.
+            let inside = ((h - lo) / feather).min((hi - h) / feather).clamp(0.0, 1.0);
+            let w = inside * (s / 0.12).clamp(0.0, 1.0);
+            if w <= 0.0 {
+                continue;
+            }
+            moved += 1;
+            let h2 = (h + shift * w).rem_euclid(360.0);
+            let s2 = (s * (1.0 + (sat_k - 1.0) * w)).clamp(0.0, 1.0);
+            let v2 = (v * (1.0 + (val_k - 1.0) * w)).clamp(0.0, 1.0);
+            let (r2, g2, b2) = hsv_to_rgb(h2, s2, v2);
+            *p = Rgba([
+                (r2 * 255.0).round() as u8,
+                (g2 * 255.0).round() as u8,
+                (b2 * 255.0).round() as u8,
+                a,
+            ]);
+        }
+        texture::save(&img, std::path::Path::new(DIR), &name, map);
+        println!(
+            "recoloured {moved} of {} pixels in {path}",
+            img.width() * img.height()
+        );
     }
-    texture::save(&img, std::path::Path::new(DIR), &name, "albedo");
-    println!(
-        "recoloured {moved} of {} pixels in {path}",
-        img.width() * img.height()
-    );
 }
 
 fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {

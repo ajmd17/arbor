@@ -36,7 +36,7 @@ touch "$out/.nojekyll"
 mkdir -p "$out/assets/textures"
 names=$(grep -ohE '(bark_)?texture: "[^"]+"' assets/species/*.ron | sed -E 's/.*"(.*)"/\1/' | sort -u)
 for name in $names; do
-    for map in albedo normal roughness; do
+    for map in albedo normal roughness translucency; do
         file="assets/textures/${name}_${map}.png"
         if [ -f "$file" ]; then
             cp -u "$file" "$out/assets/textures/"

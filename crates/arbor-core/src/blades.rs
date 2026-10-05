@@ -220,6 +220,7 @@ pub fn bake_blades(p: &BladeAtlasParams) -> BakedBlades {
             albedo,
             normal: Some(normal),
             roughness: Some(rough),
+            translucency: None,
         },
         coverage,
     }

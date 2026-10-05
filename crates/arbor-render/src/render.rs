@@ -19,7 +19,7 @@ use crate::shaders;
 /// Where every lit program reads each of its textures. Set once per program, since a
 /// sampler left unset reads unit 0, and two samplers of different kinds on one unit
 /// fail every draw the program makes.
-const SAMPLER_UNITS: [(&str, u32); 10] = [
+const SAMPLER_UNITS: [(&str, u32); 11] = [
     ("u_albedo_tex", 0),
     ("u_normal_tex", 1),
     ("u_rough_tex", 2),
@@ -30,6 +30,7 @@ const SAMPLER_UNITS: [(&str, u32); 10] = [
     ("u_ao_tex", UNIT_AO),
     ("u_equirect", UNIT_EQUIRECT),
     ("u_canopy", UNIT_CANOPY),
+    ("u_translucency_tex", UNIT_TRANSLUCENCY),
 ];
 const UNIT_SHADOW: u32 = 3;
 const UNIT_SHADOW_CMP: u32 = 4;
@@ -38,6 +39,7 @@ const UNIT_DFG: u32 = 6;
 const UNIT_AO: u32 = 7;
 const UNIT_EQUIRECT: u32 = 8;
 const UNIT_CANOPY: u32 = 9;
+pub(crate) const UNIT_TRANSLUCENCY: u32 = 10;
 
 /// The crown's coverage from above is drawn at this size, and blurred at a quarter of it.
 const CANOPY_SIZE: i32 = 256;

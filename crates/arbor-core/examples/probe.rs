@@ -28,7 +28,7 @@ fn main() {
         let l = build_leaves(&sk, &p);
         let src = load(&format!("assets/textures/{}_albedo.png", lp.texture));
         let c = match &lp.cluster {
-            Some(cp) => cov(&bake_cluster(cp, 1, 1, LeafMaps { albedo: &src, normal: None, roughness: None }).albedo),
+            Some(cp) => cov(&bake_cluster(cp, 1, 1, LeafMaps { albedo: &src, normal: None, roughness: None, translucency: None }).albedo),
             None => cov(&src),
         };
         let bark = mesh.triangle_count();

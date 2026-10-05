@@ -21,6 +21,9 @@ pub const TEXTURE_DIR: &str = "assets/textures";
 /// Every map a set of textures can have. Only the albedo is needed.
 pub const MAPS: [&str; 3] = ["albedo", "normal", "roughness"];
 
+/// The map only foliage has: the colour of the light a leaf lets through.
+pub const TRANSLUCENCY: &str = "translucency";
+
 /// Somewhere texture maps are read from, by file name.
 pub trait MapSource {
     /// The bytes of `file`, or `None` when there is no such file.
@@ -44,6 +47,13 @@ pub fn map_files(name: &str) -> Vec<String> {
     MAPS.iter().map(|map| map_file(name, map)).collect()
 }
 
+/// Every file a set of leaf textures called `name` may be read from.
+pub fn leaf_map_files(name: &str) -> Vec<String> {
+    let mut files = map_files(name);
+    files.push(map_file(name, TRANSLUCENCY));
+    files
+}
+
 /// An image file, decoded to RGBA8. `None` when it is unreadable, which every caller
 /// treats as the map being absent rather than as an error.
 pub fn decode(bytes: &[u8]) -> Option<Bitmap> {
@@ -64,6 +74,7 @@ pub fn load_bark_maps<S: MapSource + ?Sized>(source: &S, name: &str) -> Option<B
         albedo: load_bitmap(source, name, "albedo")?,
         normal: load_bitmap(source, name, "normal"),
         roughness: load_bitmap(source, name, "roughness"),
+        translucency: None,
     })
 }
 
@@ -73,6 +84,7 @@ pub fn load_leaf_maps<S: MapSource + ?Sized>(source: &S, lp: &LeafParams) -> Opt
     let albedo = load_bitmap(source, &lp.texture, "albedo")?;
     let normal = load_bitmap(source, &lp.texture, "normal");
     let roughness = load_bitmap(source, &lp.texture, "roughness");
+    let translucency = load_bitmap(source, &lp.texture, TRANSLUCENCY);
     Some(match &lp.cluster {
         Some(cluster) => bake_cluster(
             cluster,
@@ -82,12 +94,14 @@ pub fn load_leaf_maps<S: MapSource + ?Sized>(source: &S, lp: &LeafParams) -> Opt
                 albedo: &albedo,
                 normal: normal.as_ref(),
                 roughness: roughness.as_ref(),
+                translucency: translucency.as_ref(),
             },
         ),
         None => BakedMaps {
             albedo,
             normal,
             roughness,
+            translucency,
         },
     })
 }

@@ -288,6 +288,9 @@ pub struct MaterialTextures {
     pub albedo: glow::Texture,
     pub normal: glow::Texture,
     pub roughness: glow::Texture,
+    /// The colour of the light foliage lets through, where its art has a map of it.
+    /// Without one a leaf passes on its own colour.
+    pub translucency: Option<glow::Texture>,
 }
 
 impl MaterialTextures {
@@ -298,6 +301,9 @@ impl MaterialTextures {
             gl.delete_texture(self.albedo);
             gl.delete_texture(self.normal);
             gl.delete_texture(self.roughness);
+            if let Some(translucency) = self.translucency {
+                gl.delete_texture(translucency);
+            }
         }
     }
 }
@@ -541,6 +547,7 @@ pub unsafe fn load_material<S: MapSource + ?Sized>(
             albedo: load_or("albedo", procedural_bark_albedo, true),
             normal: load_or("normal", procedural_bark_normal, false),
             roughness: load_or("roughness", procedural_bark_roughness, false),
+            translucency: None,
         }
     }
 }
@@ -553,6 +560,7 @@ pub unsafe fn flat_material(gl: &glow::Context, albedo: [u8; 3], roughness: u8) 
             albedo: create_texture(gl, &[albedo[0], albedo[1], albedo[2], 255], 1, 1, true),
             normal: create_texture(gl, &[128, 128, 255, 255], 1, 1, false),
             roughness: create_texture(gl, &[roughness, 255, 255, 255], 1, 1, false),
+            translucency: None,
         }
     }
 }
@@ -565,6 +573,7 @@ pub unsafe fn placeholder_material(gl: &glow::Context) -> MaterialTextures {
             albedo: create_texture(gl, &[88, 66, 50, 255], 1, 1, true),
             normal: create_texture(gl, &[128, 128, 255, 255], 1, 1, false),
             roughness: create_texture(gl, &[220, 220, 220, 255], 1, 1, false),
+            translucency: None,
         }
     }
 }
@@ -596,7 +605,8 @@ pub unsafe fn load_leaf_material<S: MapSource + ?Sized>(
                 started.elapsed().as_secs_f32() * 1000.0
             );
         }
-        let (albedo, normal, roughness) = (maps.albedo, maps.normal, maps.roughness);
+        let (albedo, normal, roughness, translucency) =
+            (maps.albedo, maps.normal, maps.roughness, maps.translucency);
 
         let upload = |map: Option<Bitmap>, fill: u8| match map {
             Some(m) => create_texture(gl, &m.pixels, m.width, m.height, false),
@@ -606,6 +616,8 @@ pub unsafe fn load_leaf_material<S: MapSource + ?Sized>(
             albedo: create_cutout_texture(gl, &albedo.pixels, albedo.width, albedo.height),
             normal: upload(normal, 128),
             roughness: upload(roughness, 200),
+            translucency: translucency
+                .map(|m| create_texture(gl, &m.pixels, m.width, m.height, true)),
         })
     }
 }
@@ -1139,6 +1151,7 @@ pub struct GpuLeaves {
     u_alpha_cutoff: glow::UniformLocation,
     u_coverage_lod: glow::UniformLocation,
     u_translucency: glow::UniformLocation,
+    u_translucency_map: glow::UniformLocation,
     u_edge_sharpness: glow::UniformLocation,
     u_normal_blend: glow::UniformLocation,
     u_backface_volume: glow::UniformLocation,
@@ -1204,6 +1217,7 @@ impl GpuLeaves {
                 u_backface_volume: u("u_backface_volume"),
                 u_self_shadow: u("u_self_shadow"),
                 u_translucency: u("u_translucency"),
+                u_translucency_map: u("u_translucency_map"),
                 u_mode: u("u_mode"),
                 program,
             }
@@ -1288,6 +1302,12 @@ impl GpuLeaves {
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
             gl.active_texture(glow::TEXTURE2);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
+            // The sampler has to read something even when the art has no such map, and
+            // the shader then ignores what it reads.
+            let through = p.material.translucency;
+            gl.uniform_1_f32(Some(&self.u_translucency_map), if through.is_some() { 1.0 } else { 0.0 });
+            gl.active_texture(glow::TEXTURE0 + crate::render::UNIT_TRANSLUCENCY);
+            gl.bind_texture(glow::TEXTURE_2D, Some(through.unwrap_or(p.material.albedo)));
             // Bark tubes are closed and wound counter-clockwise when seen from
             // outside, so their interior is never worth rasterising. Culling it also
             // means a fragment always faces the camera, which is what lets the shader

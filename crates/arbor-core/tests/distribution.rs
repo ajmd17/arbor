@@ -579,6 +579,7 @@ fn card_coverage(params: &arbor_core::SpeciesParams) -> f32 {
                     albedo: &source,
                     normal: None,
                     roughness: None,
+                    translucency: None,
                 },
             )
             .albedo

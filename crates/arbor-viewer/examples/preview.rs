@@ -322,7 +322,7 @@ impl Tex {
             cluster,
             lp.atlas_cols,
             lp.atlas_rows,
-            LeafMaps { albedo: &src, normal: None, roughness: None },
+            LeafMaps { albedo: &src, normal: None, roughness: None, translucency: None },
         );
         println!(
             "  clustered {path} into {}x{} from {} leaves",

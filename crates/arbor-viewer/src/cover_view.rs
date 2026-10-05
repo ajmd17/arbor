@@ -351,6 +351,7 @@ impl CoverScene {
                     Some(r) => gpu::create_texture(gl, &r.pixels, r.width, r.height, false),
                     None => gpu::create_texture(gl, &[170, 170, 170, 255], 1, 1, false),
                 },
+                translucency: None,
             }
         }
     }

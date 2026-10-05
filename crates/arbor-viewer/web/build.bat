@@ -32,7 +32,7 @@ rem The page fetches a species' maps from beside it as the species is picked. On
 rem sets the built-in species name are taken: the rest of the folder is source art.
 if not exist docs\assets\textures mkdir docs\assets\textures
 for /f tokens^=2^ delims^=^" %%n in ('findstr /c:"texture: " assets\species\*.ron') do (
-    for %%m in (albedo normal roughness) do (
+    for %%m in (albedo normal roughness translucency) do (
         if exist "assets\textures\%%n_%%m.png" xcopy /d /y /q "assets\textures\%%n_%%m.png" docs\assets\textures\ >nul
     )
 )

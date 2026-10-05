@@ -861,7 +861,7 @@ impl App {
         let leaves = &self.grown.leaves;
         let loaded = &self.loaded_leaf;
         if (&leaves.texture, &leaves.cluster) != (&loaded.0, &loaded.1)
-            && self.maps.ready(&textures::map_files(&leaves.texture))
+            && self.maps.ready(&textures::leaf_map_files(&leaves.texture))
         {
             if let Some(old) = self.leaf_material.take() {
                 old.delete(&self.gl);

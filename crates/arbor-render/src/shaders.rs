@@ -840,9 +840,12 @@ uniform float u_backface_volume;
 // How much of the sun a leaf in shadow loses: 1 is all of it.
 uniform float u_self_shadow;
 uniform float u_translucency;
+// 1 when the art has a map of the light it lets through, 0 when it has none.
+uniform float u_translucency_map;
 uniform int u_mode;
 uniform sampler2D u_albedo_tex;
 uniform sampler2D u_rough_tex;
+uniform sampler2D u_translucency_tex;
 out vec4 out_color;
 
 void main() {
@@ -909,6 +912,10 @@ void main() {
     }
 
     vec3 albedo = tex.rgb * v_tint.rgb;
+    // What comes through a blade is not what comes off it: the veins and the stalk
+    // block light the blade between them passes, and the blade passes it yellower.
+    // Art with no map of that passes on its own colour.
+    vec3 through_color = mix(albedo, texture(u_translucency_tex, uv).rgb * v_tint.rgb, u_translucency_map);
     vec3 V = normalize(u_cam_pos - v_world);
     vec3 L = u_sun_dir;
     // The source map calls a leaf glossy, around 0.29, and at that roughness every
@@ -942,20 +949,22 @@ void main() {
     float forward = pow(saturate(dot(V, -L)), 4.0);
     float transmitted = u_translucency * through * (0.5 + 2.0 * forward);
     vec3 sun = u_sun_color * shadow;
-    vec3 color = (albedo / PI * (reflected + transmitted) + specular_lobe(s, L, saturate(NoL)) * saturate(NoL)) * sun;
+    vec3 color = ((albedo * reflected + through_color * transmitted) / PI
+        + specular_lobe(s, L, saturate(NoL)) * saturate(NoL)) * sun;
 
     // Everything but the sun. The lit face gathers the environment it faces; the far
     // face gathers the one behind and passes on the translucent share of it. Leaves
     // buried in the crown see less of either, by the crown depth the card was built
     // with and by what the screen can see crowding round them.
     float visibility = screen_ao() * v_tint.a;
-    vec3 gathered = irradiance(N) * (1.0 - s.E) + irradiance(-N) * (0.5 * u_translucency);
+    vec3 gathered = albedo * irradiance(N) * (1.0 - s.E)
+        + through_color * irradiance(-N) * (0.5 * u_translucency);
     // The reflection is of one direction of sky, which the rest of the crown is far
     // likelier to block than the whole dome the diffuse gathers, so it is occluded
     // harder.
     vec3 spec = s.E * prefiltered_radiance(reflect(-V, N), rough) * s.energy
         * specular_occlusion(s.NoV, visibility * visibility, s.alpha);
-    color += albedo * gathered * multi_bounce(visibility, albedo) + spec;
+    color += gathered * multi_bounce(visibility, albedo) + spec;
     out_color = vec4(color * u_exposure, coverage);
 }"#;
 

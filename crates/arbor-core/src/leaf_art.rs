@@ -408,6 +408,7 @@ impl LeafArt {
             albedo,
             normal: Some(normal),
             roughness: Some(rough),
+            translucency: None,
         }
     }
 }

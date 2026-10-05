@@ -190,18 +190,23 @@ impl Bitmap {
     }
 }
 
-/// The three maps of a leaf material.
+/// The maps of a leaf material.
 pub struct LeafMaps<'a> {
     pub albedo: &'a Bitmap,
     pub normal: Option<&'a Bitmap>,
     pub roughness: Option<&'a Bitmap>,
+    /// The colour of the light a leaf lets through: what it looks like held up to the
+    /// sun, with the veins dark against the blade. Scanned leaves come with one.
+    pub translucency: Option<&'a Bitmap>,
 }
 
-/// The same three, grown into clusters.
+/// The same maps, grown into clusters.
 pub struct BakedMaps {
     pub albedo: Bitmap,
     pub normal: Option<Bitmap>,
     pub roughness: Option<Bitmap>,
+    /// Carries the albedo's coverage in its alpha, so it filters as the albedo does.
+    pub translucency: Option<Bitmap>,
 }
 
 /// One leaf placed in a cell, held as the inverse map from destination pixel back to
@@ -247,7 +252,7 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
     // terms has to be stretched first or every rotated leaf comes out sheared.
     let cell_h = (src.albedo.height / src_rows).max(1);
     let square_w = ((cell_h as f32 * p.source_aspect.max(0.05)).round() as u32).max(1);
-    type Maps = (Bitmap, Option<Bitmap>, Option<Bitmap>);
+    type Maps = (Bitmap, Option<Bitmap>, Option<Bitmap>, Option<Bitmap>);
     let grid = |k: u32| -> Vec<Maps> {
         (0..rows)
             .flat_map(|r| (0..cols).map(move |c| (c, r)))
@@ -257,6 +262,7 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
                     src.albedo.cell(cols, src_rows, c, r, square_w),
                     src.normal.map(|m| m.cell(cols, src_rows, c, r, square_w)),
                     src.roughness.map(|m| m.cell(cols, src_rows, c, r, square_w)),
+                    src.translucency.map(|m| m.cell(cols, src_rows, c, r, square_w)),
                 )
             })
             .collect()
@@ -279,6 +285,7 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
             albedo: src.albedo.clone(),
             normal: src.normal.cloned(),
             roughness: src.roughness.cloned(),
+            translucency: src.translucency.cloned(),
         };
     }
     let bounds: Vec<(u32, u32, u32, u32)> = alts.iter().map(|a| a.1).collect();
@@ -288,6 +295,7 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
     let mut albedo = sheet();
     let mut normal = src.normal.map(|_| sheet());
     let mut roughness = src.roughness.map(|_| sheet());
+    let mut translucency = src.translucency.map(|_| sheet());
     for v in 0..variants {
         // Each variant is a shoot in its own right, so it gets its own stream rather
         // than a continuation of the last one: a species stays reproducible even if
@@ -296,9 +304,12 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
         for i in 0..(cols * rows) as usize {
             let ox = (i as u32 % cols) * size;
             let oy = (v * rows + i as u32 / cols) * size;
-            let maps: Vec<(&Bitmap, Option<&Bitmap>, Option<&Bitmap>)> = alts
+            let maps: Vec<SourceMaps> = alts
                 .iter()
-                .map(|(cells, _)| (&cells[i].0, cells[i].1.as_ref(), cells[i].2.as_ref()))
+                .map(|(cells, _)| {
+                    let (a, n, r, t) = &cells[i];
+                    (a, n.as_ref(), r.as_ref(), t.as_ref())
+                })
                 .collect();
             let baked = composite(&places, size, &bounds, &maps);
             blit(&mut albedo, &baked.albedo, ox, oy);
@@ -308,6 +319,9 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
             if let (Some(dst), Some(s)) = (roughness.as_mut(), baked.roughness.as_ref()) {
                 blit(dst, s, ox, oy);
             }
+            if let (Some(dst), Some(s)) = (translucency.as_mut(), baked.translucency.as_ref()) {
+                blit(dst, s, ox, oy);
+            }
         }
     }
 
@@ -315,6 +329,7 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
         albedo,
         normal,
         roughness,
+        translucency,
     }
 }
 
@@ -563,7 +578,7 @@ fn dest_bounds(
 /// coverage, so a pixel's normal and roughness always come from whichever leaf owns
 /// the colour there.
 /// One cell's worth of source maps for each alternative leaf.
-type SourceMaps<'a> = (&'a Bitmap, Option<&'a Bitmap>, Option<&'a Bitmap>);
+type SourceMaps<'a> = (&'a Bitmap, Option<&'a Bitmap>, Option<&'a Bitmap>, Option<&'a Bitmap>);
 
 fn composite(
     places: &[Placement],
@@ -577,10 +592,11 @@ fn composite(
     let mut acc_n = vec![[0.0f32; 3]; n];
     let mut acc_r = vec![0.0f32; n];
     // Every alternative has the same set of maps, so the first says which exist.
-    let (normal, rough) = (sources[0].1, sources[0].2);
+    let (normal, rough, through) = (sources[0].1, sources[0].2, sources[0].3);
+    let mut acc_t = vec![[0.0f32; 3]; if through.is_some() { n } else { 0 }];
 
     for p in places {
-        let (albedo, normal, rough) = sources[p.source];
+        let (albedo, normal, rough, through) = sources[p.source];
         let src_box = boxes[p.source];
         let (lo_x, lo_y) = (src_box.0 as f32 - 1.0, src_box.1 as f32 - 1.0);
         let (hi_x, hi_y) = (src_box.2 as f32 + 1.0, src_box.3 as f32 + 1.0);
@@ -630,6 +646,14 @@ fn composite(
                     let t = map.sample(sx, sy).unwrap_or([0.5; 4]);
                     acc_r[i] = t[0] * a + acc_r[i] * keep;
                 }
+                if let Some(map) = through {
+                    // A leaf behind the shoot is lit through the ones in front of it,
+                    // so what it passes on is dimmed as its face is.
+                    let t = map.sample(sx, sy).unwrap_or(src);
+                    for k in 0..3 {
+                        acc_t[i][k] = t[k] * p.value * a + acc_t[i][k] * keep;
+                    }
+                }
                 acc_a[i] = a + acc_a[i] * keep;
             }
         }
@@ -638,6 +662,7 @@ fn composite(
     let mut out_a = Bitmap::new(size, size);
     let mut out_n = normal.map(|_| Bitmap::new(size, size));
     let mut out_r = rough.map(|_| Bitmap::new(size, size));
+    let mut out_t = through.map(|_| Bitmap::new(size, size));
     for i in 0..n {
         let x = (i % size as usize) as u32;
         let y = (i / size as usize) as u32;
@@ -679,13 +704,21 @@ fn composite(
             let b = to_u8(r);
             img.put(x, y, [b, b, b, 255]);
         }
+        if let Some(img) = out_t.as_mut() {
+            let t = acc_t[i];
+            img.put(x, y, [to_u8(t[0] * inv), to_u8(t[1] * inv), to_u8(t[2] * inv), to_u8(a)]);
+        }
     }
 
     bleed_color_outward(&mut out_a);
+    if let Some(img) = out_t.as_mut() {
+        bleed_color_outward(img);
+    }
     BakedMaps {
         albedo: out_a,
         normal: out_n,
         roughness: out_r,
+        translucency: out_t,
     }
 }
 
@@ -813,6 +846,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         let before = src.mean_alpha();
@@ -821,6 +855,45 @@ mod tests {
             after > before * 2.0,
             "clustering should multiply coverage: {before} to {after}"
         );
+    }
+
+    #[test]
+    fn the_light_a_leaf_lets_through_is_baked_where_the_leaf_is() {
+        // The shader reads the translucency at the uv it reads the albedo at, so the
+        // two have to agree about which leaf owns a pixel. The source is one colour
+        // edge to edge, as imported art is once its colour has been bled outward.
+        let src = leaf(128, 128, 120);
+        let mut through = Bitmap::new(128, 128);
+        for px in through.pixels.chunks_exact_mut(4) {
+            px.copy_from_slice(&[200, 220, 40, 255]);
+        }
+        let with = |translucency| {
+            bake_cluster(
+                &params(),
+                1,
+                1,
+                LeafMaps {
+                    albedo: &src,
+                    normal: None,
+                    roughness: None,
+                    translucency,
+                },
+            )
+        };
+        assert!(with(None).translucency.is_none(), "a map was made from nothing");
+
+        let baked = with(Some(&through));
+        let map = baked.translucency.expect("the cluster lost its translucency");
+        assert_eq!((map.width, map.height), (baked.albedo.width, baked.albedo.height));
+        let mut covered = 0;
+        for (a, t) in baked.albedo.pixels.chunks_exact(4).zip(map.pixels.chunks_exact(4)) {
+            assert_eq!(a[3], t[3], "the two maps disagree about coverage");
+            if a[3] == 255 {
+                covered += 1;
+                assert!(t[1] > t[0] && t[0] > t[2] && t[2] < 80, "not the leaf's own colour: {t:?}");
+            }
+        }
+        assert!(covered > 100, "nothing was covered to check");
     }
 
     #[test]
@@ -845,6 +918,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         let size = params().cell_size;
@@ -889,6 +963,7 @@ mod tests {
                 albedo: &src,
                 normal: Some(&normal),
                 roughness: None,
+                translucency: None,
             },
         );
         let out = baked.normal.expect("a normal map goes in, one comes out");
@@ -924,6 +999,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         let (_, y0, _, y1) = baked.albedo.alpha_bounds(BOUNDS_CUTOFF).expect("a leaf");
@@ -954,6 +1030,7 @@ mod tests {
                     albedo: &src,
                     normal: None,
                     roughness: None,
+                    translucency: None,
                 },
             );
             let (x0, y0, x1, y1) = baked.albedo.alpha_bounds(BOUNDS_CUTOFF).expect("a leaf");
@@ -996,6 +1073,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         let img = &baked.albedo;
@@ -1025,6 +1103,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         let img = &baked.albedo;
@@ -1075,6 +1154,7 @@ mod tests {
                     albedo: &src,
                     normal: None,
                     roughness: None,
+                    translucency: None,
                 },
             );
             let (x0, _, x1, _) = baked
@@ -1114,6 +1194,7 @@ mod tests {
                     albedo: &src,
                     normal: None,
                     roughness: None,
+                    translucency: None,
                 },
             )
             .albedo
@@ -1151,6 +1232,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         let size = p.cell_size;
@@ -1193,6 +1275,7 @@ mod tests {
                     albedo: &src,
                     normal: None,
                     roughness: None,
+                    translucency: None,
                 },
             );
             let values: Vec<f32> = (0..baked.albedo.height)
@@ -1219,6 +1302,7 @@ mod tests {
             albedo: &src,
             normal: None,
             roughness: None,
+            translucency: None,
         };
         let a = bake_cluster(&params(), 1, 1, maps());
         let b = bake_cluster(&params(), 1, 1, maps());
@@ -1236,6 +1320,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         assert_eq!(baked.albedo, src);
@@ -1263,6 +1348,7 @@ mod tests {
                     albedo: &src,
                     normal: None,
                     roughness: None,
+                    translucency: None,
                 },
             );
             let (mut dark, mut light) = (0, 0);
@@ -1297,6 +1383,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         let again = bake_cluster(
@@ -1307,6 +1394,7 @@ mod tests {
                 albedo: &src,
                 normal: None,
                 roughness: None,
+                translucency: None,
             },
         );
         assert_eq!(

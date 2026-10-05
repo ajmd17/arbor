@@ -75,6 +75,7 @@ fn main() {
     let albedo = to_bitmap(&open(&dir.join(format!("{src}_albedo.png")).to_string_lossy()));
     let normal = try_open(dir, &src, "normal");
     let rough = try_open(dir, &src, "roughness");
+    let through = try_open(dir, &src, "translucency");
 
     let baked = bake_cluster(
         &params,
@@ -84,6 +85,7 @@ fn main() {
             albedo: &albedo,
             normal: normal.as_ref(),
             roughness: rough.as_ref(),
+            translucency: through.as_ref(),
         },
     );
 
@@ -94,6 +96,9 @@ fn main() {
     }
     if let Some(img) = baked.roughness.as_ref() {
         save(&from_bitmap(img), dir, &out, "roughness");
+    }
+    if let Some(img) = baked.translucency.as_ref() {
+        save(&from_bitmap(img), dir, &out, "translucency");
     }
 
     let leaf_of_cell = albedo

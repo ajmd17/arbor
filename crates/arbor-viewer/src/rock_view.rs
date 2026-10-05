@@ -225,6 +225,7 @@ impl RockScene {
                 albedo: gpu::create_texture(gl, &maps.albedo.pixels, maps.albedo.width, maps.albedo.height, true),
                 normal: gpu::create_texture(gl, &maps.normal.pixels, maps.normal.width, maps.normal.height, false),
                 roughness: gpu::create_texture(gl, &rough, maps.orm.width, maps.orm.height, false),
+                translucency: None,
             }
         }
     }

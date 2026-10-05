@@ -2,7 +2,7 @@
 //!
 //! cargo run --release -p arbor-viewer --example repack_atlas -- \
 //!     <in-name> <out-name> [--rot 0,0,0] [--cell 640x1088] [--keep 3] [--pick 2,3]
-//!     [--trim-stalk 0.05]
+//!     [--trim-stalk 0.05] [--back 0.6,1.25]
 //!
 //! Scanned foliage atlases come with their sprays dropped wherever they fitted on the
 //! sheet, at whatever angle they were photographed. The renderer indexes cells as a
@@ -19,6 +19,12 @@
 //! its card on bare wood; used as the source of a cluster bake that stalk is what every
 //! leaf hinges on, so the shoots meet at the end of their stalks and the foliage is
 //! pushed up to the top of the cell with crossed sticks underneath.
+
+//!
+//! `--back` adds a second column holding the same sprays for the underside of a card,
+//! their saturation and brightness scaled by the two numbers given. A sheet of leaves
+//! scanned from one side only has no undersides to offer, and the back of a broadleaf is
+//! the same leaf, paler and greyer. The species then reads it as `atlas_cols: 2`.
 
 use image::{imageops, Rgba, RgbaImage};
 
@@ -69,6 +75,14 @@ fn main() {
         .exists()
         .then(|| open(&format!("{DIR}/{src}_roughness.png")));
 
+    let through = std::path::Path::new(&format!("{DIR}/{src}_translucency.png"))
+        .exists()
+        .then(|| open(&format!("{DIR}/{src}_translucency.png")));
+    let back: Option<(f32, f32)> = opt("--back").map(|s| {
+        let (a, b) = s.split_once(',').expect("--back wants sat,val");
+        (a.trim().parse().unwrap(), b.trim().parse().unwrap())
+    });
+
     let (all_boxes, labels) = components(&albedo, keep);
     // Each kept spray remembers the label it was found under, so picking a subset does
     // not change which pixels belong to which.
@@ -98,8 +112,9 @@ fn main() {
     let boxes: Vec<(u32, (u32, u32, u32, u32))> =
         picked.iter().map(|&i| (i as u32 + 1, all_boxes[i])).collect();
 
-    let pack = |img: &RgbaImage, name: &str, alpha_from: Option<&RgbaImage>| {
-        let mut sheet = RgbaImage::new(cw, ch * boxes.len() as u32);
+    let cols = if back.is_some() { 2 } else { 1 };
+    let pack = |img: &RgbaImage, name: &str, alpha_from: Option<&RgbaImage>, coloured: bool| {
+        let mut sheet = RgbaImage::new(cw * cols, ch * boxes.len() as u32);
         for (i, &(label, b)) in boxes.iter().enumerate() {
             let mut cell = imageops::crop_imm(img, b.0, b.1, b.2 - b.0, b.3 - b.1).to_image();
             // Maps other than the albedo have no alpha of their own, so the cut has to
@@ -139,6 +154,17 @@ fn main() {
                 ((ch - nh.min(ch)) / 2) as i64,
             );
             imageops::overlay(&mut sheet, &slot, 0, (ch * i as u32) as i64);
+            if let Some((sat, val)) = back {
+                if coloured {
+                    for p in slot.pixels_mut() {
+                        let grey = (p.0[0] as f32 + p.0[1] as f32 + p.0[2] as f32) / 3.0;
+                        for c in &mut p.0[..3] {
+                            *c = ((grey + (*c as f32 - grey) * sat) * val).clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                }
+                imageops::overlay(&mut sheet, &slot, cw as i64, (ch * i as u32) as i64);
+            }
         }
         // Colour has to run under the cutout edge or the mips pull background through it.
         let mut bm = texture::to_bitmap(&sheet);
@@ -146,14 +172,17 @@ fn main() {
         save(&texture::from_bitmap(&bm), std::path::Path::new(DIR), &out, name);
     };
 
-    pack(&albedo, "albedo", None);
+    pack(&albedo, "albedo", None, true);
     if let Some(n) = &normal {
-        pack(n, "normal", Some(&albedo));
+        pack(n, "normal", Some(&albedo), false);
     }
     if let Some(r) = &rough {
-        pack(r, "roughness", Some(&albedo));
+        pack(r, "roughness", Some(&albedo), false);
     }
-    println!("wrote {out} as 1 x {} cells of {cw}x{ch}", boxes.len());
+    if let Some(t) = &through {
+        pack(t, "translucency", Some(&albedo), true);
+    }
+    println!("wrote {out} as {cols} x {} cells of {cw}x{ch}", boxes.len());
 }
 
 /// The largest connected runs of opaque pixels, in the order they sit on the sheet, with
