@@ -1943,9 +1943,11 @@ mod tests {
         let (straight_net, straight_wander) = measure(0.0);
         let (kinked_net, kinked_wander) = measure(12.0);
         // A jog of a few degrees is meant to be a small effect on the path and no
-        // effect at all on the heading, so this is a ratio rather than a margin.
+        // effect at all on the heading. Twelve degrees side to side is half a per cent
+        // of path, and it is asked for outright: the oak's limbs arch enough on their
+        // own that a ratio against them measures the arch.
         assert!(
-            kinked_wander > straight_wander * 1.8,
+            kinked_wander > straight_wander + 0.003,
             "the jog added no path length: {straight_wander:.3} to {kinked_wander:.3}"
         );
         assert!(
