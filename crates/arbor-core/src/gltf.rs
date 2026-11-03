@@ -73,6 +73,14 @@ const CLAMP_TO_EDGE: u32 = 33071;
 
 /// The extension the wind data goes in.
 pub const TREE_WIND_EXTENSION: &str = "ARBOR_tree_wind";
+/// A leaf card's share of the light from around it that reaches it, 0 to 1; an
+/// application-specific attribute, so tools that do not know it ignore it.
+pub const OCCLUSION_ATTRIBUTE: &str = "_OCCLUSION";
+/// The standard glTF extension for light passing diffusely through a thin surface.
+pub const DIFFUSE_TRANSMISSION_EXTENSION: &str = "KHR_materials_diffuse_transmission";
+/// The share of the light reaching a leaf that comes out of its far face; a green leaf
+/// passes somewhere between a third and a half of it.
+const LEAF_DIFFUSE_TRANSMISSION: f32 = 0.4;
 
 /// What goes into an export besides the geometry.
 #[derive(Clone, Debug, Default)]
@@ -132,8 +140,11 @@ pub struct Textures {
     /// that bleaches its dead wood.
     dead_albedo: Option<Vec<u8>>,
     leaf_albedo: Option<Vec<u8>>,
+    leaf_normal: Option<Vec<u8>>,
     /// The leaf roughness, packed as glTF wants it.
     leaf_roughness: Option<Vec<u8>>,
+    /// The colour of the light coming through a leaf, which the veins and stalk block.
+    leaf_translucency: Option<Vec<u8>>,
     /// Maps that were looked for and not found.
     pub warnings: Vec<String>,
 }
@@ -168,8 +179,14 @@ impl Textures {
             match textures::load_leaf_maps(source, lp) {
                 Some(maps) => {
                     out.leaf_albedo = Some(textures::encode_png(&maps.albedo)?);
-                    if let Some(r) = &maps.roughness {
-                        out.leaf_roughness = Some(textures::encode_png(&leaf_roughness(r))?);
+                    if let Some(n) = &maps.normal {
+                        out.leaf_normal = Some(textures::encode_png(n)?);
+                    }
+                    let mask = textures::transmission_mask(&maps.albedo, maps.translucency.as_ref());
+                    let roughness = leaf_roughness(maps.roughness.as_ref(), &maps.albedo, &mask);
+                    out.leaf_roughness = Some(textures::encode_png(&roughness)?);
+                    if let Some(t) = &maps.translucency {
+                        out.leaf_translucency = Some(textures::encode_png(t)?);
                     }
                 }
                 None => out.warnings.push(format!(
@@ -548,14 +565,31 @@ fn leaf_material(doc: &mut Builder, textures: &Textures, two_faced: bool) -> usi
         }
         None => (None, LEAF_ROUGHNESS_DEFAULT),
     };
+    let normal_tex = textures.leaf_normal.as_ref().map(|png| {
+        let image = doc.image("leaf_normal", png);
+        doc.texture(image, clamp)
+    });
+    // Art with no map of what comes through passes on its own colour. How much of it
+    // comes through is the roughness map's alpha, which the extension reads it from.
+    let mut transmission = format!(r#""diffuseTransmissionFactor":{}"#, num(LEAF_DIFFUSE_TRANSMISSION));
+    if let Some(texture) = rough_tex {
+        let _ = write!(transmission, r#","diffuseTransmissionTexture":{{"index":{texture}}}"#);
+    }
+    if let Some(png) = &textures.leaf_translucency {
+        let image = doc.image("leaf_translucency", png);
+        let texture = doc.texture(image, clamp);
+        let _ = write!(transmission, r#","diffuseTransmissionColorTexture":{{"index":{texture}}}"#);
+    }
+    doc.uses(DIFFUSE_TRANSMISSION_EXTENSION);
+    let extra = format!(r#"{mask},"extensions":{{"{DIFFUSE_TRANSMISSION_EXTENSION}":{{{transmission}}}}}"#);
     doc.material(&pbr_material(
         "leaves",
         [1.0, 1.0, 1.0, 1.0],
         Some(albedo),
         rough_tex,
         rough_factor,
-        None,
-        &mask,
+        normal_tex,
+        &extra,
     ))
 }
 
@@ -652,17 +686,21 @@ fn leaf_mesh(
             .collect()
     };
     let normals: Vec<[f32; 3]> = leaves.normals.iter().map(|&v| unit_or(v, [0.0, 1.0, 0.0])).collect();
-    // The per-card colour and the shade of how deep in the crown it sits, which the
-    // viewer applies to everything the card reflects.
+    // The per-card colour, and apart from it the shade of how deep in the crown the card
+    // sits, which the viewer takes from the light gathered from around it and not from
+    // the sun. glTF reads a colour's alpha as opacity, so the shade is an attribute of
+    // its own that other tools leave alone.
     let tints: Vec<[f32; 3]> = leaves
         .tints
         .iter()
-        .map(|t| [0, 1, 2].map(|i| (t[i] * t[3]).clamp(0.0, 1.0)))
+        .map(|t| [0, 1, 2].map(|i| t[i].clamp(0.0, 1.0)))
         .collect();
+    let shades: Vec<f32> = leaves.tints.iter().map(|t| t[3].clamp(0.0, 1.0)).collect();
 
     let position = doc.floats(&flat(&leaves.positions), 3, true);
     let color = doc.floats(&flat(&tints), 3, false);
-    let mut shared = vec![("POSITION", position), ("COLOR_0", color)];
+    let occlusion = doc.floats(&shades, 1, false);
+    let mut shared = vec![("POSITION", position), ("COLOR_0", color), (OCCLUSION_ATTRIBUTE, occlusion)];
     let mut extension = String::new();
     if let Some(wind) = wind.filter(|_| leaves.sway_at.len() == n && leaves.origins.len() == n) {
         shared.push(("TEXCOORD_1", wind.places(doc, &leaves.sway_at)));
@@ -795,12 +833,24 @@ fn bleach_bark(albedo: &Bitmap, tint: [f32; 3], dead: [f32; 3], amount: f32) -> 
 
 /// A leaf roughness map as glTF wants it — roughness in green, metalness in blue — with
 /// the viewer's floor on how glossy a leaf may look.
-fn leaf_roughness(map: &Bitmap) -> Bitmap {
+/// The leaf roughness packed as glTF wants it, roughness in green, with the share of
+/// light each pixel lets through in alpha. Art with no roughness map gets the default
+/// roughness at the albedo's size, so the mask still has somewhere to go.
+fn leaf_roughness(map: Option<&Bitmap>, albedo: &Bitmap, mask: &[u8]) -> Bitmap {
     let floor = (LEAF_ROUGHNESS_FLOOR * 255.0).round() as u8;
-    let mut out = map.clone();
-    for px in out.pixels.chunks_exact_mut(4) {
+    let default = (LEAF_ROUGHNESS_DEFAULT * 255.0).round() as u8;
+    let mut out = map.cloned().unwrap_or_else(|| {
+        let mut flat = Bitmap::new(albedo.width, albedo.height);
+        flat.pixels.fill(default);
+        flat
+    });
+    let (w, h) = (out.width as usize, out.height as usize);
+    let (aw, ah) = (albedo.width as usize, albedo.height as usize);
+    for (i, px) in out.pixels.chunks_exact_mut(4).enumerate() {
+        let (x, y) = (i % w, i / w);
+        let a = mask[(y * ah / h) * aw + x * aw / w];
         let r = px[0].max(floor);
-        px.copy_from_slice(&[255, r, 0, 255]);
+        px.copy_from_slice(&[255, r, 0, a]);
     }
     out
 }
@@ -1515,6 +1565,36 @@ mod tests {
             .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "png"))
             .count();
         assert_eq!(pngs, uris[0].len(), "images were written once per tree");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_leaves_let_light_through_where_the_roughness_alpha_says() {
+        let dir = scratch("transmission");
+        let options = ExportOptions {
+            textures: Some(PathBuf::from("../../assets/textures")),
+            wind: false,
+        };
+        let report = export_batch(&dir, "fir", Format::Gltf, &fir_open(), 1, &options, |_| true).unwrap();
+        let doc: Value = ron::from_str(&std::fs::read_to_string(&report.trees[0]).unwrap()).unwrap();
+        let leaves = seq(get(&doc, "materials"))
+            .iter()
+            .find(|m| text(get(m, "name")) == "leaves")
+            .expect("no leaf material");
+        let rough = int(get(get(get(leaves, "pbrMetallicRoughness"), "metallicRoughnessTexture"), "index"));
+        let ext = get(get(leaves, "extensions"), DIFFUSE_TRANSMISSION_EXTENSION);
+        assert_eq!(int(get(get(ext, "diffuseTransmissionTexture"), "index")), rough);
+
+        // The fir's sprig art has its twigs in it: they block the light and the
+        // needles let it through.
+        let image = int(get(&seq(get(&doc, "textures"))[rough], "source"));
+        let uri = text(get(&seq(get(&doc, "images"))[image], "uri"));
+        let map = textures::decode(&std::fs::read(dir.join(uri)).unwrap()).unwrap();
+        let alphas: Vec<u8> = map.pixels.chunks_exact(4).map(|px| px[3]).collect();
+        let passing = alphas.iter().filter(|&&a| a > 192).count();
+        let blocking = alphas.iter().filter(|&&a| a < 64).count();
+        assert!(passing > alphas.len() / 4, "{passing} of {} pass light", alphas.len());
+        assert!(blocking > alphas.len() / 100, "{blocking} of {} block it", alphas.len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

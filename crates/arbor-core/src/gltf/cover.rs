@@ -44,10 +44,12 @@ pub struct CoverTextures {
 impl CoverTextures {
     pub fn bake(params: &CoverParams) -> Result<Self, String> {
         let baked = bake_blades(&params.atlas);
+        let mask = textures::transmission_mask(&baked.maps.albedo, baked.maps.translucency.as_ref());
+        let roughness = leaf_roughness(baked.maps.roughness.as_ref(), &baked.maps.albedo, &mask);
         Ok(Self {
             albedo: textures::encode_png(&baked.maps.albedo)?,
             normal: baked.maps.normal.as_ref().map(textures::encode_png).transpose()?,
-            roughness: baked.maps.roughness.as_ref().map(|r| textures::encode_png(&leaf_roughness(r))).transpose()?,
+            roughness: Some(textures::encode_png(&roughness)?),
             coverage: baked.coverage,
         })
     }
@@ -233,8 +235,16 @@ fn cover_material(doc: &mut Builder, textures: &CoverTextures) -> usize {
         }
         None => (None, LEAF_ROUGHNESS_DEFAULT),
     };
-    let mask = format!(r#","alphaMode":"MASK","alphaCutoff":{},"doubleSided":true"#, num(LEAF_ALPHA_CUTOFF));
-    doc.material(&pbr_material("grass", [1.0, 1.0, 1.0, 1.0], Some(albedo), rough, factor, normal, &mask))
+    doc.uses(DIFFUSE_TRANSMISSION_EXTENSION);
+    let mut transmission = format!(r#""diffuseTransmissionFactor":{}"#, num(LEAF_DIFFUSE_TRANSMISSION));
+    if let Some(texture) = rough {
+        let _ = write!(transmission, r#","diffuseTransmissionTexture":{{"index":{texture}}}"#);
+    }
+    let extra = format!(
+        r#","alphaMode":"MASK","alphaCutoff":{},"doubleSided":true,"extensions":{{"{DIFFUSE_TRANSMISSION_EXTENSION}":{{{transmission}}}}}"#,
+        num(LEAF_ALPHA_CUTOFF)
+    );
+    doc.material(&pbr_material("grass", [1.0, 1.0, 1.0, 1.0], Some(albedo), rough, factor, normal, &extra))
 }
 
 #[cfg(test)]

@@ -218,6 +218,10 @@ pub struct RockShape<V = f32> {
     /// Where the top is cut flat along the bedding, as a share of the half height
     /// above the middle: 0 for no flat top. A slab's.
     pub flat_top: V,
+    /// Four upright faces square to the width and depth, as a share of how far the
+    /// ellipsoid reaches that way: 0 for none. A block of cliff's, whose broad flat faces
+    /// carry its ledges and fractures where a boulder's would curve away.
+    pub sides: V,
     /// Share of the height cut flat at the bottom, where it sits on the ground.
     pub flat_bottom: V,
     /// Share of the height below the origin, so a rock placed on the ground is already
@@ -246,6 +250,7 @@ impl Default for RockShape {
             bedded: 0.0,
             fracture: 0.0,
             flat_top: 0.0,
+            sides: 0.0,
             flat_bottom: 0.3,
             bury: 0.12,
         }
@@ -277,6 +282,7 @@ impl<V: Scalar> RockShape<V> {
             bedded: f(&key(at, "bedded"), self.bedded),
             fracture: f(&key(at, "fracture"), self.fracture),
             flat_top: f(&key(at, "flat_top"), self.flat_top),
+            sides: f(&key(at, "sides"), self.sides),
             flat_bottom: f(&key(at, "flat_bottom"), self.flat_bottom),
             bury: f(&key(at, "bury"), self.bury),
         }
@@ -759,6 +765,12 @@ impl Surface {
         let sharpness = s.sharpness.clamp(2.0, 80.0);
         if s.flat_top > 0.0 {
             faces.push((bedding, s.flat_top.clamp(0.1, 1.0)));
+        }
+        if s.sides > 0.0 {
+            let share = s.sides.clamp(0.1, 1.0);
+            for n in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
+                faces.push((n, share));
+            }
         }
         let set = |half: Vec3| -> Vec<(Vec3, f32)> { faces.iter().map(|&(n, share)| (n, share * (n * half).length())).collect() };
 

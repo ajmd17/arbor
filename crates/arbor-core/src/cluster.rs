@@ -36,6 +36,10 @@ const SHOOT_SPREAD: f32 = 0.46;
 /// sliver rather than nothing, and a cluster that let leaves vanish would lose the
 /// coverage clustering exists to buy.
 const MIN_BLADE_WIDTH: f32 = 0.22;
+/// How far a baked leaf's normal leans toward the way its blade really faces. Flattened
+/// into the card every leaf would face out of it alike and the cluster would light as one
+/// sheet; leaned all the way, the blades turned edge-on go dark against the rest.
+const LEAF_TILT: f32 = 0.6;
 
 /// Decoded RGBA8 pixels, the currency between the image decoder and this module.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -229,6 +233,8 @@ struct Placement {
     value: f32,
     /// Which of the source's alternative leaves this one is drawn from.
     source: usize,
+    /// The way the blade faces, in the normal map's frame, which flattening loses.
+    tilt: [f32; 3],
 }
 
 /// Composites `cols` x `rows` cluster cells out of the matching cells of `src`, once
@@ -460,6 +466,8 @@ fn lay_out(
         let seen = (across.0 * cos - across.1 * sin).abs();
         let broad = MIN_BLADE_WIDTH + (1.0 - MIN_BLADE_WIDTH) * seen;
         let across_width = 1.0 + depth * (broad - 1.0);
+        let across_card = [ct * sr - st * cc * cr, st * sc, -ct * cr - st * cc * sr];
+        let tilt = blade_tilt([dx, dy, dz], across_card);
 
         let scale_t = 1.0 + (p.tip_scale - 1.0) * t;
         let scale = (scale_t * (1.0 + rng.random_range(-size_jitter..=size_jitter))).max(0.05);
@@ -492,6 +500,7 @@ fn lay_out(
             // it, and without it a cluster lights as one flat sheet of colour.
             value: 1.0 - p.depth_shade.clamp(0.0, 1.0) * 0.5 * (1.0 - dz),
             source,
+            tilt,
         };
 
         let (lo, hi) = extent(&place, scale_x, scale_y, src);
@@ -632,12 +641,18 @@ fn composite(
                 }
                 if let Some(map) = normal {
                     let t = map.sample(sx, sy).unwrap_or([0.5, 0.5, 1.0, 1.0]);
-                    let vec = rotate_normal(
+                    let relief = rotate_normal(
                         [t[0] * 2.0 - 1.0, t[1] * 2.0 - 1.0, t[2] * 2.0 - 1.0],
                         p.cos,
                         p.sin,
                         p.mirror,
                     );
+                    // The leaf's own relief rides on the way its blade faces.
+                    let vec = [
+                        p.tilt[0] + relief[0] * p.tilt[2],
+                        p.tilt[1] + relief[1] * p.tilt[2],
+                        p.tilt[2] * relief[2],
+                    ];
                     for k in 0..3 {
                         acc_n[i][k] = vec[k] * a + acc_n[i][k] * keep;
                     }
@@ -720,6 +735,27 @@ fn composite(
         roughness: out_r,
         translucency: out_t,
     }
+}
+
+/// The normal of a blade lying along `along` and across `across`, both in the shoot's
+/// frame (x across the cell, y up it, z out of the card), turned to face out of the card
+/// and eased toward the card's own normal by `LEAF_TILT`. Image y runs down while the
+/// green channel runs up, so y comes out the other way round.
+fn blade_tilt(along: [f32; 3], across: [f32; 3]) -> [f32; 3] {
+    let mut n = [
+        along[1] * across[2] - along[2] * across[1],
+        along[2] * across[0] - along[0] * across[2],
+        along[0] * across[1] - along[1] * across[0],
+    ];
+    if n[2] < 0.0 {
+        n = [-n[0], -n[1], -n[2]];
+    }
+    let eased = [n[0] * LEAF_TILT, n[1] * LEAF_TILT, 1.0 - LEAF_TILT + n[2] * LEAF_TILT];
+    let len = (eased[0] * eased[0] + eased[1] * eased[1] + eased[2] * eased[2]).sqrt();
+    if len < 1e-4 {
+        return [0.0, 0.0, 1.0];
+    }
+    [eased[0] / len, -eased[1] / len, eased[2] / len]
 }
 
 /// A tangent-space normal has to turn with the pixels it describes. Image y runs down

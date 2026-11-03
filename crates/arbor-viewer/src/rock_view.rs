@@ -279,6 +279,7 @@ pub static SHAPE: Group<RockTemplate> = Group {
         knob("Bedded", (0.0, 1.0), "How far the plates lie along the bedding: shells following the surface at 0, layers of slate at 1.", |p| &mut p.shape.bedded),
         knob("Fracture", (0.0, 0.1), "Stepped ledges where the stone has split along its bedding.", |p| &mut p.shape.fracture),
         knob("Flat top", (0.0, 1.0), "Where the top is cut flat along the bedding, as a share of the half height: 0 for none.", |p| &mut p.shape.flat_top),
+        knob("Sides", (0.0, 1.0), "Four upright faces square to the width and depth, as a share of how far the rock reaches that way: 0 for none.", |p| &mut p.shape.sides),
         knob("Flat bottom", (0.0, 0.9), "Share of the height cut flat where it sits on the ground.", |p| &mut p.shape.flat_bottom),
         knob("Bury", (0.0, 0.9), "Share of the height below the origin, so a rock set on the ground is sunk into it.", |p| &mut p.shape.bury),
     ],
