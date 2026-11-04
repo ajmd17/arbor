@@ -359,7 +359,7 @@ impl Tex {
     fn atlas_frame(lp: &LeafParams) -> (Vec2, Vec2, Vec2) {
         let cols = lp.atlas_cols.max(1);
         let rows = lp.atlas_rows.max(1);
-        let variants = lp.cluster.as_ref().map_or(1, |c| c.variants.max(1));
+        let variants = lp.cluster.as_ref().map_or(1, |c| c.total_variants());
         let tall = rows * variants;
         let cell = |index: u32| {
             let i = index.min(cols * rows - 1);

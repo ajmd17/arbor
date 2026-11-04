@@ -277,6 +277,11 @@ pub fn grow(params: &SpeciesParams) -> Skeleton {
     // the tail of the one above: a species that loses no wood to dieback still has
     // wood the crown pruned, and that has to break back too.
     break_dead_wood(params, &mut skeleton, shade_keep.as_deref());
+    thin_dead_limbs(&mut skeleton, shade_keep.as_deref());
+    // After the thinning, which takes every shaded-out stem down with its kept length
+    // and would take a stub, a stem the crown never let grow, down to nothing.
+    size_stubs(&mut skeleton);
+    warp_dead_wood(params, &mut skeleton);
     sag_dead_limbs(params, &mut skeleton);
     skeleton
 }
@@ -476,6 +481,7 @@ pub(crate) fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> O
         let inherited = parent.is_some_and(|p| skeleton.nodes[p as usize].dead);
         if inherited {
             skeleton.nodes[i].dead = true;
+            skeleton.nodes[i].withered = skeleton.nodes[parent.unwrap() as usize].withered;
             continue;
         }
         // Only the first node of a stem decides; the rest of the run follows it.
@@ -495,15 +501,24 @@ pub(crate) fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> O
                 let share = shaded_share(&parent_sp.children, along);
                 if share > 0.0 && hash_unit(params.seed ^ 0x5AD3_11E5, path) < share {
                     skeleton.nodes[i].dead = true;
+                    let children = &parent_sp.children;
+                    let shed = hash_unit(params.seed ^ 0x5BED_F411, path) < children.shed.clamp(0.0, 1.0);
+                    // Only just closed over: it has lost nothing yet, needles included,
+                    // and keeps its whole length. `shed` still takes its share of them,
+                    // or a whole whorl hung under the crown as a brown skirt.
+                    let withers =
+                        children.wither > 0.0 && along > children.shade_line - children.wither;
+                    skeleton.nodes[i].withered = withers && !shed;
                     if let Some(keep) = keep.as_mut() {
                         let s = stem as usize;
                         if s < keep.len() {
                             // A negative length is a limb that has dropped off whole.
-                            let shed = parent_sp.children.shed.clamp(0.0, 1.0);
-                            keep[s] = if hash_unit(params.seed ^ 0x5BED_F411, path) < shed {
+                            keep[s] = if shed {
                                 -1.0
+                            } else if withers {
+                                f32::INFINITY
                             } else {
-                                grown[s] * shade_keep_share(&parent_sp.children, along)
+                                grown[s] * shade_keep_share(children, along)
                             };
                         }
                     }
@@ -537,6 +552,77 @@ pub(crate) fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> O
         }
     }
     keep
+}
+
+/// Shortest a stub the crown refused at birth is left, as a share of its level's
+/// `dead_stub_length`.
+const STUB_SHORTEST: f32 = 0.2;
+/// Least share of the stem it leaves a stub the crown refused at birth is across.
+const DEAD_STUB_GIRTH: f32 = 0.07;
+
+/// Gives the stubs the crown refused at birth the girth of the limb they were.
+///
+/// A stub is one node carrying nothing, so the pipe model hands it the floor radius,
+/// and down a pine's bole they came out as wires the better part of a metre long. The
+/// limb was a season or two old when the crown shaded it out, a few centimetres
+/// across, and what is left of it is a peg that thick.
+fn size_stubs(skeleton: &mut Skeleton) {
+    for i in 0..skeleton.nodes.len() {
+        let node = &skeleton.nodes[i];
+        let Some(p) = node.parent else { continue };
+        let parent = &skeleton.nodes[p as usize];
+        // A stub is born dead, a single node a whole stem long, and carries nothing.
+        let stub = node.dead
+            && node.stem_fraction >= 1.0
+            && node.children.is_empty()
+            && parent.stem != node.stem
+            && node.level > parent.level;
+        if stub {
+            let girth = parent.radius * DEAD_STUB_GIRTH;
+            skeleton.nodes[i].radius = node.radius.max(girth);
+        }
+    }
+}
+
+/// How a shaded-out limb's girth follows the share of its length it had reached when
+/// it died: a limb a third grown is a quarter as thick (a third to this power). Steeper
+/// than length because a young limb is slender for its length; at 0.7 the old pegs low
+/// on the pine's bole were a third of its own width across, dowels where the
+/// reference has pencils.
+const DEAD_GIRTH_EXP: f32 = 1.2;
+
+/// Thins the limbs the crown shaded out to the girth they had when they died.
+///
+/// Radii are resolved over the tree as grown, so a limb that died young and was cut
+/// back by `shade_keep` to the stub it really was still carried the girth of the whole
+/// limb it would have become, and the dead band read as a rack of planks. The share of
+/// its length it kept is how far it had got, and its girth, and that of everything it
+/// carried, follows. Only stems `keep` cut back are thinned; the wood the crown never
+/// shaded keeps its radius.
+fn thin_dead_limbs(skeleton: &mut Skeleton, keep: Option<&[f32]>) {
+    let Some(keep) = keep else {
+        return;
+    };
+    let (_, grown) = stem_arcs(skeleton);
+    let mut scale = vec![1.0f32; skeleton.nodes.len()];
+    for i in 0..skeleton.nodes.len() {
+        let node = &skeleton.nodes[i];
+        let inherited = node.parent.map_or(1.0, |p| scale[p as usize]);
+        let s = node.stem as usize;
+        let starts_stem = node
+            .parent
+            .is_none_or(|p| skeleton.nodes[p as usize].stem != node.stem);
+        let own = match keep.get(s) {
+            Some(&k) if starts_stem && k >= 0.0 && k.is_finite() => {
+                (k / grown[s].max(1e-4)).clamp(0.0, 1.0).powf(DEAD_GIRTH_EXP)
+            }
+            _ => 1.0,
+        };
+        scale[i] = inherited.min(own);
+        if scale[i] < 1.0 {
+            skeleton.nodes[i].radius = (node.radius * scale[i]).max(MIN_RADIUS);
+        }
+    }
 }
 
 /// Share of its starting radius a dead stem keeps before its end has broken away.
@@ -577,7 +663,8 @@ pub(crate) fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton, k
         } else {
             radius
         };
-        if !dead {
+        // Wood that has only just died has not had time to lose any of itself.
+        if !dead || skeleton.nodes[i].withered {
             continue;
         }
         // Dropped off whole, its first node with it: all that is left is the knot.
@@ -623,6 +710,84 @@ pub(crate) fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton, k
     }
 }
 
+/// Closest to vertical `dead_curl_deg` and `wither_droop_deg` turn a piece of dead
+/// wood, in degrees off it.
+const DEAD_CURL_LIMIT_DEG: f32 = 20.0;
+
+/// Curls and kinks the wood the tree has lost.
+///
+/// Each dead node's segment, the run from its parent to it, turns up by its stem's
+/// `dead_curl_deg` per metre and kinks by a draw of `dead_kink_deg`, both read off the
+/// children of the level above, as `dead_sag_deg` is. Withered wood turns down by
+/// `wither_droop_deg` instead: it still carries its needles, and the dead wood under
+/// them has given. Everything past the node turns with it, so the turns add up along a
+/// limb into a curve, and its twigs ride along before turning on their own. Only
+/// positions move; nothing living is touched.
+fn warp_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton) {
+    let any = std::iter::once(&params.trunk)
+        .chain(params.branch_levels.iter())
+        .any(|sp| {
+            let c = &sp.children;
+            c.dead_curl_deg > 0.0 || c.dead_kink_deg > 0.0 || c.wither_droop_deg > 0.0
+        });
+    if !any {
+        return;
+    }
+    // Each node's turn so far, and where it was before this pass. Nodes come parents
+    // first, so a parent is always settled before its children read it.
+    let n = skeleton.nodes.len();
+    let mut turn = vec![glam::Quat::IDENTITY; n];
+    let grown: Vec<Vec3> = skeleton.nodes.iter().map(|node| node.position).collect();
+    let limit = DEAD_CURL_LIMIT_DEG.to_radians();
+    for i in 0..n {
+        let node = &skeleton.nodes[i];
+        let Some(p) = node.parent else { continue };
+        let p = p as usize;
+        let inherited = turn[p];
+        let run = inherited * (grown[i] - grown[p]);
+        let mut own = glam::Quat::IDENTITY;
+        let len = run.length();
+        if node.dead
+            && node.level > 0
+            && len > 1e-5
+            && let Some(sp) = stem_params(params, node.level - 1)
+        {
+            let dir = run / len;
+            let children = &sp.children;
+            // Bare wood springs up; wood still holding its needles is weighed down.
+            let (curl, kink) = if node.withered {
+                (-children.wither_droop_deg, children.dead_kink_deg)
+            } else {
+                (children.dead_curl_deg, children.dead_kink_deg)
+            };
+            // About the horizontal across the segment's heading, and no closer to
+            // vertical, up or down, than the limit.
+            let across = dir.cross(Vec3::Y);
+            if curl != 0.0 && across.length_squared() > 1e-6 {
+                let toward = if curl > 0.0 { dir.y } else { -dir.y };
+                let off_vertical = toward.clamp(-1.0, 1.0).acos();
+                let bend = (curl.abs().to_radians() * len).min((off_vertical - limit).max(0.0));
+                own = glam::Quat::from_axis_angle(across.normalize(), bend * curl.signum());
+            }
+            if kink > 0.0 {
+                let u = hash_unit(params.seed ^ 0xC12C_0D1E, node.path);
+                let azimuth = hash_unit(params.seed ^ 0x4B1E_A21A, node.path) * std::f32::consts::TAU;
+                let side = glam::Quat::from_axis_angle(dir, azimuth) * any_axis_across(dir);
+                own = glam::Quat::from_axis_angle(side, (kink * (2.0 * u - 1.0)).to_radians()) * own;
+            }
+        }
+        turn[i] = own * inherited;
+        let base = skeleton.nodes[p].position;
+        skeleton.nodes[i].position = base + turn[i] * (grown[i] - grown[p]);
+    }
+}
+
+/// Any unit vector square to `dir`, the same one every time for the same `dir`.
+fn any_axis_across(dir: Vec3) -> Vec3 {
+    let other = if dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
+    dir.cross(other).normalize()
+}
+
 /// Settles the limbs the tree has lost down about their bases.
 ///
 /// Shape is decided while a stem grows and death is decided afterwards, so a dead limb
@@ -645,7 +810,12 @@ fn sag_dead_limbs(params: &SpeciesParams, skeleton: &mut Skeleton) {
         let parent = &skeleton.nodes[p as usize];
         // Only a lateral settles about its base. A fork is the axis carrying on, and
         // a dead leader stands as it grew.
-        if !node.dead || parent.dead || node.level != parent.level + 1 {
+        if !node.dead || node.level != parent.level + 1 {
+            continue;
+        }
+        // A withered limb's twigs still hold the spray their needles hang in; only the
+        // limb itself has settled.
+        if node.withered && parent.dead {
             continue;
         }
         let Some(psp) = stem_params(params, parent.level) else { continue };
@@ -660,7 +830,15 @@ fn sag_dead_limbs(params: &SpeciesParams, skeleton: &mut Skeleton) {
             continue;
         }
         let u = hash_unit(params.seed ^ 0x5A6D_EAD5, node.path);
-        let angle = (max * u * u).to_radians();
+        // A branch that died on a living parent sags. One on a parent that is itself
+        // dead has nothing holding it in its spray any more and warps as the wood
+        // dries, up as often as down: left in the flat spray a pine twig grows in, a
+        // dead limb's twigs lay along it in a bundle, edge on from the side.
+        let angle = if parent.dead {
+            (max * (2.0 * u - 1.0)).to_radians()
+        } else {
+            (max * u * u).to_radians()
+        };
         // Tilting about the horizontal across the limb's heading swings its tip down.
         let axis = Vec3::Y.cross(heading.normalize()).normalize();
         let turn = glam::Quat::from_axis_angle(axis, angle);
@@ -758,6 +936,8 @@ fn grow_stem(
     let mut azimuth = range_f32(&mut rng, 0.0, std::f32::consts::TAU);
     let mut slot: u32 = 0;
     let mut pending: Vec<Pending> = Vec::new();
+    // Every node this stem has laid down and how far along it, for `shade_scatter`.
+    let mut laid: Vec<(u32, f32)> = Vec::new();
     // What the stem really grew, as against `stem_len`, which is what it set out to.
     let mut grown_len = 0.0f32;
     let can_spawn = level + 1 < ctx.levels_total;
@@ -836,7 +1016,10 @@ fn grow_stem(
                 .map_or(0.0, |parent| parent.children.shed.clamp(0.0, 1.0));
             let dropped = hash_unit(ctx.params.seed ^ 0x5BED_F411, path) < shed;
             if seg == 0 && sp.dead_stub_length > 0.0 && !dropped {
-                let stub = base_pos + cur_dir * sp.dead_stub_length;
+                // Broken off at whatever length the wind left, not sawn to one.
+                let reach = STUB_SHORTEST
+                    + (1.0 - STUB_SHORTEST) * hash_unit(ctx.params.seed ^ 0x57AB_1E45, path);
+                let stub = base_pos + cur_dir * sp.dead_stub_length * reach;
                 let node =
                     skeleton.push_node(Some(cur), stub, level, child_path(path, 0), v, 1.0, stem);
                 // A stem the crown refused is dead the moment it is born, and has to
@@ -852,6 +1035,7 @@ fn grow_stem(
         let seg_path = child_path(path, seg as u32);
         grown_len += seg_len;
         cur = skeleton.push_node(Some(cur), pos, level, seg_path, v, frac, stem);
+        laid.push((cur, grown_len));
         if is_leader {
             // Recorded before anything spawns here, so branches born at this height
             // already see the trunk they are hanging off.
@@ -862,6 +1046,7 @@ fn grow_stem(
             // A swooping stem tilts its spray with it, as a spruce limb's branchlets
             // follow its sag and its lift: they are laid in the plane where they leave
             // it rather than the one it set off in.
+            let spawned = pending.len();
             let spray_here = match (swoop != 0.0, spray != Vec3::ZERO) {
                 (true, true) => Some(plane_of(cur_dir)).filter(|p| *p != Vec3::ZERO).unwrap_or(spray),
                 _ => spray,
@@ -884,6 +1069,7 @@ fn grow_stem(
                 spray_here,
                 &mut pending,
             );
+            scatter_shaded(ctx.params, sp, frac, &laid, &mut pending[spawned..]);
         }
 
         // The most a fork taken here may grow, and the one thing a fork was never held
@@ -1071,6 +1257,46 @@ fn fork_cap(ahead: f32, max_len: f32, evenness: f32) -> f32 {
         ahead
     } else {
         (ahead + (max_len - ahead) * evenness).min(max_len)
+    }
+}
+
+/// Moves the children a whorl at `frac` along a stem has just put out down the stem,
+/// each by its own draw, to one of the nodes laid since the whorl before, where the
+/// crown will certainly shade them out.
+///
+/// A whorl's limbs leave the stem together, and while they are alive that is what
+/// stacks a pine's crown into tiers. Dead, the same rule stands the band under the
+/// crown as a ladder: a ring of pegs at every whorl and bare bole between. A forest
+/// pine's dead band is one limb here and one there, at no spacing the eye can find —
+/// the whorls low on a pine were laid down in its slow early years, close together,
+/// and what is left of them reads as a scatter. `shade_scatter` is the share of them
+/// moved. Read by hash rather than drawn, so the stem's random stream, and everything
+/// grown from it, is as it was; and only where every child dies, so the living crown
+/// is untouched.
+fn scatter_shaded(
+    params: &SpeciesParams,
+    sp: &StemParams,
+    frac: f32,
+    laid: &[(u32, f32)],
+    children: &mut [Pending],
+) {
+    let child = &sp.children;
+    let ChildPattern::Whorl { every, .. } = child.pattern else {
+        return;
+    };
+    let span = (every.max(1) as usize - 1).min(laid.len().saturating_sub(1));
+    if span == 0 || child.shade_scatter <= 0.0 || frac > child.shade_line - child.shade_blend {
+        return;
+    }
+    for c in children.iter_mut().filter(|c| c.fork.is_none()) {
+        if hash_unit(params.seed ^ 0x5CA7_7E25, c.path) >= child.shade_scatter {
+            continue;
+        }
+        // Anywhere from the whorl itself down to the node above the whorl before.
+        let back = ((hash_unit(params.seed ^ 0x5CA7_7E26, c.path) * (span + 1) as f32) as usize).min(span);
+        let (node, at) = laid[laid.len() - 1 - back];
+        c.attach = node;
+        c.at_len = at;
     }
 }
 
@@ -3103,6 +3329,126 @@ mod tests {
             dropped * 4 > dead_limbs * 3,
             "only {dropped} of {dead_limbs} dead limbs settled at all"
         );
+    }
+    #[test]
+    fn dead_wood_curls_up_and_living_wood_holds() {
+        // Shed of its needles a dead pine limb springs up off the bole; without the
+        // curl the dead band stood out as level pegs. Measured on the limb's tip, which
+        // carries every turn along it.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.trunk.children.dead_sag_deg = 0.0;
+        params.trunk.children.dead_curl_deg = 0.0;
+        params.trunk.children.dead_kink_deg = 0.0;
+        params.branch_levels[0].children.dead_curl_deg = 0.0;
+        params.branch_levels[0].children.dead_kink_deg = 0.0;
+        let held = grow(&params);
+        params.trunk.children.dead_curl_deg = 30.0;
+        let curled = grow(&params);
+        assert_eq!(held.nodes.len(), curled.nodes.len());
+
+        let (mut tips, mut rose, mut living_moved) = (0, 0, 0);
+        for (a, b) in held.nodes.iter().zip(curled.nodes.iter()) {
+            if !a.dead {
+                if (a.position - b.position).length() > 1e-5 {
+                    living_moved += 1;
+                }
+                continue;
+            }
+            // The last standing node of a dead limb off the trunk.
+            let ends = a.level == 1
+                && !a.broken
+                && a.children.iter().all(|&c| {
+                    let c = &held.nodes[c as usize];
+                    c.stem != a.stem || c.broken
+                });
+            if !ends {
+                continue;
+            }
+            tips += 1;
+            if b.position.y > a.position.y + 1e-3 {
+                rose += 1;
+            }
+        }
+        assert_eq!(living_moved, 0, "curling dead wood moved living wood");
+        assert!(tips > 10, "only {tips} dead limb tips to curl");
+        assert!(rose * 4 > tips * 3, "only {rose} of {tips} dead limb tips rose");
+    }
+    #[test]
+    fn shade_scatter_breaks_the_dead_ladder_and_leaves_the_crown_alone() {
+        // Dead, a pine's whorls stand the band under the crown as a ladder. Scattered,
+        // the dead limbs leave the bole at more heights, and no living limb moves.
+        let heights = |sk: &Skeleton, dead: bool| {
+            let mut ys: Vec<i32> = sk
+                .nodes
+                .iter()
+                .filter(|n| n.level == 1 && n.dead == dead && !n.broken)
+                .filter_map(|n| n.parent)
+                .map(|p| &sk.nodes[p as usize])
+                .filter(|p| p.level == 0)
+                .map(|p| (p.position.y * 100.0).round() as i32)
+                .collect();
+            ys.sort_unstable();
+            ys.dedup();
+            ys
+        };
+        let mut params = parse_species(PINE_RON).unwrap();
+        assert!(params.trunk.children.shade_scatter > 0.0, "the pine should scatter");
+        let scattered = grow(&params);
+        params.trunk.children.shade_scatter = 0.0;
+        let ladder = grow(&params);
+        let (a, b) = (heights(&scattered, true).len(), heights(&ladder, true).len());
+        assert!(a * 2 > b * 3, "scattered dead limbs leave from {a} heights against {b}");
+        assert_eq!(heights(&scattered, false), heights(&ladder, false), "living limbs moved");
+    }
+    #[test]
+    fn stubs_left_by_the_crown_are_pegs_not_wires() {
+        // A stub carries nothing, so the pipe model gives it the floor radius; it was a
+        // limb a few centimetres across and is left that thick.
+        let params = parse_species(PINE_RON).unwrap();
+        let sk = grow(&params);
+        let stubs: Vec<_> = sk
+            .nodes
+            .iter()
+            .filter(|n| n.dead && n.stem_fraction >= 1.0 && n.children.is_empty() && n.level == 1)
+            .collect();
+        assert!(stubs.len() > 3, "only {} stubs on the pine", stubs.len());
+        for n in stubs {
+            let trunk = sk.nodes[n.parent.unwrap() as usize].radius;
+            assert!(n.radius >= trunk * 0.05, "a stub {:.4} m across on a {trunk:.3} m bole", n.radius);
+        }
+    }
+    #[test]
+    fn withered_wood_hangs_and_nothing_else_moves() {
+        // Still carrying its needles, a limb that has only just died is weighed down by
+        // them, where the bare dead wood springs up. The droop moves withered wood
+        // down and touches nothing else.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.trunk.children.wither_droop_deg = 0.0;
+        params.branch_levels[0].children.wither_droop_deg = 0.0;
+        let held = grow(&params);
+        params.branch_levels[0].children.wither_droop_deg = 40.0;
+        let hung = grow(&params);
+        assert_eq!(held.nodes.len(), hung.nodes.len());
+
+        let (mut withered, mut dropped, mut others_moved) = (0, 0, 0);
+        for (a, b) in held.nodes.iter().zip(hung.nodes.iter()) {
+            if !a.withered {
+                if (a.position - b.position).length() > 1e-5 {
+                    others_moved += 1;
+                }
+                continue;
+            }
+            if a.level < 2 || a.broken {
+                continue;
+            }
+            withered += 1;
+            if b.position.y < a.position.y - 1e-3 {
+                dropped += 1;
+            }
+        }
+        assert_eq!(others_moved, 0, "the droop moved wood that is not withered");
+        assert!(withered > 20, "only {withered} withered twig nodes");
+        assert!(dropped * 2 > withered, "only {dropped} of {withered} withered twig nodes hung");
     }
     #[test]
     fn the_shade_line_carries_on_through_a_fork() {

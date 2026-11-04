@@ -29,6 +29,8 @@ use crate::wind::{StemSway, Sway, SwayAt, SwayField};
 const MAX_LEAVES: usize = 400_000;
 /// A leaf sits on the twig surface, not on its centreline.
 const SURFACE_BIAS: f32 = 0.85;
+/// Share of `hue_variance` and `green_variance` a withered card takes.
+const WITHERED_SPREAD: f32 = 0.3;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LeafMesh {
@@ -97,6 +99,8 @@ struct Card {
     /// The way out of the surface a climber's card lies on, which its shading leans
     /// toward instead of out of the crown. None on a tree.
     outward: Option<Vec3>,
+    /// Held by wood that has only just died, and coloured by `withered_tint`.
+    withered: bool,
 }
 
 pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
@@ -120,7 +124,7 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
     let variants = lp
         .cluster
         .as_ref()
-        .map_or_else(|| lp.atlas_rows.max(1), |c| c.variants.max(1));
+        .map_or_else(|| lp.atlas_rows.max(1), |c| c.total_variants());
     let tree_rng = TreeRng::new(params.seed ^ 0x1EAF_1EAF_1EAF_1EAF);
     let field = SwayField::new(sk);
     let mut cards: Vec<Card> = Vec::new();
@@ -133,8 +137,9 @@ pub fn build_leaves(sk: &Skeleton, params: &SpeciesParams) -> LeafMesh {
         if sk.nodes[first].level < lp.min_level {
             continue;
         }
-        // Dead wood keeps its bark and loses its leaves.
-        if sk.nodes[first].dead {
+        // Dead wood keeps its bark and loses its leaves, unless it died so lately that
+        // it still holds them, browned.
+        if sk.nodes[first].dead && !sk.nodes[first].withered {
             continue;
         }
         let sway = field.stem(sk, first);
@@ -195,6 +200,7 @@ fn place_on_stem(
     }
 
     let mut rng = tree_rng.stream(sk.nodes[first].path);
+    let withered = sk.nodes[first].withered;
     let spacing = (1.0 / lp.density).max(1e-3);
     let jitter = lp.spacing_variance.clamp(0.0, 0.95);
     // How far the tip is from every point on the run, so the leafy zone can be
@@ -261,6 +267,11 @@ fn place_on_stem(
                     continue;
                 }
             }
+            // A withered twig is dropping its dead needles. Drawn only on one, so a
+            // living twig takes exactly the draws it always did.
+            if withered && range_f32(&mut rng, 0.0, 1.0) >= lp.withered_keep {
+                continue;
+            }
             let at = a + dir * travelled;
             let surface = if surfaces[w + 1] != Vec3::ZERO { surfaces[w + 1] } else { surfaces[w] };
             // The walk starts where the twig leaves its parent, as the sway does, so
@@ -294,7 +305,14 @@ fn place_on_stem(
                 };
                 // Cards in one tuft take different arrangements, so even a tuft seen
                 // close up is not the same shoot drawn twice.
-                let variant = range_f32(&mut rng, 0.0, variants as f32) as u32;
+                // Withered cards draw from the sparse arrangements baked under the
+                // living ones, when there are any; still one draw either way.
+                let withered_rows = lp.cluster.as_ref().map_or(0, |c| c.withered_variants);
+                let (first, span) = match (withered, withered_rows.min(variants - 1)) {
+                    (true, w) if w > 0 => (variants - w, w),
+                    (_, w) => (0, variants - w),
+                };
+                let variant = first + range_f32(&mut rng, 0.0, span as f32) as u32;
                 let even = cluster_roll
                     + k as f32 * std::f32::consts::PI / lp.cluster_size.max(1) as f32;
                 let atlas_v = variant.min(variants - 1) as f32 / variants as f32;
@@ -325,6 +343,7 @@ fn place_on_stem(
                 };
                 card.sway = hang;
                 card.sway_at = hang_at;
+                card.withered = withered;
                 out.push(card);
             }
         }
@@ -389,6 +408,7 @@ fn make_card(
         sway: Sway::default(),
         sway_at: SwayAt::default(),
         outward: None,
+        withered: false,
     }
 }
 
@@ -454,6 +474,7 @@ fn make_clinging_card(
         sway: Sway::default(),
         sway_at: SwayAt::default(),
         outward: Some(n),
+        withered: false,
     }
 }
 
@@ -469,14 +490,21 @@ fn crown_bounds(cards: &[Card]) -> (Vec3, f32) {
     (center, radius)
 }
 
-/// The most a card's colour can come to in each channel, `tint` and both variations
-/// at their furthest, and never under 1. A glTF vertex colour stops at 1, so an export
-/// divides the cards' colours by this and multiplies the leaf maps by it instead: the
-/// same product, carried where it fits.
-pub fn tint_ceiling(lp: &LeafParams) -> [f32; 3] {
+/// The most a card's colour can come to in each channel, `tint` (and `withered_tint`,
+/// for a species that withers) and both variations at their furthest, and never under
+/// 1. A glTF vertex colour stops at 1, so an export divides the cards' colours by this
+/// and multiplies the leaf maps by it instead: the same product, carried where it fits.
+pub fn tint_ceiling(params: &SpeciesParams) -> [f32; 3] {
+    let lp = &params.leaves;
+    let withers = std::iter::once(&params.trunk)
+        .chain(params.branch_levels.iter())
+        .any(|sp| sp.children.wither > 0.0);
     let (h, g) = (lp.hue_variance.abs(), lp.green_variance.abs());
     let spread = [h * 0.60 + g * 0.15, h * 0.15 + g * 0.20, h * 0.50 + g * 0.05];
-    [0, 1, 2].map(|c| (lp.tint[c] * (1.0 + spread[c])).max(1.0))
+    [0, 1, 2].map(|c| {
+        let most = if withers { lp.tint[c].max(lp.withered_tint[c]) } else { lp.tint[c] };
+        (most * (1.0 + spread[c])).max(1.0)
+    })
 }
 
 /// A number from -1 to 1 that a point keeps wherever it is asked about: the same card
@@ -512,15 +540,19 @@ fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, ra
         None => (leaf_center - center).length() / radius,
     };
     let shade = 1.0 - lp.interior_shade.clamp(0.0, 1.0) * (1.0 - depth.clamp(0.0, 1.0));
-    let h = card.hue * lp.hue_variance;
+    // Dead needles have all gone the one way, to straw: the spread between old needle
+    // and new that keeps a living crown from reading as plastic only mottles them.
+    let spread = if card.withered { WITHERED_SPREAD } else { 1.0 };
+    let h = card.hue * lp.hue_variance * spread;
     // The second axis, across the first: a card greener than its neighbours or going
     // olive. Read off where the card is rather than drawn, so turning it up changes no
     // tree's shape.
-    let g = position_hash(card.origin) * lp.green_variance;
+    let g = position_hash(card.origin) * lp.green_variance * spread;
+    let base = if card.withered { lp.withered_tint } else { lp.tint };
     let tint = [
-        (lp.tint[0] * (1.0 + h * 0.60) * (1.0 - g * 0.15)).max(0.0),
-        (lp.tint[1] * (1.0 + h * 0.15) * (1.0 + g * 0.20)).max(0.0),
-        (lp.tint[2] * (1.0 - h * 0.50) * (1.0 + g * 0.05)).max(0.0),
+        (base[0] * (1.0 + h * 0.60) * (1.0 - g * 0.15)).max(0.0),
+        (base[1] * (1.0 + h * 0.15) * (1.0 + g * 0.20)).max(0.0),
+        (base[2] * (1.0 - h * 0.50) * (1.0 + g * 0.05)).max(0.0),
         shade,
     ];
 
@@ -639,6 +671,40 @@ mod tests {
     }
 
     #[test]
+    fn only_wood_that_has_just_died_keeps_its_needles() {
+        // A pine's freshly shaded-out limbs hold their needles, browned; the rest of the
+        // dead band is bare. Withering adds cards, all of them the withered colour, and
+        // turning it off takes exactly those away again.
+        let mut params = parse_species(PINE_RON).unwrap();
+        assert!(params.trunk.children.wither > 0.0, "the pine should wither");
+        let sk = crate::grow(&params);
+        let withered = sk.nodes.iter().filter(|n| n.withered && !n.broken).count();
+        assert!(withered > 0, "no withered wood on the pine");
+        assert!(
+            sk.nodes.iter().all(|n| !n.withered || n.dead),
+            "living wood marked withered"
+        );
+        params.leaves.withered_keep = 1.0;
+        // A colour no living card can come to, so the withered ones can be told apart.
+        params.leaves.withered_tint = [1.0, 0.0, 0.0];
+        let with = build_leaves(&crate::grow(&params), &params);
+        params.trunk.children.wither = 0.0;
+        let without = build_leaves(&crate::grow(&params), &params);
+        assert!(
+            with.leaf_count() > without.leaf_count(),
+            "withering added no cards: {} against {}",
+            with.leaf_count(),
+            without.leaf_count()
+        );
+        let marked = |m: &LeafMesh| m.tints.iter().filter(|t| t[1] == 0.0).count();
+        assert_eq!(marked(&without), 0, "a living card took the withered tint");
+        assert_eq!(
+            marked(&with) / 4,
+            with.leaf_count() - without.leaf_count(),
+            "the cards withering added are not the ones that took its tint"
+        );
+    }
+    #[test]
     fn presets_grow_a_canopy() {
         for src in [OAK_RON, PINE_RON, BIRCH_RON] {
             let params = parse_species(src).unwrap();
@@ -754,7 +820,7 @@ mod tests {
             .leaves
             .cluster
             .as_ref()
-            .map_or(1, |c| c.variants.max(1));
+            .map_or(1, |c| c.total_variants());
         assert!(variants > 1, "the oak is meant to bake several arrangements");
         let leaves = build_leaves(&crate::grow(&params), &params);
         assert_eq!(leaves.atlas_v.len(), leaves.vertex_count());

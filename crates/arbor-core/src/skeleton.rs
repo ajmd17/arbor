@@ -21,6 +21,12 @@ pub struct SkeletonNode {
     /// break rather than tapering to a living tip. Set for a whole stem at once, since
     /// a branch dies as a unit.
     pub dead: bool,
+    /// Whether this dead node died so lately that it still holds its foliage, browned.
+    ///
+    /// A limb the crown has only just shaded out keeps its twigs and its needles for a
+    /// season or two after it dies: the rust-brown clump hanging under a pine's crown.
+    /// Set only on dead wood, and for a whole subtree at once.
+    pub withered: bool,
     /// Whether this node has already broken off and is no longer part of the tree.
     ///
     /// Dead wood does not stand for ever: the thin, exposed end of a dead branch snaps
@@ -64,6 +70,7 @@ impl Skeleton {
             radius: 0.0,
             stem,
             dead: false,
+            withered: false,
             broken: false,
             surface: Vec3::ZERO,
         });

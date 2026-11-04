@@ -557,6 +557,11 @@ const FLARE_RING_TOLERANCE: f32 = 0.01;
 /// Twenty degrees is where the elbows stop showing at the distance a bare limb is looked
 /// at, for about half as many extra rings again as fifteen.
 const MAX_SPAN_TURN: f32 = 0.349;
+/// The same for dead wood: eight degrees. A dead limb's look is its crooks — the kinks
+/// `dead_kink_deg` puts at every joint — and at twenty degrees the thinning dropped
+/// most of them and swept each dead twig as a straight skewer. Dead wood is thin and
+/// there is little of it, so the rings cost little.
+const DEAD_SPAN_TURN: f32 = 0.14;
 
 /// Which rings to keep. Walks the stem dropping any ring whose absence moves the
 /// surface less than the tolerance, never two in a row, so the result still follows
@@ -578,6 +583,7 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
     // mesher uses by default instead, which costs a handful of rings on one stem.
     let flare_top = mp.flare_height * FLARE_RING_REACH;
     let flare_tol = tol.min(FLARE_RING_TOLERANCE);
+    let max_turn = if path.is_dead { DEAD_SPAN_TURN } else { MAX_SPAN_TURN };
     let mut i = 1;
     while i < path.len() - 1 {
         let prev = *keep.last().unwrap();
@@ -586,7 +592,7 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
         // Three things keep a ring: a branch leaving from it, the surface moving more
         // than the budget without it, and the stem turning more than a span may
         // across it.
-        let turns = path.dirs[prev].angle_between(path.dirs[i + 1]) > MAX_SPAN_TURN;
+        let turns = path.dirs[prev].angle_between(path.dirs[i + 1]) > max_turn;
         if !path.pinned[i] && !turns && ring_error(path, mp, phase, prev, i, i + 1) < limit {
             // Dropped. The next ring is measured against the same neighbour, so a long
             // smooth run collapses rather than losing every other ring.
@@ -971,7 +977,8 @@ impl StemPath {
 }
 
 /// Whether the stem starting at `first` is dead and reaches the trunk through nothing
-/// but dead wood.
+/// but dead wood. That takes in withered wood: the needles it still holds are dropping,
+/// and its twigs show through them as the tangle they are.
 fn hangs_from_trunk_by_dead_wood(sk: &Skeleton, first: usize) -> bool {
     let mut at = first;
     loop {
@@ -1282,11 +1289,11 @@ fn child_index(sk: &Skeleton) -> Vec<Vec<u32>> {
 fn ring_sides(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<u32> {
     const SAMPLES: usize = 256;
     let tol = mp.silhouette_tolerance.max(1e-5);
-    let lo = mp.min_radial.max(3);
-    let hi = mp.max_radial.max(lo);
+    let hi = mp.max_radial.max(mp.min_radial.max(3));
 
     let mut sides: Vec<u32> = (0..path.len())
         .map(|i| {
+            let lo = ring_floor(path, i, mp).min(hi);
             let profile: Vec<f32> = (0..SAMPLES)
                 .map(|k| path.radius_at(i, k as f32 / SAMPLES as f32 * TAU, mp, phase))
                 .collect();
@@ -1301,6 +1308,26 @@ fn ring_sides(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<u32> {
         sides[i] = raw[i].max(raw[i - 1].min(raw[i + 1]));
     }
     sides
+}
+
+/// Fewest sides a dead stem this thick is swept with.
+///
+/// Bare dead wood stands out against the sky with nothing round it, and at the three
+/// sides a coarse silhouette budget gives a limb a few centimetres across it reads as a
+/// sawn plank, or a prism stuck in the bole. Thinner than `DEAD_ROUND_RADIUS` it is a
+/// line at any distance it is seen from, and three are enough.
+const DEAD_MIN_RADIAL: u32 = 5;
+/// Radius from which dead wood takes `DEAD_MIN_RADIAL`, in metres.
+const DEAD_ROUND_RADIUS: f32 = 0.012;
+
+/// The fewest sides ring `i` may have.
+fn ring_floor(path: &StemPath, i: usize, mp: &MeshParams) -> u32 {
+    let lo = mp.min_radial.max(3);
+    if path.is_dead && path.radii[i] >= DEAD_ROUND_RADIUS {
+        lo.max(DEAD_MIN_RADIAL)
+    } else {
+        lo
+    }
 }
 
 /// Joins two rings that need not have the same number of vertices.

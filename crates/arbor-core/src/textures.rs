@@ -139,12 +139,12 @@ pub fn scale_colour(map: &mut Bitmap, k: f32) {
     scale_channels(map, [k; 3]);
 }
 
-fn srgb8_to_linear(v: u8) -> f32 {
+pub(crate) fn srgb8_to_linear(v: u8) -> f32 {
     let c = f32::from(v) / 255.0;
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-fn linear_to_srgb8(l: f32) -> u8 {
+pub(crate) fn linear_to_srgb8(l: f32) -> u8 {
     let l = l.clamp(0.0, 1.0);
     let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
     (c * 255.0).round() as u8

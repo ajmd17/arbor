@@ -70,6 +70,7 @@ fn main() {
         sources: num("--sources", d.sources as f32) as u32,
         cell_size: num("--size", d.cell_size as f32) as u32,
         seed: num("--seed", d.seed as f32) as u64,
+        ..d
     };
 
     let albedo = to_bitmap(&open(&dir.join(format!("{src}_albedo.png")).to_string_lossy()));

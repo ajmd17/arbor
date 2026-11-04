@@ -1070,7 +1070,7 @@ impl LeafMaterialParams {
         // Clustering stacks its arrangements down the sheet, so the atlas the shader
         // samples is taller than the one the species describes. A card reaches its own
         // arrangement by the v offset it carries; the cells here are the first one's.
-        let variants = lp.cluster.as_ref().map_or(1, |c| c.variants.max(1));
+        let variants = lp.cluster.as_ref().map_or(1, |c| c.total_variants());
         let tall = rows * variants;
         let cell = |index: u32| {
             let i = index.min(cols * rows - 1);

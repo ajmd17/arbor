@@ -231,10 +231,47 @@ struct Placement {
     bounds: (i32, i32, i32, i32),
     /// Multiplier on this leaf's colour, so the ones behind the shoot come out darker.
     value: f32,
+    /// Multiplier on this leaf's colour by channel, from its shoot's `colour_variance`.
+    shift: [f32; 3],
     /// Which of the source's alternative leaves this one is drawn from.
     source: usize,
     /// The way the blade faces, in the normal map's frame, which flattening loses.
     tilt: [f32; 3],
+}
+
+/// Recolours a baked cell to `srgb` on average, each pixel keeping its own light and
+/// dark against the cell's mean, measured in linear light over what the alpha keeps.
+/// With `keep_level` only the hue is taken and the cell keeps its own brightness: a
+/// translucency map has been scaled down by `transmission`, and taken to the albedo's
+/// level a withered card would glow with the sun behind it.
+fn recolour(map: &mut Bitmap, srgb: [f32; 3], keep_level: bool) {
+    use crate::textures::{linear_to_srgb8, srgb8_to_linear};
+    let lum = |px: &[u8]| {
+        0.2126 * srgb8_to_linear(px[0]) + 0.7152 * srgb8_to_linear(px[1]) + 0.0722 * srgb8_to_linear(px[2])
+    };
+    let (sum, n) = map
+        .pixels
+        .chunks_exact(4)
+        .filter(|px| px[3] > 127)
+        .fold((0.0f32, 0u32), |(s, n), px| (s + lum(px), n + 1));
+    if n == 0 || sum <= 0.0 {
+        return;
+    }
+    let mean = sum / n as f32;
+    let mut target = srgb.map(|c| srgb8_to_linear((c.clamp(0.0, 1.0) * 255.0).round() as u8));
+    if keep_level {
+        let own = 0.2126 * target[0] + 0.7152 * target[1] + 0.0722 * target[2];
+        target = target.map(|c| c * mean / own.max(1e-5));
+    }
+    for px in map.pixels.chunks_exact_mut(4) {
+        if px[3] == 0 {
+            continue;
+        }
+        let k = lum(px) / mean;
+        for c in 0..3 {
+            px[c] = linear_to_srgb8(target[c] * k);
+        }
+    }
 }
 
 /// Composites `cols` x `rows` cluster cells out of the matching cells of `src`, once
@@ -296,7 +333,13 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
     }
     let bounds: Vec<(u32, u32, u32, u32)> = alts.iter().map(|a| a.1).collect();
 
-    let variants = p.variants.clamp(1, MAX_VARIANTS);
+    let living = p.variants.clamp(1, MAX_VARIANTS);
+    let variants = (living + p.withered_variants).min(MAX_VARIANTS);
+    // The withered arrangements go under the living ones, sparser.
+    let withered = LeafClusterParams {
+        count: p.withered_count.max(1),
+        ..p.clone()
+    };
     let sheet = || Bitmap::new(size * cols, size * rows * variants);
     let mut albedo = sheet();
     let mut normal = src.normal.map(|_| sheet());
@@ -306,7 +349,8 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
         // Each variant is a shoot in its own right, so it gets its own stream rather
         // than a continuation of the last one: a species stays reproducible even if
         // the count of variants changes under it.
-        let places = lay_out(p, size, &bounds, p.seed ^ (v as u64).wrapping_mul(VARIANT_STRIDE));
+        let params = if v < living { p } else { &withered };
+        let places = lay_out(params, size, &bounds, p.seed ^ (v as u64).wrapping_mul(VARIANT_STRIDE));
         for i in 0..(cols * rows) as usize {
             let ox = (i as u32 % cols) * size;
             let oy = (v * rows + i as u32 / cols) * size;
@@ -317,7 +361,13 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
                     (a, n.as_ref(), r.as_ref(), t.as_ref())
                 })
                 .collect();
-            let baked = composite(&places, size, &bounds, &maps);
+            let mut baked = composite(&places, size, &bounds, &maps);
+            if v >= living {
+                recolour(&mut baked.albedo, p.withered_color, false);
+                if let Some(t) = baked.translucency.as_mut() {
+                    recolour(t, p.withered_color, true);
+                }
+            }
             blit(&mut albedo, &baked.albedo, ox, oy);
             if let (Some(dst), Some(s)) = (normal.as_mut(), baked.normal.as_ref()) {
                 blit(dst, s, ox, oy);
@@ -392,9 +442,15 @@ fn lay_out(
     } else {
         for s in 0..shoots {
             let across = ((s as f32 + 0.5) / shoots as f32 - 0.5) * SHOOT_SPREAD;
+            let mut up = rng.random_range(-0.05f32..=0.05);
+            // Drawn only when asked for, so a cell that does not scatter its shoots
+            // takes exactly the draws it always did.
+            if p.shoot_scatter > 0.0 {
+                up -= p.shoot_scatter * rng.random_range(0.0f32..=1.0);
+            }
             stand.push((
                 0.5 + across + rng.random_range(-0.04f32..=0.04),
-                rng.random_range(-0.05f32..=0.05),
+                up,
                 if rng.random::<bool>() { 1.0 } else { -1.0 },
                 rng.random_range(0.0..std::f32::consts::TAU),
             ));
@@ -499,6 +555,7 @@ fn lay_out(
             // depth cue a card has left once the arrangement has been flattened into
             // it, and without it a cluster lights as one flat sheet of colour.
             value: 1.0 - p.depth_shade.clamp(0.0, 1.0) * 0.5 * (1.0 - dz),
+            shift: shoot_shift(p, seed, shoot),
             source,
             tilt,
         };
@@ -516,6 +573,23 @@ fn lay_out(
     // fern frond, which no broadleaf shoot has.
     placed.sort_by(|a, b| a.0.total_cmp(&b.0));
     placed.into_iter().map(|(_, place)| place).collect()
+}
+
+/// The colour one shoot of a cell is shifted by, from `colour_variance`: along the
+/// same two axes a card's own variance runs, yellow to blue and green to olive. Read
+/// by hash from the shoot's index, so turning it up moves no leaf.
+fn shoot_shift(p: &LeafClusterParams, seed: u64, shoot: usize) -> [f32; 3] {
+    if p.colour_variance <= 0.0 {
+        return [1.0; 3];
+    }
+    let draw = |salt: u64| crate::growth::hash_unit(seed ^ salt, shoot as u64) * 2.0 - 1.0;
+    let h = draw(0x5400_7C01) * p.colour_variance;
+    let g = draw(0x5400_7C02) * p.colour_variance;
+    [
+        ((1.0 + h * 0.60) * (1.0 - g * 0.15)).max(0.0),
+        ((1.0 + h * 0.15) * (1.0 + g * 0.20)).max(0.0),
+        ((1.0 - h * 0.50) * (1.0 + g * 0.05)).max(0.0),
+    ]
 }
 
 /// How far to slide an attachment point so the leaf hanging off it sits inside the
@@ -637,7 +711,7 @@ fn composite(
                 let keep = 1.0 - a;
 
                 for k in 0..3 {
-                    acc_rgb[i][k] = src[k] * p.value * a + acc_rgb[i][k] * keep;
+                    acc_rgb[i][k] = src[k] * p.value * p.shift[k] * a + acc_rgb[i][k] * keep;
                 }
                 if let Some(map) = normal {
                     let t = map.sample(sx, sy).unwrap_or([0.5, 0.5, 1.0, 1.0]);
@@ -666,7 +740,7 @@ fn composite(
                     // so what it passes on is dimmed as its face is.
                     let t = map.sample(sx, sy).unwrap_or(src);
                     for k in 0..3 {
-                        acc_t[i][k] = t[k] * p.value * a + acc_t[i][k] * keep;
+                        acc_t[i][k] = t[k] * p.value * p.shift[k] * a + acc_t[i][k] * keep;
                     }
                 }
                 acc_a[i] = a + acc_a[i] * keep;
@@ -1287,6 +1361,86 @@ mod tests {
                 differing(a, b) > (size * size / 20) as usize,
                 "variants {a} and {b} are near enough the same arrangement"
             );
+        }
+    }
+
+    #[test]
+    fn scattered_shoots_stand_up_the_cell_not_on_its_base() {
+        // A cell of shoots all leaving its foot is one fan; scattered, their bases climb
+        // the cell, so its coverage sits higher. Zero bakes exactly what it always did.
+        let src = leaf(128, 128, 120);
+        let maps = || LeafMaps { albedo: &src, normal: None, roughness: None, translucency: None };
+        let fan = LeafClusterParams { shoots: 4, count: 24, shoot_tip: 0.8, ..params() };
+        let again = LeafClusterParams { shoot_scatter: 0.0, ..fan.clone() };
+        let tufts = LeafClusterParams { shoot_scatter: 0.6, ..fan.clone() };
+        let (a, b, c) = (
+            bake_cluster(&fan, 1, 1, maps()),
+            bake_cluster(&again, 1, 1, maps()),
+            bake_cluster(&tufts, 1, 1, maps()),
+        );
+        assert!(a.albedo.pixels == b.albedo.pixels, "no scatter changed the bake");
+        // Mean row of the covered pixels, 0 at the top of the cell.
+        let mean_row = |m: &Bitmap| {
+            let (mut sum, mut n) = (0.0f64, 0u64);
+            for y in 0..m.height {
+                for x in 0..m.width {
+                    if m.at(x, y)[3] > 127 {
+                        sum += y as f64;
+                        n += 1;
+                    }
+                }
+            }
+            sum / n.max(1) as f64
+        };
+        let (fan_row, tuft_row) = (mean_row(&a.albedo), mean_row(&c.albedo));
+        assert!(
+            tuft_row < fan_row - fan.cell_size as f64 * 0.05,
+            "scattered shoots sit at row {tuft_row:.0} against the fan's {fan_row:.0}"
+        );
+    }
+
+    #[test]
+    fn withered_arrangements_go_under_the_living_ones_sparser_and_recoloured() {
+        // The withered cells are their own rows: fewer leaves, baked to their colour,
+        // and the living rows above them exactly as they were without any.
+        let src = leaf(128, 128, 120);
+        let maps = || LeafMaps { albedo: &src, normal: None, roughness: None, translucency: None };
+        let living = LeafClusterParams { variants: 2, ..params() };
+        let p = LeafClusterParams {
+            withered_variants: 2,
+            withered_count: 2,
+            withered_color: [0.55, 0.38, 0.22],
+            ..living.clone()
+        };
+        let plain = bake_cluster(&living, 1, 1, maps());
+        let baked = bake_cluster(&p, 1, 1, maps());
+        let size = p.cell_size;
+        assert_eq!(baked.albedo.height, size * 4);
+        let row = |b: &Bitmap, v: u32| {
+            let start = (v * size * size * 4) as usize;
+            b.pixels[start..start + (size * size * 4) as usize].to_vec()
+        };
+        for v in 0..2 {
+            assert!(row(&plain.albedo, v) == row(&baked.albedo, v), "living row {v} changed");
+        }
+        let (mut cover, mut sum) = ([0usize; 4], [[0f32; 3]; 4]);
+        for v in 0..4 {
+            for px in row(&baked.albedo, v).chunks_exact(4).filter(|px| px[3] > 127) {
+                cover[v as usize] += 1;
+                for c in 0..3 {
+                    sum[v as usize][c] += f32::from(px[c]);
+                }
+            }
+        }
+        for v in 2..4 {
+            assert!(
+                cover[v] * 3 < cover[0].min(cover[1]),
+                "withered row {v} covers {} against the living {:?}",
+                cover[v],
+                &cover[..2]
+            );
+            let [r, g, b] = sum[v].map(|s| s / cover[v].max(1) as f32);
+            assert!(r > g && g > b, "withered row {v} is not brown: {r:.0} {g:.0} {b:.0}");
         }
     }
 

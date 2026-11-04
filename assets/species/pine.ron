@@ -67,7 +67,24 @@
             // band radiated as tidily as the crown; at 35 degrees the long ones hung
             // down the bole in strings, and the reference's dead limbs mostly stand
             // out level or a touch above.
-            dead_sag_deg: 8.0,
+            dead_sag_deg: 12.0,
+            // And shed of their needles they spring back up: the reference's dead limbs
+            // rise off the bole and curve up like antlers, where held level they read
+            // as a ladder of pegs. Kinked, too: dry wood is crooked, not the smooth arc
+            // it grew as. Sag above 12 pulled them back to level.
+            dead_curl_deg: 25.0,
+            dead_kink_deg: 12.0,
+            // The limbs the crown has only just closed over keep their twigs and their
+            // needles, gone rust-brown, for a season or two: the reference's first tree
+            // hangs a dead brown clump under its lowest living whorl. Reaching the whorl
+            // below the living crown, with `shed` taking its share, comes to a limb or
+            // three on about half the seeds; at 0.05 it stayed inside the lowest living
+            // whorl and read as mottling in it.
+            wither: 0.09,
+            // Weighed by its dead needles the withered limb gives a little; its twigs
+            // hang (below). At 15 the limbs themselves arched down into an umbrella,
+            // and the steep ones lay along the bole.
+            wither_droop_deg: 5.0,
             // The dead limbs stopped growing when they died and have lost their ends
             // since, so the oldest, lowest ones keep only this much of their length,
             // rising to all of it for the ones that have only just died under the
@@ -75,10 +92,15 @@
             // A forest pine keeps few of its dead: the reference carries a handful of
             // stubs, not a thicket, and the lowest are pegs.
             shade_keep: 0.1,
-            // And half have dropped off whole: the reference's bole carries one dead
+            // And many have dropped off whole: the reference's bole carries one dead
             // limb here and another there, where keeping them all stood a whorl of
             // pegs at every node.
-            shed: 0.5,
+            shed: 0.45,
+            // The rest leave from anywhere between their whorl and the one below, so
+            // the dead band is a scatter at no spacing the eye can find rather than a
+            // ladder of pairs every 1.8 m. That is what let `shed` come down from 0.6:
+            // more limbs, and still no rungs.
+            shade_scatter: 1.0,
         ),
     ),
     branch_levels: [
@@ -127,6 +149,19 @@
                 acrotony: 0.5,
                 planarity: 0.9,
                 count_variance: 0,
+                // The twigs left on a dead limb no longer hold the flat spray they grew
+                // in, and warp as the wood dries, up as often as down. Kept in it they
+                // lay along the limb in a bundle, seen edge on from the side, where the
+                // reference's splay out from it in forks. The twigs that die inside the
+                // living crown only sag, and are hidden.
+                dead_sag_deg: 40.0,
+                // Then turn up and crook along their length, as the limb does, into the
+                // reference's short upswept forks. At 40 they stood as a comb of candles.
+                dead_curl_deg: 25.0,
+                dead_kink_deg: 25.0,
+                // The withered limb's twigs trail below it in a curtain, as the
+                // reference's dead clump does, where the bare ones turn up.
+                wither_droop_deg: 40.0,
                 // The inside of a living limb is bare: its own outer growth shades
                 // it, and the twigs there are dead ones.
                 shade_line: 0.2,
@@ -143,7 +178,10 @@
             segment_length: 0.25,
             zigzag_deg: 8.0,
             dieback: 0.04,
-            snap_radius: 0.008,
+            // Dead twigs this thin lose their ends: the reference's dead limbs carry short
+            // forks, and at 0.008 they kept a metre of straight wire, at 0.02 a fan of
+            // half-metre skewers off every limb.
+            snap_radius: 0.035,
             curvature: 0.05,
             // Little lift and held flat to the limb's plane, so a limb's branchlets
             // lie as a pad rather than standing up off it in brushes.
@@ -285,9 +323,12 @@
         // whole-tree distance, which is where this stopped. Against Quixel's Megaplants
         // Baltic pine in a white studio (`tools/refmatch.py`) those clumps were still
         // half again the reference's grain, and 0.66 m at more to the metre matches it,
-        // filling the cone below, for 8.2k triangles of needles.
-        card_length: 0.66,
-        card_width: 0.66,
+        // filling the cone below, for 8.2k triangles of needles. Since the bake became
+        // several small tufts to a card (`shoot_scatter` below) a card no longer reads
+        // as one lobe at any size, and 0.82 m closes the pads back up to the
+        // reference's porosity for no more triangles; 0.66 left them see-through.
+        card_length: 0.82,
+        card_width: 0.82,
         size_variance: 0.3,
         crotch_angle_deg: 10.0,
         crotch_variance_deg: 8.0,
@@ -303,14 +344,27 @@
         curvature: 0.3,
         // Fitted to the reference's colour under a white light (`tools/fitcolour.py`),
         // with the cards varied both ways, yellow to blue and green to olive, as the
-        // photograph's crown is: one green throughout read as plastic. A tuft passes
-        // an eighth of what the scan's map says; at the full amount the crown glowed
-        // pale with the sun behind it.
-        tint: (1.241, 1.241, 1.053),
+        // photograph's crown is: one green throughout read as plastic. Card by card
+        // the olive end came out mauve and the crown read as camouflage; less of it
+        // here, and the rest varied tuft by tuft inside the bake (`colour_variance`).
+        // Refitted to the new bake: 6-seed refmatch 0.929. A tuft passes
+        // under a third of what the scan's map says; at the full amount the crown
+        // glowed pale with the sun behind it. At an eighth it passed so little that
+        // the lit needles came out as blue-grey as the shaded ones, where the
+        // reference's sunlit tips are warm and its shade cool: 0.3 is what puts that
+        // split back (refmatch 0.929 to 0.939, its contrast 0.87 to 0.91), and backlit
+        // the crown is only a touch paler. 0.4 scored the same and is nearer the glow.
+        tint: (1.315, 1.315, 1.2),
         saturation: 0.594,
-        transmission: 0.13,
-        hue_variance: 0.5,
-        green_variance: 0.6,
+        transmission: 0.3,
+        hue_variance: 0.45,
+        green_variance: 0.35,
+        // The needles a limb that has just died still holds. Their colour is baked
+        // (`cluster.withered_color`), so no tint here; fewer of them, as they are
+        // dropping. Full size: smaller cards read the bake from coarser mips, where
+        // the needles close up and each card came out a solid little leaf.
+        withered_tint: (1.0, 1.0, 1.0),
+        withered_keep: 0.7,
         interior_shade: 0.45,
         // Soft. Sharpening kept the single airy shoots resolving as strands, but a
         // bundle's interior is dense enough to close up a few mips down, and a sharp
@@ -324,9 +378,9 @@
         // Light comes through a needle crown in a thousand gaps; the shaded side of it
         // is darker blue-green, not black.
         self_shadow: 0.55,
-        // Sixteen shoots baked into each card, fanned from one base: the cluster of
-        // shoots at the end of a pine twig, and enough of them that one card of it
-        // carries what four single-shoot cards used to. The shoots come from the two straight
+        // Needle sprays baked into each card as several small brushes (see `count`
+        // below); one card of them carries what four single-spray cards used to. The
+        // sprays come from the two straight
         // needle brushes of the source, each leaf picking one (`sources`), with their
         // bare stalks trimmed off in the atlas so they meet at a compact base rather
         // than on crossed sticks — the stalks were half the cell and held coverage to
@@ -334,10 +388,15 @@
         // the bake stacks shoots deep enough that shading the back ones darkened the
         // whole crown.
         cluster: Some((
-            count: 16,
-            leaf_length: 0.85,
-            base_angle_deg: 36.0,
-            tip_angle_deg: 6.0,
+            // Five short brushes to a card, each a shoot of five needle sprays, their
+            // bases scattered up the cell (`shoot_scatter`). Sixteen long sprays from
+            // one base were a solid fan, and a crown of fans read as lobed leaves where
+            // the reference's pads are many hand-sized tufts with sky between them.
+            count: 25,
+            shoots: 5,
+            leaf_length: 0.36,
+            base_angle_deg: 40.0,
+            tip_angle_deg: 10.0,
             tip_scale: 0.85,
             angle_variance_deg: 7.0,
             roll_deg: 137.5,
@@ -350,9 +409,23 @@
             shoot_curve: 0.04,
             variants: 4,
             shoot_base: 0.97,
-            shoot_tip: 0.8,
+            shoot_scatter: 0.55,
+            // Each tuft a little yellower or bluer than its neighbours: the fine
+            // mottle of old needle against new. At 0.7 it was confetti.
+            colour_variance: 0.25,
+            shoot_tip: 0.92,
             source_aspect: 0.588,
             sources: 2,
+            // Two arrangements of a single shoot each for the withered cards, baked
+            // straight to the straw-tan of the reference's dead clump. Sixteen shoots
+            // to a card is a solid fan, and browned, alone on a dead limb, that fan
+            // read as an oak leaf; three still did. One is a dead shoot. The colour is
+            // baked rather than tinted because in linear light the needle art is green
+            // enough that no tint short of 6x red brings it past khaki, and an export
+            // cannot carry a tint that size in its maps.
+            withered_variants: 2,
+            withered_count: 1,
+            withered_color: (0.53, 0.41, 0.29),
             cell_size: 1024,
         )),
         // The bake's source: two sprays stacked down the atlas. They are the two
@@ -413,16 +486,17 @@
         bark_darken_low: 0.65,
         // Dead wood bleaches toward silver-grey, but on these the bark has mostly
         // held: the reference's dead limbs are the bole's own orange-brown, a little
-        // greyer. Carried most of the way to the grey they read as bleached dowels.
+        // greyer. Carried most of the way to the grey they read as bleached dowels, and
+        // at 0.3 still as pale planks against the bole beside them.
         dead_wood_color: (0.26, 0.255, 0.24),
-        dead_wood_weathering: 0.3,
+        dead_wood_weathering: 0.12,
         // The living twigs are culled at `min_bark_radius` because needles hide them;
         // the dead band carries nothing, so it is meshed finer, down to 15 mm: enough
         // for the forked remnant of a twig or two on each. At 12 mm, with every dead
         // limb kept, they made a fan of grey twiglets that read from any distance as
         // wire hanging off the bole. Dead twigs inside the living crown are hidden like the living ones
         // and are culled with them.
-        dead_bark_radius: 0.015,
+        dead_bark_radius: 0.005,
         irregularity: (
             flute_depth: 0.06,
             flute_waves: 5.0,

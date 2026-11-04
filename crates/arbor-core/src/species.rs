@@ -872,6 +872,15 @@ pub struct ChildParams<V = f32> {
     /// and a share that fell away toward the crown left the band, which mostly lies
     /// just under it, nearly as full as before.
     pub shed: V,
+    /// The share of a whorl's children, where the shade line will certainly take them,
+    /// that leave from a node somewhere below the whorl instead.
+    ///
+    /// Dead, a pine's whorls stand the band under its crown as a ladder — a ring of
+    /// pegs at every whorl and bare bole between — where a forest pine's dead band is
+    /// one limb here and another there, at no spacing the eye can find. Only moves
+    /// children below the shade line's blend, so the living crown keeps its tiers;
+    /// only does anything on a stem whose whorls skip nodes (`every` above 1).
+    pub shade_scatter: V,
     /// How far a shaded-out child may settle down about its base once it has died, in
     /// degrees.
     ///
@@ -882,6 +891,37 @@ pub struct ChildParams<V = f32> {
     /// trunk. Each dead limb tilts rigidly about its attachment by a share of this,
     /// skewed so most settle a little and a few settle hard. Zero leaves them as grown.
     pub dead_sag_deg: V,
+    /// How far a dead child's wood turns up over each metre of its length, in degrees.
+    ///
+    /// A pine limb is held down by the weight of its needles; once they are gone the
+    /// wood springs back toward the upswept line it grew in, and the old shoots along
+    /// it, which always turned up toward the light, turn up again. The dead limbs of a
+    /// forest pine rise off the bole and curve up like antlers where the living crown's
+    /// lie level. Applied along the whole dead subtree, twigs included, and never past
+    /// near vertical. Zero leaves the wood as grown.
+    pub dead_curl_deg: V,
+    /// How far each joint of a dead child's wood kinks at random, in degrees.
+    ///
+    /// Dry wood warps, and a dead limb that has lost its ends to the wind is a run of
+    /// crooked pieces rather than the smooth arc it grew as. Drawn per node, up to this
+    /// either way, so it reads coarser on a stem with longer segments.
+    pub dead_kink_deg: V,
+    /// How far under the shade line, as a share of the parent, the shaded-out children
+    /// died so lately that they still hold their foliage, browned.
+    ///
+    /// A pine's limbs do not die bare: the one the crown has just closed over keeps its
+    /// twigs and its needles, rust-brown, for a season or two before they drop, and the
+    /// limb under the lowest living whorl is often a dead brown clump. Those keep their
+    /// whole length and none of them have fallen; `leaves.withered_tint` colours them.
+    /// Zero leaves every dead child bare.
+    pub wither: V,
+    /// How far withered wood bends down over each metre of its length, in degrees.
+    ///
+    /// Wood still carrying its needles is weighed down by them, and it is dead, so it
+    /// lays down nothing to hold itself up: where the bare dead limbs spring up, the
+    /// withered limb under a pine's crown hangs, its twigs trailing below it in a
+    /// curtain. Applied along the whole withered subtree, never past near vertical.
+    pub wither_droop_deg: V,
     /// Longest a branch leaving this stem may grow, as a multiple of the stem still to
     /// come past the point it leaves. Holds side branches and forks alike.
     ///
@@ -920,7 +960,12 @@ impl Default for ChildParams {
             shade_blend: 0.0,
             shade_keep: 1.0,
             shed: 0.0,
+            shade_scatter: 0.0,
             dead_sag_deg: 0.0,
+            dead_curl_deg: 0.0,
+            dead_kink_deg: 0.0,
+            wither: 0.0,
+            wither_droop_deg: 0.0,
             tip_reach: 0.0,
         }
     }
@@ -953,7 +998,12 @@ impl<V: Scalar> ChildParams<V> {
             shade_blend: f(&key(at, "shade_blend"), self.shade_blend),
             shade_keep: f(&key(at, "shade_keep"), self.shade_keep),
             shed: f(&key(at, "shed"), self.shed),
+            shade_scatter: f(&key(at, "shade_scatter"), self.shade_scatter),
             dead_sag_deg: f(&key(at, "dead_sag_deg"), self.dead_sag_deg),
+            dead_curl_deg: f(&key(at, "dead_curl_deg"), self.dead_curl_deg),
+            dead_kink_deg: f(&key(at, "dead_kink_deg"), self.dead_kink_deg),
+            wither: f(&key(at, "wither"), self.wither),
+            wither_droop_deg: f(&key(at, "wither_droop_deg"), self.wither_droop_deg),
             tip_reach: f(&key(at, "tip_reach"), self.tip_reach),
         }
     }
@@ -1054,6 +1104,25 @@ pub struct LeafClusterParams {
     /// Where along the cell the first and last leaves attach, 1.0 being the base.
     pub shoot_base: f32,
     pub shoot_tip: f32,
+    /// How far up the cell the shoots' bases scatter, as a fraction of it, so a cell
+    /// of several `shoots` is several tufts at different heights rather than one row
+    /// of them standing on its base.
+    ///
+    /// A pine's needles sit in tufts at the ends of short shoots, a hand's breadth
+    /// across, and a pad of them is many such tufts with sky between. A cell whose
+    /// leaves all leave from its foot is one fan however many there are, and a crown
+    /// of 0.66 m fans breaks into lobes the size of the card. Scattered, the same card
+    /// carries the reference's grain for no more triangles. Zero stands every shoot on
+    /// the base, as before.
+    pub shoot_scatter: f32,
+    /// How far each shoot of a cell is shifted in colour, yellow to blue and green to
+    /// olive, as a card's `hue_variance` and `green_variance` shift whole cards.
+    ///
+    /// A crown varies old needle against new tuft by tuft. Varied by card, the spread
+    /// comes out in blocks the size of the card and a needle crown reads as
+    /// camouflage; varied by shoot inside the bake, the same spread is the fine
+    /// mottle of the real thing. Zero bakes every shoot the art's own colour.
+    pub colour_variance: f32,
     /// Width against length of the card the source leaf texture was authored for.
     /// Leaves are rotated in pixels, so a cell whose pixels are not square in world
     /// terms has to be stretched first or every rotated leaf comes out sheared.
@@ -1066,10 +1135,36 @@ pub struct LeafClusterParams {
     /// Drawing each leaf from the whole set is what makes a cluster look gathered
     /// rather than cloned. One is a single source, as before.
     pub sources: u32,
+    /// Arrangements baked under the living ones for withered foliage
+    /// (`children.wither`), each of `withered_count` leaves rather than `count`.
+    ///
+    /// A cell dense enough to stand for a living tuft is a solid fan of needle, and on a
+    /// dead limb, alone and browned, that fan reads as one broad leaf. A just-dead
+    /// shoot has lost most of its needles: a few, and the twig they hang on showing
+    /// between them. Zero draws withered cards from the living arrangements.
+    pub withered_variants: u32,
+    /// Leaves in a withered arrangement.
+    pub withered_count: u32,
+    /// The colour a withered arrangement is baked to, as sRGB: its mean, with each
+    /// needle keeping its own light and dark about it.
+    ///
+    /// The art is a living needle, and in the linear light a shader multiplies in it
+    /// is greener still than it looks; no tint brings it round to the rust of a dead
+    /// one short of numbers so large an export cannot carry them in its maps. So the
+    /// withered cells are recoloured where they are baked, and `withered_tint` is left
+    /// to vary them.
+    pub withered_color: [f32; 3],
     /// Resolution of one generated cell. Cells are square, so a species that clusters
     /// wants a square card as well.
     pub cell_size: u32,
     pub seed: u64,
+}
+
+impl LeafClusterParams {
+    /// Every arrangement on the sheet, living and withered, one under another.
+    pub fn total_variants(&self) -> u32 {
+        self.variants.max(1) + self.withered_variants
+    }
 }
 
 impl Default for LeafClusterParams {
@@ -1094,8 +1189,13 @@ impl Default for LeafClusterParams {
             variants: 1,
             shoot_base: 0.99,
             shoot_tip: 0.26,
+            shoot_scatter: 0.0,
+            colour_variance: 0.0,
             source_aspect: 1.0,
             sources: 1,
+            withered_variants: 0,
+            withered_count: 3,
+            withered_color: [0.55, 0.38, 0.22],
             cell_size: 1024,
             seed: 7,
         }
@@ -1179,6 +1279,15 @@ pub struct LeafParams<V = f32> {
     /// olive. `hue_variance` moves cards between yellow-green and blue-green only, and
     /// a real crown varies the other way as much, old needle against new.
     pub green_variance: V,
+    /// Colour multiplier for the foliage still held by wood that has only just died
+    /// (`children.wither`), in place of `tint`. Needles a season dead go rust and
+    /// then straw. Where `cluster.withered_color` bakes the withered arrangements to
+    /// that already, leave this at 1; without one it is what browns the living needle,
+    /// as far as a multiplier can.
+    pub withered_tint: [V; 3],
+    /// The share of its tufts a withered twig still carries. The dead needles are
+    /// dropping, so the clump is thinner than the living crown above it.
+    pub withered_keep: V,
     /// How much of the leaf art's own colour is kept, 1 for all of it and 0 for grey.
     /// Scans are often far greener than a canopy reads from a distance, and `tint`
     /// cannot take that out: multiplying a channel the art barely has does nothing.
@@ -1264,6 +1373,8 @@ impl Default for LeafParams {
             tint: [1.0, 1.0, 1.0],
             hue_variance: 0.12,
             green_variance: 0.0,
+            withered_tint: [1.5, 0.95, 0.5],
+            withered_keep: 1.0,
             saturation: 1.0,
             transmission: 1.0,
             interior_shade: 0.35,
@@ -1314,6 +1425,8 @@ impl<V: Scalar> LeafParams<V> {
             tint: map_array(&key(at, "tint"), self.tint, f),
             hue_variance: f(&key(at, "hue_variance"), self.hue_variance),
             green_variance: f(&key(at, "green_variance"), self.green_variance),
+            withered_tint: map_array(&key(at, "withered_tint"), self.withered_tint, f),
+            withered_keep: f(&key(at, "withered_keep"), self.withered_keep),
             saturation: f(&key(at, "saturation"), self.saturation),
             transmission: f(&key(at, "transmission"), self.transmission),
             interior_shade: f(&key(at, "interior_shade"), self.interior_shade),

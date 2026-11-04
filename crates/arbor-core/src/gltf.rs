@@ -186,7 +186,7 @@ impl Textures {
                     out.leaf_roughness = Some(textures::encode_png(&roughness)?);
                     // What the cards' colours carry over 1 goes into the maps, since the
                     // vertex colours cannot hold it; see `tint_ceiling`.
-                    let ceiling = crate::leaves::tint_ceiling(lp);
+                    let ceiling = crate::leaves::tint_ceiling(params);
                     textures::scale_channels(&mut maps.albedo, ceiling);
                     out.leaf_albedo = Some(textures::encode_png(&maps.albedo)?);
                     if let Some(t) = maps.translucency.as_mut() {
@@ -681,7 +681,7 @@ fn leaf_mesh(
     let (cols, rows) = (lp.atlas_cols.max(1), lp.atlas_rows.max(1));
     // The same mapping the viewer's leaf shader makes: clustering stacks its variants
     // down the sheet, and each card carries the offset to its own.
-    let variants = lp.cluster.as_ref().map_or(1, |c| c.variants.max(1));
+    let variants = lp.cluster.as_ref().map_or(1, |c| c.total_variants());
     let tall = rows * variants;
     let scale = [1.0 / cols as f32, 1.0 / tall as f32];
     let cell = |index: u32| {
@@ -701,7 +701,7 @@ fn leaf_mesh(
     // sits, which the viewer takes from the light gathered from around it and not from
     // the sun. glTF reads a colour's alpha as opacity, so the shade is an attribute of
     // its own that other tools leave alone.
-    let ceiling = crate::leaves::tint_ceiling(lp);
+    let ceiling = crate::leaves::tint_ceiling(params);
     let tints: Vec<[f32; 3]> = leaves
         .tints
         .iter()
