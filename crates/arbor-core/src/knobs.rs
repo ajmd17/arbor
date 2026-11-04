@@ -1,0 +1,456 @@
+//! The species controls, kept as tables rather than as code.
+//!
+//! Every number a panel can edit is described once here — its label, the range its
+//! slider offers, whether that range is swept logarithmically, and a line of help. The
+//! viewer draws its side panel by walking these tables, and `controls` flattens them
+//! into the list an engine's editor builds its own panel from.
+//!
+//! The ranges are still load-bearing, though less than they were. The viewer draws
+//! every slider with `SliderClamping::Edits`, so a preset carrying a value outside its
+//! range keeps it rather than having the clamped number written back over the species
+//! — which is what egui's default does, and what once grew a 52 m douglas fir as a 32 m
+//! one under a crown based at 25 m. What the range still decides is whether the handle
+//! can reach the preset's own value, so it has to cover every one; the viewer's
+//! `species_values_fit_their_sliders` checks that.
+
+use crate::species::{BarkIrregularity, BasalParams, ChildParams, LeafParams, MeshParams, StemParams, WindParams};
+use crate::VineParams;
+use crate::{EnvelopeParams, Ranged, SpeciesParams, SpeciesTemplate};
+
+pub mod cover;
+pub mod rock;
+
+/// One continuous control over a field of `T`, which may be a range.
+pub struct Knob<T> {
+    pub label: &'static str,
+    pub range: (f32, f32),
+    /// Sweep the range logarithmically, for quantities that matter by ratio rather than
+    /// by difference: a radius of 2 mm against 4 mm is as big a change as 2 m against 4.
+    pub log: bool,
+    pub help: &'static str,
+    pub get: fn(&mut T) -> &mut Ranged,
+}
+
+/// One whole-number control over a field of `T`.
+pub struct Count<T> {
+    pub label: &'static str,
+    pub range: (u32, u32),
+    pub help: &'static str,
+    pub get: fn(&mut T) -> &mut u32,
+}
+
+pub struct Group<T: 'static> {
+    pub title: &'static str,
+    pub knobs: &'static [Knob<T>],
+    pub counts: &'static [Count<T>],
+}
+
+pub const fn knob<T>(
+    label: &'static str,
+    range: (f32, f32),
+    help: &'static str,
+    get: fn(&mut T) -> &mut Ranged,
+) -> Knob<T> {
+    Knob { label, range, log: false, help, get }
+}
+
+pub const fn log_knob<T>(
+    label: &'static str,
+    range: (f32, f32),
+    help: &'static str,
+    get: fn(&mut T) -> &mut Ranged,
+) -> Knob<T> {
+    Knob { label, range, log: true, help, get }
+}
+
+// ---------------------------------------------------------------------------------
+// Whole tree
+
+/// Crown shape and the multipliers that act on every level at once. These are the
+/// quick controls, shown open at the top of the panel.
+pub static SHAPE: &[Knob<SpeciesTemplate>] = &[
+    log_knob("Trunk length", (0.3, 60.0), "Declared length of the trunk, in metres: of every stem, for a shrub, and of the runners, for a vine. The crown envelope stretches along it, so the crown stays on the tree; it does not get wider, which is what Envelope scale is for.", |p| &mut p.trunk.length),
+    knob("Envelope scale", (0.4, 2.5), "Scales the crown envelope that steers and prunes every branch.", |p| &mut p.envelope_scale),
+    knob("Gravity", (0.0, 4.0), "Multiplies every level's gravity at once.", |p| &mut p.gravity_multiplier),
+    knob("Phototropism", (0.0, 4.0), "Multiplies every level's pull toward the light at once.", |p| &mut p.phototropism_multiplier),
+];
+
+pub const BRANCH_LEVELS: (u32, u32) = (1, 6);
+
+/// The stems a plant puts up from its root: one for a tree, a clump for a shrub.
+pub static BASAL: Group<BasalParams<Ranged>> = Group {
+    title: "Stems from the root",
+    knobs: &[
+        knob("Lean", (0.0, 90.0), "How far from upright the outermost stems of a clump lean, in degrees. Those inside it lean less, which opens the clump into a vase.", |b| &mut b.lean_deg),
+        knob("Lean variance", (0.0, 45.0), "Random spread on each stem's lean, in degrees.", |b| &mut b.lean_variance_deg),
+        knob("Stool radius", (0.0, 2.0), "Radius of the patch of ground the stems come up from, in metres.", |b| &mut b.spread),
+        knob("Vigor variance", (0.0, 1.0), "Spread of drive between stems, as a fraction either way. An old clump has a few stems that have outgrown the rest.", |b| &mut b.vigor_variance),
+    ],
+    counts: &[
+        Count { label: "Stems", range: (1, 40), help: "Stems from the root. One is a tree; several, each grown as the trunk describes, a shrub.", get: |b| &mut b.count },
+        Count { label: "Stems variance", range: (0, 20), help: "Stems more or fewer than that, drawn for each plant.", get: |b| &mut b.count_variance },
+    ],
+};
+
+/// How a climber holds to what it grows over.
+pub static VINE: Group<VineParams<Ranged>> = Group {
+    title: "Climbing",
+    knobs: &[
+        knob("Heading", (0.0, 180.0), "Which way the runners set off across the support, in degrees from straight up it: 0 climbs, 90 runs sideways, 180 heads down.", |v| &mut v.heading_deg),
+        knob("Fan", (0.0, 90.0), "Random spread either side of that heading, in degrees.", |v| &mut v.fan_deg),
+        knob("Adhesion", (0.0, 1.0), "How hard a stem holds to its support. 0 hangs free; 1 lies on the surface wherever it can reach it.", |v| &mut v.adhesion),
+        log_knob("Reach", (0.01, 1.0), "How far off the surface a stem can still find it, in metres.", |v| &mut v.reach),
+        knob("Twine", (-0.5, 0.5), "Sideways pull round the support per segment, for a vine that winds. The sign is the hand of the spiral.", |v| &mut v.twine),
+        knob("Stand off", (0.0, 1.0), "Share of side shoots that grow out away from the support rather than along it.", |v| &mut v.stand_off),
+        knob("Stand-off angle", (0.0, 90.0), "How far those shoots lean out from the surface, in degrees.", |v| &mut v.stand_off_deg),
+        knob("Free length", (0.0, 3.0), "How far a clinging stem that has lost its support grows on before it gives up, in metres. Zero never gives up: a trailer hanging free.", |v| &mut v.free_length),
+        knob("Crowding", (0.0, 2.0), "Metres a tip may run through ground another stem already holds before it stops. Spreads a vine into an even cover. Zero never stops.", |v| &mut v.crowding),
+        log_knob("Crowding cell", (0.02, 0.5), "Size of the cells that ground is measured in, in metres.", |v| &mut v.crowding_cell),
+        knob("Leaf lift", (0.0, 90.0), "How far a leaf on a clinging stem stands off the surface, in degrees. Near 0 they lie flat like shingles.", |v| &mut v.leaf_lift_deg),
+    ],
+    counts: &[
+        Count { label: "Runners", range: (1, 24), help: "Stems the plant puts out from its root.", get: |v| &mut v.runners },
+    ],
+};
+
+pub static SPLIT_DEPTH: Count<SpeciesTemplate> = Count {
+    label: "Fork depth",
+    range: (0, 5),
+    help: "How many times a stem may fork and its forks fork again. Zero turns forking off everywhere.",
+    get: |p| &mut p.max_split_depth,
+};
+
+pub static ENVELOPE: Group<EnvelopeParams<Ranged>> = Group {
+    title: "Crown envelope",
+    knobs: &[
+        log_knob("Falloff", (0.01, 1.0), "How soft the envelope's edge is. Small is a hard wall; large lets branches thin out gradually toward it.", |e| &mut e.falloff),
+        knob("Kill threshold", (0.0, 0.5), "Envelope density below which a growing stem is pruned. Higher prunes earlier, inside the edge.", |e| &mut e.kill_threshold),
+        knob("Pull strength", (0.0, 5.0), "How hard the crown turns a stem heading out of it, in radians per metre grown.", |e| &mut e.pull_strength),
+        knob("Drawn for trunk", (0.0, 80.0), "The trunk length the envelope's volumes were drawn for, in metres. The volumes stretch along the trunk by the ratio to the length the leader actually grew, variance included, so the crown follows a taller or shorter trunk. Zero holds them absolute.", |e| &mut e.for_trunk_length),
+    ],
+    counts: &[],
+};
+
+// ---------------------------------------------------------------------------------
+// One level's growth
+
+pub static STEM: &[Group<StemParams<Ranged>>] = &[
+    Group {
+        title: "Length & thickness",
+        knobs: &[
+            log_knob("Length", (0.05, 80.0), "Length a stem at this level grows at full drive, in metres. Drive and the crown envelope usually cut it shorter.", |s| &mut s.length),
+            knob("Length variance", (0.0, 1.0), "Random spread of length between stems, as a fraction either way.", |s| &mut s.length_variance),
+            log_knob("Radius", (0.002, 3.0), "Base radius of a stem at full drive, in metres.", |s| &mut s.radius),
+            knob("Radius ratio", (0.05, 0.95), "Most a stem may measure at its base, as a share of its parent's radius where it leaves.", |s| &mut s.radius_ratio),
+            knob("Taper", (0.0, 1.0), "Radius left at the tip, as a share of the base. Low tapers to a point.", |s| &mut s.taper),
+            knob("Da Vinci exponent", (1.0, 4.0), "How cross-section is conserved through a junction. 2 keeps total area; higher lets children be thicker for their parent.", |s| &mut s.da_vinci_exponent),
+            log_knob("Segment length", (0.02, 3.0), "Length of one growth step, in metres. Shorter bends more smoothly and costs more nodes.", |s| &mut s.segment_length),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Bending",
+        knobs: &[
+            knob("Curvature", (0.0, 0.5), "Random wander per segment.", |s| &mut s.curvature),
+            knob("Phototropism", (0.0, 0.5), "Pull toward the light per segment. Lifts tips.", |s| &mut s.phototropism),
+            knob("Gravity", (-0.2, 0.5), "Pull downward per segment, evenly along the stem. Negative lifts.", |s| &mut s.gravity),
+            knob("Droop", (0.0, 10.0), "How much harder gravity bends the tip than the base. Zero is an even bend.", |s| &mut s.droop),
+            knob("Zigzag", (0.0, 40.0), "Alternating jog at each node, in degrees. Breaks the extruded look without changing where the stem goes.", |s| &mut s.zigzag_deg),
+            knob("Swoop", (-60.0, 60.0), "Leave this far below the given course and turn evenly back up to end as far above it, in degrees: a limb that sags in the middle and turns its tip up.", |s| &mut s.swoop_deg),
+            knob("Turn bank", (0.0, 5.0), "Total turning a stem may do, in radians per metre of its length. Zero uses the model's default of 0.26; lower stiffens long limbs, and a short twig needs several to hang at all.", |s| &mut s.turn_bank),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Vigor & dieback",
+        knobs: &[
+            knob("Vigor falloff", (0.0, 1.0), "Drive lost from base to tip. Higher leaves the outer children weaker than the inner ones.", |s| &mut s.vigor_falloff),
+            knob("Dieback", (0.0, 1.0), "Share of stems at this level that are dead wood, weakest first.", |s| &mut s.dieback),
+            knob("Snap radius", (0.0, 0.3), "Dead wood thinner than this breaks back toward its base, in metres.", |s| &mut s.snap_radius),
+            knob("Dead stub length", (0.0, 3.0), "Stub left where the crown prunes a stem at birth, in metres. The dead stubs on a bare lower bole.", |s| &mut s.dead_stub_length),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Forks",
+        knobs: &[
+            knob("Fork chance", (0.0, 1.0), "Chance per segment that the stem forks.", |s| &mut s.split_probability),
+            knob("Fork angle", (0.0, 90.0), "How far a fork leans off the stem, in degrees.", |s| &mut s.split_angle_deg),
+            knob("Fork evenness", (0.0, 1.0), "0: the fork is a side branch and the stem stays the leader. 1: two equal co-dominant stems.", |s| &mut s.split_evenness),
+            knob("Fork start", (0.0, 1.0), "Earliest point along the stem a fork may leave, as a fraction of its length.", |s| &mut s.split_start_fraction),
+        ],
+        counts: &[],
+    },
+];
+
+// ---------------------------------------------------------------------------------
+// How one level is spawned off the level above it
+
+pub const DENSITY: (f32, f32) = (0.05, 40.0);
+pub const WHORL_EVERY: (u32, u32) = (1, 12);
+pub const WHORL_COUNT: (u32, u32) = (1, 16);
+
+pub static CHILDREN: &[Group<ChildParams<Ranged>>] = &[
+    Group {
+        title: "Placement",
+        knobs: &[
+            knob("Start", (0.0, 1.0), "Where along the parent children begin, as a fraction of its length.", |c| &mut c.start_fraction),
+            knob("End", (0.0, 1.0), "Where along the parent children stop.", |c| &mut c.end_fraction),
+            knob("Phyllotaxis", (0.0, 360.0), "Roll around the parent from one child to the next, in degrees. 137.5 spirals; 180 makes a flat two-sided spray.", |c| &mut c.phyllotaxis_deg),
+            knob("Roll variance", (0.0, 90.0), "Random spread on that roll, in degrees.", |c| &mut c.roll_variance_deg),
+            knob("Planarity", (0.0, 1.0), "How hard children are pulled into the flat plane of the limb carrying them. The layered spray of a fir.", |c| &mut c.planarity),
+            knob("Shade line", (0.0, 1.0), "Share of the parent, from its base, whose children are dead: shaded out by the crown above. The dead lower limbs of a pine, or the bare inside of a limb.", |c| &mut c.shade_line),
+            knob("Shade blend", (0.0, 1.0), "How far under the shade line the odds run from all alive to all dead, so the lowest living limb is not a ruled line.", |c| &mut c.shade_blend),
+            knob("Shade keep", (0.0, 1.0), "How much of its length a shaded-out child keeps at the parent's base, rising to all of it at the shade line. Lower reels the dead band in: old dead limbs stopped growing and lost their ends.", |c| &mut c.shade_keep),
+            knob("Shed", (0.0, 1.0), "The share of shaded-out children, and of stubs left on the bare bole, that have dropped off whole. A pine's bole keeps a few dead limbs, not a whorl at every node.", |c| &mut c.shed),
+            knob("Shade scatter", (0.0, 1.0), "Share of a whorl's children, below the shade line, that leave from a node below the whorl instead, so the dead band is a scatter rather than a ladder. Needs whorls that skip nodes.", |c| &mut c.shade_scatter),
+            knob("Dead sag", (0.0, 90.0), "How far a shaded-out child may settle down about its base once dead, in degrees. Drawn per limb, skewed so most settle a little and a few settle hard.", |c| &mut c.dead_sag_deg),
+            knob("Dead curl", (0.0, 90.0), "How far a dead child's wood turns up over each metre of its length, in degrees. Shed of its needles, a pine's dead limb springs up off the bole like an antler.", |c| &mut c.dead_curl_deg),
+            knob("Dead kink", (0.0, 60.0), "How far each joint of a dead child's wood kinks at random, in degrees. Dry wood warps into crooked pieces.", |c| &mut c.dead_kink_deg),
+            knob("Wither", (0.0, 0.5), "How far under the shade line the shaded-out children died so lately they still hold their foliage, browned. The dead brown clump under a pine's lowest living whorl.", |c| &mut c.wither),
+            knob("Wither droop", (0.0, 90.0), "How far withered wood bends down over each metre of its length, in degrees. Weighed by its dead needles, it hangs where bare dead wood springs up.", |c| &mut c.wither_droop_deg),
+        ],
+        counts: &[Count {
+            label: "Count variance",
+            range: (0, 8),
+            help: "Whorls vary by up to this many branches either way, and may come out empty.",
+            get: |c| &mut c.count_variance,
+        }],
+    },
+    Group {
+        title: "Angles",
+        knobs: &[
+            knob("Crotch angle", (0.0, 180.0), "Angle off the parent, in degrees. Past 90 the child leaves pointing back down.", |c| &mut c.crotch_angle_deg),
+            knob("Crotch at tip", (0.0, 180.0), "Angle for children near the parent's tip. Blended in hard toward the tip, so a conifer can go from sloping limbs to an upright spire.", |c| &mut c.crotch_angle_tip_deg),
+            knob("Crotch variance", (0.0, 60.0), "Random spread on the crotch angle, in degrees.", |c| &mut c.crotch_variance_deg),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Drive",
+        knobs: &[
+            knob("Scale", (0.01, 1.5), "Share of the parent's drive a child starts with. Sets how much smaller each level is.", |c| &mut c.scale),
+            knob("Scale variance", (0.0, 1.0), "Symmetric spread of that share between siblings.", |c| &mut c.scale_variance),
+            knob("Dominance", (0.0, 1.0), "How unequally siblings share the drive. High gives a few long winners and many suppressed stems.", |c| &mut c.dominance),
+            knob("Acrotony", (-1.0, 1.0), "Positive favours children near the parent's tip; negative favours those near its base.", |c| &mut c.acrotony),
+            knob("Tip reach", (0.0, 4.0), "Longest a child (side branch or fork) may grow, as a multiple of the parent still to come past it, so children near the parent's tip stay short. Zero uses the default: 1 off a branch, no limit off the trunk.", |c| &mut c.tip_reach),
+        ],
+        counts: &[],
+    },
+];
+
+// ---------------------------------------------------------------------------------
+// Foliage
+
+pub static FOLIAGE: &[Knob<LeafParams<Ranged>>] = &[
+    log_knob("Leaves per metre", (0.2, 60.0), "Cluster anchors per metre of twig.", |l| &mut l.density),
+    log_knob("Leaf length", (0.03, 2.0), "Card length, in metres.", |l| &mut l.card_length),
+    log_knob("Leaf width", (0.02, 2.0), "Card width, in metres.", |l| &mut l.card_width),
+    knob("Normal blend", (0.0, 1.0), "How far the shading normal leans from the flat card toward the outside of the crown.", |l| &mut l.normal_blend),
+    knob("Leaf droop", (-40.0, 70.0), "How far a card hangs under its own weight, in degrees.", |l| &mut l.droop_deg),
+];
+
+pub const LEAF_MIN_LEVEL: (u32, u32) = (0, 6);
+
+pub static FOLIAGE_MORE: &[Group<LeafParams<Ranged>>] = &[
+    Group {
+        title: "Placement",
+        knobs: &[
+            knob("Spacing variance", (0.0, 1.5), "How irregular the gaps between anchors are. Even spacing reads as a pinstripe.", |l| &mut l.spacing_variance),
+            knob("Leafy length", (0.0, 5.0), "Metres back from each twig tip that carry leaves. Zero leafs the whole twig.", |l| &mut l.leafy_length),
+            log_knob("Max twig radius", (0.001, 0.5), "Nothing thicker than this carries leaves, in metres.", |l| &mut l.max_twig_radius),
+            knob("Cluster spread", (0.0, 120.0), "How far the cards of one cluster fan out, in degrees.", |l| &mut l.cluster_spread_deg),
+        ],
+        counts: &[Count {
+            label: "Cluster size",
+            range: (1, 12),
+            help: "Cards emitted together at one anchor.",
+            get: |l| &mut l.cluster_size,
+        }],
+    },
+    Group {
+        title: "Cards",
+        knobs: &[
+            knob("Size variance", (0.0, 1.0), "Random spread of card size.", |l| &mut l.size_variance),
+            knob("Arch", (-90.0, 90.0), "How far a card's tip bends down along its length, in degrees. Needs more than one segment.", |l| &mut l.arch_deg),
+            knob("Dip", (-60.0, 60.0), "How steeply a card heads down from its twig before coming back up as far by its tip, in degrees: a sagging spray that still ends pointing up. Needs three or more segments.", |l| &mut l.dip_deg),
+            knob("Crotch angle", (0.0, 120.0), "Angle between a card and its twig, in degrees.", |l| &mut l.crotch_angle_deg),
+            knob("Crotch variance", (0.0, 60.0), "Random spread on that angle.", |l| &mut l.crotch_variance_deg),
+            knob("Phyllotaxis", (0.0, 360.0), "Roll around the twig between one card and the next, in degrees. 180 keeps a flat spray flat.", |l| &mut l.phyllotaxis_deg),
+            knob("Twist", (0.0, 180.0), "Random roll of a card about its own length, in degrees.", |l| &mut l.twist_deg),
+            knob("Even roll", (0.0, 1.0), "How evenly a cluster's cards are rolled round their axis. 1 spreads them 180 degrees over the cluster: two cards make a cross, three a star, and no tuft goes thin from one side.", |l| &mut l.even_roll),
+        ],
+        counts: &[Count {
+            label: "Segments",
+            range: (1, 6),
+            help: "Quads along each card's length, to carry the arch. Each one more costs two triangles a card.",
+            get: |l| &mut l.card_segments,
+        }],
+    },
+    Group {
+        title: "Shading",
+        knobs: &[
+            knob("Curvature", (0.0, 1.5), "Bend of the normal across a card's width, for a rounded blade.", |l| &mut l.curvature),
+            knob("Hue variance", (0.0, 1.0), "Per-card colour spread.", |l| &mut l.hue_variance),
+            knob("Green variance", (0.0, 1.0), "Card-to-card variation from greener to more olive, across the hue variance.", |l| &mut l.green_variance),
+            knob("Saturation", (0.0, 1.5), "How much of the leaf art's own colour is kept: below 1 pulls it toward grey before the atlas is baked.", |l| &mut l.saturation),
+            knob("Transmission", (0.0, 1.5), "How much of the light the translucency map lets through is kept: low for needles packed round a twig.", |l| &mut l.transmission),
+            knob("Interior shade", (0.0, 1.0), "Darkening of cards deep inside the crown.", |l| &mut l.interior_shade),
+            knob("Backface volume", (0.0, 1.0), "How far a card seen from behind keeps the crown's outward shading. 0 turns the whole normal round, right for broad leaves; 1 turns only the card's own share, for needle tufts that have no back.", |l| &mut l.backface_volume),
+            knob("Self shadow", (0.0, 1.0), "How much of the sun foliage in shadow loses. 1 is all of it, right for broad leaves; a needle crown lets light through and wants less.", |l| &mut l.self_shadow),
+            knob("Edge sharpness", (0.0, 1.0), "How crisp the cutout edge stays as a card shrinks. 0 is soft coverage, which blends cards into a mass; 1 keeps fine needles as strands.", |l| &mut l.edge_sharpness),
+            knob("Tint red", (0.0, 10.0), "Colour multiplier for the whole canopy. Dark scanned art is lifted well past 1.", |l| &mut l.tint[0]),
+            knob("Tint green", (0.0, 10.0), "Colour multiplier for the whole canopy. Dark scanned art is lifted well past 1.", |l| &mut l.tint[1]),
+            knob("Tint blue", (0.0, 10.0), "Colour multiplier for the whole canopy. Dark scanned art is lifted well past 1.", |l| &mut l.tint[2]),
+            knob("Withered red", (0.0, 10.0), "Colour multiplier, in place of the tint, for foliage still held by wood that has just died. Browns the living needle.", |l| &mut l.withered_tint[0]),
+            knob("Withered green", (0.0, 10.0), "Colour multiplier, in place of the tint, for foliage still held by wood that has just died. Browns the living needle.", |l| &mut l.withered_tint[1]),
+            knob("Withered blue", (0.0, 10.0), "Colour multiplier, in place of the tint, for foliage still held by wood that has just died. Browns the living needle.", |l| &mut l.withered_tint[2]),
+            knob("Withered keep", (0.0, 1.0), "Share of its tufts a withered twig still carries: the dead needles are dropping.", |l| &mut l.withered_keep),
+        ],
+        counts: &[],
+    },
+];
+
+// ---------------------------------------------------------------------------------
+// Bark and roots
+
+pub static BARK: &[Group<MeshParams<Ranged>>] = &[
+    Group {
+        title: "Roots & flare",
+        knobs: &[
+            knob("Root flare", (0.0, 4.0), "How much wider than the bole the foot gets.", |m| &mut m.root_flare),
+            knob("Flare height", (0.0, 6.0), "How far up the bole the flare reaches, in metres.", |m| &mut m.flare_height),
+            knob("Root sharpness", (0.5, 8.0), "How peaked the buttress ridges are. 1 is a smooth wave.", |m| &mut m.root_sharpness),
+            knob("Root taper", (0.1, 8.0), "How quickly the buttress dies away with height.", |m| &mut m.root_taper),
+            knob("Root split", (0.0, 6.0), "How much the buttress lobes separate into arms near the ground. Zero is an unbroken skirt.", |m| &mut m.root_split),
+            knob("Root depth", (0.0, 3.0), "How far the roots carry on below the ground, in metres.", |m| &mut m.root_depth),
+            knob("Root grooves", (0.0, 1.0), "Depth of the finer grooves down each root.", |m| &mut m.root_grooves),
+        ],
+        counts: &[Count {
+            label: "Root count",
+            range: (0, 12),
+            help: "Buttress roots around the foot of the trunk.",
+            get: |m| &mut m.root_count,
+        }],
+    },
+    Group {
+        title: "Junctions",
+        knobs: &[
+            knob("Socket flare", (0.0, 2.0), "How much a branch widens where it meets its parent.", |m| &mut m.socket_flare),
+            knob("Socket power", (0.5, 8.0), "How tightly that flare gathers at the very foot of the branch.", |m| &mut m.socket_power),
+            knob("Socket bias", (0.0, 1.0), "Extra flare on the underside of a limb.", |m| &mut m.socket_bias),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Surface",
+        knobs: &[
+            log_knob("UV scale", (0.1, 10.0), "Bark texture repeats per metre.", |m| &mut m.uv_scale),
+            knob("Moss height", (0.0, 20.0), "How far up the tree moss reaches, in metres.", |m| &mut m.moss_height),
+            knob("Moss amount", (0.0, 1.0), "How much of the bark moss takes at its thickest.", |m| &mut m.moss_amount),
+            knob("Darken low", (0.0, 1.0), "How much darker the bark is at the foot than high in the crown.", |m| &mut m.bark_darken_low),
+            knob("Tint red", (0.0, 2.0), "Colour multiplier over the bark texture.", |m| &mut m.bark_tint[0]),
+            knob("Tint green", (0.0, 2.0), "Colour multiplier over the bark texture.", |m| &mut m.bark_tint[1]),
+            knob("Tint blue", (0.0, 2.0), "Colour multiplier over the bark texture.", |m| &mut m.bark_tint[2]),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Young wood",
+        knobs: &[
+            knob("Tint red", (0.0, 1.5), "Colour multiplier over the bark of thin wood, on top of the bark tint.", |m| &mut m.twig_tint[0]),
+            knob("Tint green", (0.0, 1.5), "Colour multiplier over the bark of thin wood, on top of the bark tint.", |m| &mut m.twig_tint[1]),
+            knob("Tint blue", (0.0, 1.5), "Colour multiplier over the bark of thin wood, on top of the bark tint.", |m| &mut m.twig_tint[2]),
+            knob("Full at radius", (0.0, 0.2), "Stem radius in metres at and below which the young-wood tint is taken in full.", |m| &mut m.twig_tint_radius),
+            knob("Gone by radius", (0.0, 0.5), "Stem radius in metres by which the young-wood tint has faded out.", |m| &mut m.twig_tint_fade),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Dead wood",
+        knobs: &[
+            knob("Weathering", (0.0, 1.0), "How far dead wood has bleached toward the dead-wood colour. The grain is kept.", |m| &mut m.dead_wood_weathering),
+            knob("Colour red", (0.0, 1.5), "Colour dead wood weathers toward.", |m| &mut m.dead_wood_color[0]),
+            knob("Colour green", (0.0, 1.5), "Colour dead wood weathers toward.", |m| &mut m.dead_wood_color[1]),
+            knob("Colour blue", (0.0, 1.5), "Colour dead wood weathers toward.", |m| &mut m.dead_wood_color[2]),
+            log_knob("Min living bark", (0.0005, 0.1), "Living stems thinner than this get no bark, in metres. Foliage hides them.", |m| &mut m.min_bark_radius),
+            knob("Min dead bark", (0.0, 0.05), "Bare dead stems — the dead band, reaching the trunk through dead wood only — thinner than this get no bark, in metres. Zero follows the living figure. Dead twigs inside the crown take the living one.", |m| &mut m.dead_bark_radius),
+        ],
+        counts: &[Count {
+            label: "Cull from level",
+            range: (0, 6),
+            help: "Shallowest level the bark cutoffs may cull. Stems above it are always swept, so a thin limb is never dropped and its foliage never left floating. Zero lets the cutoff reach any level.",
+            get: |m| &mut m.cull_from_level,
+        }],
+    },
+];
+
+pub static IRREGULARITY: &[Group<BarkIrregularity<Ranged>>] = &[
+    Group {
+        title: "Flutes & swelling",
+        knobs: &[
+            knob("Flute depth", (0.0, 0.6), "Depth of the flutes up the stem, as a share of its radius.", |b| &mut b.flute_depth),
+            knob("Flute waves", (0.0, 16.0), "Roughly how many flutes go round.", |b| &mut b.flute_waves),
+            knob("Flute twist", (0.0, 1.0), "How far the flutes wind round, in turns per metre.", |b| &mut b.flute_twist),
+            knob("Swell depth", (0.0, 0.5), "Slow swelling and waisting along the stem, as a share of radius.", |b| &mut b.swell_depth),
+            knob("Swell period", (0.1, 20.0), "Length of the longest swelling, in metres.", |b| &mut b.swell_period),
+        ],
+        counts: &[],
+    },
+    Group {
+        title: "Burls, knots & ridges",
+        knobs: &[
+            knob("Burl density", (0.0, 5.0), "Burls per metre of stem thick enough to carry them.", |b| &mut b.burl_density),
+            knob("Burl depth", (0.0, 2.0), "How far a burl stands out, as a share of radius.", |b| &mut b.burl_depth),
+            knob("Burl size", (0.02, 3.0), "Width of a burl in metres.", |b| &mut b.burl_size),
+            knob("Knot density", (0.0, 5.0), "Healed-over branch scars per metre.", |b| &mut b.knot_density),
+            knob("Knot depth", (0.0, 1.0), "How deep a knot's dimple runs, as a share of radius.", |b| &mut b.knot_depth),
+            knob("Knot size", (0.02, 3.0), "Width of a knot in metres.", |b| &mut b.knot_size),
+            knob("Bark ridge", (0.0, 1.0), "Height of the raised seam running up the parent from each crotch.", |b| &mut b.bark_ridge),
+            knob("Collar depth", (0.0, 2.0), "Swelling where a branch leaves, as a share of its radius.", |b| &mut b.collar_depth),
+        ],
+        counts: &[],
+    },
+];
+
+// ---------------------------------------------------------------------------------
+// Wind
+
+/// How the species gives to the wind. None of these regrow the tree: they are read by
+/// the shaders every frame, so the panel must not mark the tree dirty for them.
+pub static WIND: Group<WindParams<Ranged>> = Group {
+    title: "How this species gives",
+    knobs: &[
+        knob("Trunk flex", (0.0, 0.3), "How far the trunk bends in a full gale, in radians. The whole tree leans and sways on it.", |w| &mut w.flexibility[0]),
+        knob("Limb flex", (0.0, 1.0), "How far the limbs off the trunk bend in a full gale, in radians, about where they leave it.", |w| &mut w.flexibility[1]),
+        knob("Branch flex", (0.0, 1.5), "How far the branches off the limbs bend in a full gale, in radians.", |w| &mut w.flexibility[2]),
+        knob("Twig flex", (0.0, 2.0), "How far everything finer bends in a full gale, in radians. Twigs are whippy, so this is the largest.", |w| &mut w.flexibility[3]),
+        knob("Leaf flutter", (0.0, 2.0), "How far a leaf card flutters about where it hangs, in radians in a full gale. Low for needle tufts, high for a broad leaf on a long stalk.", |w| &mut w.flutter),
+        log_knob("Sway frequency", (0.05, 3.0), "How fast the trunk sways, in hertz; each finer order swings faster than the one carrying it. Tall conifers are slow, a birch quick.", |w| &mut w.frequency),
+    ],
+    counts: &[],
+};
+
+/// The growth parameters of stem level `level`, 0 being the trunk.
+pub fn stem_mut<V>(params: &mut SpeciesParams<V>, level: usize) -> Option<&mut StemParams<V>> {
+    if level == 0 {
+        Some(&mut params.trunk)
+    } else {
+        params.branch_levels.get_mut(level - 1)
+    }
+}
+
+/// The parameters that spawn stem level `level` off the one above it. The trunk is
+/// not spawned by anything.
+pub fn spawn_mut<V>(params: &mut SpeciesParams<V>, level: usize) -> Option<&mut ChildParams<V>> {
+    if level == 0 {
+        None
+    } else {
+        stem_mut(params, level - 1).map(|s| &mut s.children)
+    }
+}
+
+/// Stem levels the panel offers: the trunk and every branch level the species declares.
+pub fn level_count<V>(params: &SpeciesParams<V>) -> usize {
+    params.branch_levels.len() + 1
+}

@@ -1,0 +1,14 @@
+[package]
+name = "arbor-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# A C API over arbor-core for engines that grow and draw the plants themselves.
+# `tools/hyperion-drop.sh` builds the static library for Hyperion's ArborToolkit.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+arbor-core = { path = "../arbor-core" }
+ron.workspace = true

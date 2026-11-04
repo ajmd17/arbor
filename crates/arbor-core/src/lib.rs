@@ -1,10 +1,12 @@
 pub mod blades;
 pub mod cluster;
+pub mod controls;
 pub mod cover;
 pub mod envelope;
 pub mod ferns;
 pub mod flowers;
 pub mod gltf;
+pub mod knobs;
 pub mod growth;
 pub mod leaf_art;
 pub mod leaves;

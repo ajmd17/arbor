@@ -1,0 +1,65 @@
+# Builds the web viewer with crates/arbor-viewer/web/build.sh and publishes docs/ to
+# GitHub Pages, which serves it at https://ajmd.dev/arbor/ (ajmd17.github.io carries the
+# ajmd.dev domain, so project sites land under it by repository name).
+#
+# Needs Settings -> Pages -> Source set to "GitHub Actions".
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push replaces a queued one but never cancels a live one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Cargo.lock is gitignored, so the wasm-bindgen crate resolves fresh here. The CLI
+      # has to be exactly that version or the generated glue will not load.
+      - name: Find wasm-bindgen version
+        id: wb
+        run: |
+          cargo generate-lockfile
+          version=$(cargo metadata --format-version 1 \
+            | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+
+      - run: bash crates/arbor-viewer/web/build.sh
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
