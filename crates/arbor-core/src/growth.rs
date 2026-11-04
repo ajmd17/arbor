@@ -417,6 +417,7 @@ fn shade_keep_share(children: &crate::species::ChildParams, t: f32) -> f32 {
     keep + (1.0 - keep) * rise
 }
 
+
 /// The share of children leaving a parent at `t` along it (0 at its base, 1 at its tip)
 /// that its crown has shaded out, from the parent's `shade_line` and `shade_blend`.
 fn shaded_share(children: &crate::species::ChildParams, t: f32) -> f32 {
@@ -497,7 +498,13 @@ pub(crate) fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> O
                     if let Some(keep) = keep.as_mut() {
                         let s = stem as usize;
                         if s < keep.len() {
-                            keep[s] = grown[s] * shade_keep_share(&parent_sp.children, along);
+                            // A negative length is a limb that has dropped off whole.
+                            let shed = parent_sp.children.shed.clamp(0.0, 1.0);
+                            keep[s] = if hash_unit(params.seed ^ 0x5BED_F411, path) < shed {
+                                -1.0
+                            } else {
+                                grown[s] * shade_keep_share(&parent_sp.children, along)
+                            };
                         }
                     }
                     continue;
@@ -531,6 +538,9 @@ pub(crate) fn mark_dieback(params: &SpeciesParams, skeleton: &mut Skeleton) -> O
     }
     keep
 }
+
+/// Share of its starting radius a dead stem keeps before its end has broken away.
+const DEAD_END_TAPER: f32 = 0.35;
 
 /// Snaps the thin, exposed ends off the wood the tree has lost.
 ///
@@ -570,12 +580,28 @@ pub(crate) fn break_dead_wood(params: &SpeciesParams, skeleton: &mut Skeleton, k
         if !dead {
             continue;
         }
+        // Dropped off whole, its first node with it: all that is left is the knot.
+        if let Some(keep) = keep
+            && !same_stem
+            && keep.get(stem as usize).is_some_and(|&k| k < 0.0)
+        {
+            skeleton.nodes[i].broken = true;
+            continue;
+        }
         // Cut back to what it had when it died. Like the snap below, never the node
         // the stem starts on: the stub stays.
         if let (Some(keep), Some(arc)) = (keep, arc.as_ref())
             && same_stem
             && arc[i] > keep.get(stem as usize).copied().unwrap_or(f32::INFINITY)
         {
+            skeleton.nodes[i].broken = true;
+            continue;
+        }
+        // Dead wood loses its thin end before anything else: where a dead stem has
+        // tapered to a fraction of what it started at, the rest has broken off. Without
+        // it the limbs too short for the cut-back above kept the fine point they grew,
+        // and a dead band read as a fan of needles stuck in the bole.
+        if same_stem && radius < DEAD_END_TAPER * stem_base[i] {
             skeleton.nodes[i].broken = true;
             continue;
         }
@@ -715,6 +741,14 @@ fn grow_stem(
     let seg_len = stem_len / seg_count as f32;
     let mut pos = base_pos;
     let mut cur_dir = norm_or_up(dir);
+    // The swoop: down at the start, and an even turn back up each segment after.
+    let swoop = sp.swoop_deg.to_radians();
+    let swoop_step = 2.0 * swoop.abs() / seg_count as f32;
+    if swoop > 0.0 {
+        cur_dir = turn_toward(cur_dir, -Vec3::Y, swoop);
+    } else if swoop < 0.0 {
+        cur_dir = turn_toward(cur_dir, Vec3::Y, -swoop);
+    }
     // Carried along the stem so child azimuths stay fixed relative to the stem
     // itself rather than to the world axes.
     let mut frame = ortho_of(cur_dir);
@@ -764,6 +798,11 @@ fn grow_stem(
             shaped_by_envelope,
             &mut turn_budget,
         );
+        let next_dir = match swoop {
+            s if s > 0.0 => turn_toward(next_dir, Vec3::Y, swoop_step),
+            s if s < 0.0 => turn_toward(next_dir, -Vec3::Y, swoop_step),
+            _ => next_dir,
+        };
         frame = transport(cur_dir, next_dir, frame);
         bend = transport(cur_dir, next_dir, bend);
         cur_dir = next_dir;
@@ -789,7 +828,14 @@ fn grow_stem(
             // Pruned before it grew at all means this stem was born outside the
             // crown. On the bare lower trunk of a conifer those are the dead stubs,
             // so leave one behind rather than nothing.
-            if seg == 0 && sp.dead_stub_length > 0.0 {
+            // Those are the oldest limbs the tree has, so the most of them have since
+            // dropped off whole (the parent's `shed`), leaving the knot and no stub.
+            let shed = level
+                .checked_sub(1)
+                .and_then(|l| stem_params(ctx.params, l))
+                .map_or(0.0, |parent| parent.children.shed.clamp(0.0, 1.0));
+            let dropped = hash_unit(ctx.params.seed ^ 0x5BED_F411, path) < shed;
+            if seg == 0 && sp.dead_stub_length > 0.0 && !dropped {
                 let stub = base_pos + cur_dir * sp.dead_stub_length;
                 let node =
                     skeleton.push_node(Some(cur), stub, level, child_path(path, 0), v, 1.0, stem);
@@ -813,6 +859,13 @@ fn grow_stem(
         }
 
         if can_spawn {
+            // A swooping stem tilts its spray with it, as a spruce limb's branchlets
+            // follow its sag and its lift: they are laid in the plane where they leave
+            // it rather than the one it set off in.
+            let spray_here = match (swoop != 0.0, spray != Vec3::ZERO) {
+                (true, true) => Some(plane_of(cur_dir)).filter(|p| *p != Vec3::ZERO).unwrap_or(spray),
+                _ => spray,
+            };
             spawn_children(
                 &mut rng,
                 cur,
@@ -828,7 +881,7 @@ fn grow_stem(
                 &mut azimuth,
                 &mut slot,
                 path,
-                spray,
+                spray_here,
                 &mut pending,
             );
         }
@@ -2551,7 +2604,10 @@ mod tests {
         );
         let sk = grow(&params);
 
-        // Each limb established its plane from the direction it left the trunk on.
+        // Each limb established its plane from the direction it left the trunk on, or,
+        // where it swoops, carries it tilted along with it (judged below where each
+        // branchlet leaves).
+        let swoops = params.branch_levels[0].swoop_deg != 0.0;
         let mut limb_plane: std::collections::HashMap<u32, Vec3> = std::collections::HashMap::new();
         for run in sk.stem_runs() {
             let first = &sk.nodes[run[0] as usize];
@@ -2580,6 +2636,13 @@ mod tests {
             let Some(&plane) = limb_plane.get(&sk.nodes[parent as usize].stem) else {
                 continue;
             };
+            let plane = match (swoops, sk.nodes[parent as usize].parent) {
+                (true, Some(back)) => plane_of(
+                    (sk.nodes[parent as usize].position - sk.nodes[back as usize].position)
+                        .normalize_or(Vec3::Y),
+                ),
+                _ => plane,
+            };
             if plane == Vec3::ZERO {
                 continue;
             }
@@ -2598,8 +2661,11 @@ mod tests {
     fn a_bare_lower_trunk_keeps_its_dead_stubs() {
         // Branches born below the crown are pruned the moment they appear. Leaving a
         // short stub behind is what puts the dead branch remnants on the bare lower
-        // trunk of a conifer instead of a clean pole.
-        let params = parse_species(PINE_RON).unwrap();
+        // trunk of a conifer instead of a clean pole. The preset sheds most of them
+        // again (`shed`), which is a choice about how old the tree is; the stubs are
+        // what is under test, so they are all kept here.
+        let mut params = parse_species(PINE_RON).unwrap();
+        params.trunk.children.shed = 0.0;
         let stub_len = params.branch_levels[0].dead_stub_length;
         assert!(stub_len > 0.0, "this preset should keep stubs");
         // The foot of the crown is the lowest any of its volumes reaches, since the

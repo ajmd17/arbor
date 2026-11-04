@@ -88,6 +88,12 @@ struct Startup {
     ao_radius: Option<f32>,
     background_blur: Option<f32>,
     ground: Option<Ground>,
+    /// A flat colour drawn behind the tree in place of the sky or photograph, which
+    /// still light it: a studio backdrop, or a key colour to cut the tree out against.
+    backdrop: Option<Vec3>,
+    /// The procedural sun and sky at their own strength but white, as a studio's light
+    /// is, so a capture's colour can be set against a white-balanced photograph.
+    neutral_sun: bool,
     msaa: Option<i32>,
     sun_size: Option<f32>,
     shadow_softness: Option<f32>,
@@ -167,6 +173,10 @@ const DEFAULT_WIND: f32 = 0.3;
 const DEFAULT_GUSTINESS: f32 = 0.5;
 const DEFAULT_WIND_DIRECTION: f32 = 150.0;
 
+/// The shortest time between frames: the viewer draws at about 15 a second, which keeps
+/// the wind moving without holding the GPU flat out. Capture runs are not held back.
+const FRAME_INTERVAL: web_time::Duration = web_time::Duration::from_millis(66);
+
 /// Elevation and azimuth of the sun at a given hour, on a day roughly like a temperate
 /// equinox: up a little after six, down a little before eight, and swinging through
 /// south at noon. Enough of an arc to light a tree by; not an ephemeris.
@@ -228,6 +238,11 @@ fn main() -> eframe::Result<()> {
         ao_radius: num("--ao-radius"),
         background_blur: num("--blur"),
         ground: flag("--ground").and_then(|g| Ground::parse(g)),
+        neutral_sun: args.iter().any(|a| a == "--neutral-sun"),
+        backdrop: flag("--backdrop").and_then(|c| {
+            let v: Vec<f32> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
+        }),
         msaa: flag("--msaa").and_then(|s| s.parse().ok()),
         sun_size: num("--sun-size"),
         shadow_softness: num("--softness"),
@@ -395,6 +410,8 @@ const LEVEL_COLORS: [[f32; 3]; 8] = [
 ];
 
 struct App {
+    /// When the last frame began, for holding the frame rate to `FRAME_INTERVAL`.
+    frame_began: web_time::Instant,
     gl: Arc<glow::Context>,
     lines: Arc<Mutex<GpuLines>>,
     mesh_gpu: Arc<Mutex<GpuMesh>>,
@@ -428,6 +445,9 @@ struct App {
     photo_sun: f32,
     background_blur: f32,
     ground: Ground,
+    /// Drawn behind the tree instead of the environment, when set.
+    backdrop_color: Option<Vec3>,
+    neutral_sun: bool,
     /// Metres above the ground the photograph is taken to have been shot from, and the
     /// radius of the dome it is laid onto.
     ground_height: f32,
@@ -450,7 +470,7 @@ struct App {
     loaded_bark: String,
     /// Texture name and cluster arrangement the leaf material was built from.
     /// Both go in the key, because changing either has to rebuild the atlas.
-    loaded_leaf: (String, Option<LeafClusterParams>),
+    loaded_leaf: (String, Option<LeafClusterParams>, [f32; 2]),
     presets: Vec<presets::Preset>,
     /// The preset the panel was last loaded from or saved to. None once that preset
     /// has been deleted: the tree stays on screen with nothing behind it until saved.
@@ -582,6 +602,7 @@ impl App {
         let bark_material = unsafe { gpu::placeholder_material(&gl) };
 
         let mut app = Self {
+            frame_began: web_time::Instant::now(),
             gl: Arc::clone(&gl),
             lines: Arc::new(Mutex::new(lines)),
             mesh_gpu: Arc::new(Mutex::new(mesh_gpu)),
@@ -608,6 +629,8 @@ impl App {
             photo_sun: 1.0,
             background_blur: 0.0,
             ground: Ground::Photo,
+            backdrop_color: None,
+            neutral_sun: false,
             ground_height: hdri::staging(hdri::BUNDLED[0]).shot_from,
             ground_radius: hdri::staging(hdri::BUNDLED[0]).radius,
             sun_size: 0.53,
@@ -623,7 +646,7 @@ impl App {
             bark_material,
             leaf_material: None,
             loaded_bark: String::new(),
-            loaded_leaf: (String::new(), None),
+            loaded_leaf: (String::new(), None, [1.0, 1.0]),
             presets,
             preset: Some(preset_index),
             save_name,
@@ -805,6 +828,8 @@ impl App {
         if let Some(v) = startup.ground {
             app.ground = v;
         }
+        app.backdrop_color = startup.backdrop;
+        app.neutral_sun = startup.neutral_sun;
         if let Some(v) = startup.view {
             app.render_mode = v;
         }
@@ -860,13 +885,14 @@ impl App {
         }
         let leaves = &self.grown.leaves;
         let loaded = &self.loaded_leaf;
-        if (&leaves.texture, &leaves.cluster) != (&loaded.0, &loaded.1)
+        let colour = [leaves.saturation, leaves.transmission];
+        if (&leaves.texture, &leaves.cluster, colour) != (&loaded.0, &loaded.1, loaded.2)
             && self.maps.ready(&textures::leaf_map_files(&leaves.texture))
         {
             if let Some(old) = self.leaf_material.take() {
                 old.delete(&self.gl);
             }
-            self.loaded_leaf = (leaves.texture.clone(), leaves.cluster.clone());
+            self.loaded_leaf = (leaves.texture.clone(), leaves.cluster.clone(), colour);
             self.leaf_material =
                 unsafe { gpu::load_leaf_material(&self.gl, &self.maps, &self.grown.leaves) };
         }
@@ -885,6 +911,13 @@ impl App {
     /// The procedural sky for where the sun is now.
     fn procedural_sky(&self) -> SkyParams {
         let mut sky = SkyParams::for_sun(self.sun_dir());
+        if self.neutral_sun {
+            let grey = |c: Vec3| Vec3::splat(c.dot(Vec3::new(0.2126, 0.7152, 0.0722)));
+            sky.sun_color = grey(sky.sun_color);
+            sky.zenith = grey(sky.zenith);
+            sky.horizon = grey(sky.horizon);
+            sky.ground_bounce = grey(sky.ground_bounce);
+        }
         sky.sun_color *= self.sun_intensity;
         sky
     }
@@ -2169,6 +2202,17 @@ fn push_skeleton(skeleton: &Skeleton, verts: &mut Vec<f32>) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Mouse and key events ask for frames of their own, so the cap is held here, on
+        // every frame, not only by when the next one is asked for. The web has no sleep;
+        // there the browser paces frames and `request_repaint_after` below does the rest.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.capture.is_none() {
+            if let Some(rest) = FRAME_INTERVAL.checked_sub(self.frame_began.elapsed()) {
+                std::thread::sleep(rest);
+            }
+        }
+        self.frame_began = web_time::Instant::now();
+
         // A capture run draws a few frames, asks egui for the finished image, writes
         // it and quits. What lands on disk is the real renderer, not a stand-in.
         if let Some(capture) = self.capture.clone() {
@@ -2254,6 +2298,7 @@ impl eframe::App for App {
                 let leaf_depth_pass = Arc::clone(&self.leaf_depth_pass);
                 let color_pass = Arc::clone(&self.color_pass);
                 let backdrop = Arc::clone(&self.backdrop);
+                let backdrop_color = self.backdrop_color;
                 let ground_pass = Arc::clone(&self.ground_pass);
                 let renderer = Arc::clone(&self.renderer);
                 // Sun, ambient and exposure all come out of the environment, so moving
@@ -2476,7 +2521,10 @@ impl eframe::App for App {
                             renderer.begin_scene(gl);
                             renderer.bind_lighting(gl, shadow.depth, post.ao);
                             if mode == 0 || mode == 3 {
-                                if mode == 0 {
+                                if let (0, Some(c)) = (mode, backdrop_color) {
+                                    gl.clear_color(c.x, c.y, c.z, 1.0);
+                                    gl.clear(glow::COLOR_BUFFER_BIT);
+                                } else if mode == 0 {
                                     backdrop.draw(gl, view_proj, &lighting);
                                 } else {
                                     gl.clear_color(1.0, 1.0, 1.0, 1.0);
@@ -2573,7 +2621,11 @@ impl eframe::App for App {
                 });
             });
 
-        ctx.request_repaint();
+        if self.capture.is_some() {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(FRAME_INTERVAL);
+        }
     }
 }
 

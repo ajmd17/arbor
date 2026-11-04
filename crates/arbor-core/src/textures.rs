@@ -81,10 +81,15 @@ pub fn load_bark_maps<S: MapSource + ?Sized>(source: &S, name: &str) -> Option<B
 /// The maps a species' leaf cards are drawn with: the art as it is on disk, or, when
 /// the species clusters, the atlas grown from it.
 pub fn load_leaf_maps<S: MapSource + ?Sized>(source: &S, lp: &LeafParams) -> Option<BakedMaps> {
-    let albedo = load_bitmap(source, &lp.texture, "albedo")?;
+    let mut albedo = load_bitmap(source, &lp.texture, "albedo")?;
     let normal = load_bitmap(source, &lp.texture, "normal");
     let roughness = load_bitmap(source, &lp.texture, "roughness");
-    let translucency = load_bitmap(source, &lp.texture, TRANSLUCENCY);
+    let mut translucency = load_bitmap(source, &lp.texture, TRANSLUCENCY);
+    saturate(&mut albedo, lp.saturation);
+    if let Some(t) = translucency.as_mut() {
+        saturate(t, lp.saturation);
+        scale_colour(t, lp.transmission);
+    }
     Some(match &lp.cluster {
         Some(cluster) => bake_cluster(
             cluster,
@@ -104,6 +109,60 @@ pub fn load_leaf_maps<S: MapSource + ?Sized>(source: &S, lp: &LeafParams) -> Opt
             translucency,
         },
     })
+}
+
+/// Scales each colour channel of an sRGB map by its own factor, leaving its alpha. The
+/// factor is on the light, as a shader multiplying the sampled colour applies it, so
+/// it is taken out of sRGB, scaled and put back.
+pub fn scale_channels(map: &mut Bitmap, k: [f32; 3]) {
+    if k.iter().all(|&v| (v - 1.0).abs() < 1e-4) {
+        return;
+    }
+    // One table per channel: the maps are millions of pixels and only 256 values.
+    let tables = k.map(|f| {
+        let mut t = [0u8; 256];
+        for (i, out) in t.iter_mut().enumerate() {
+            *out = linear_to_srgb8(srgb8_to_linear(i as u8) * f);
+        }
+        t
+    });
+    for px in map.pixels.chunks_exact_mut(4) {
+        for (c, t) in px[..3].iter_mut().zip(&tables) {
+            *c = t[*c as usize];
+        }
+    }
+}
+
+/// Scales a map's colour, leaving its alpha, by a factor on the light; see
+/// `scale_channels`.
+pub fn scale_colour(map: &mut Bitmap, k: f32) {
+    scale_channels(map, [k; 3]);
+}
+
+fn srgb8_to_linear(v: u8) -> f32 {
+    let c = f32::from(v) / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+fn linear_to_srgb8(l: f32) -> u8 {
+    let l = l.clamp(0.0, 1.0);
+    let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+    (c * 255.0).round() as u8
+}
+
+/// Pulls a map's colour toward its own grey by `amount` kept, 1 leaving it as it is.
+/// Done on the stored values, as the art was authored.
+pub fn saturate(map: &mut Bitmap, amount: f32) {
+    if (amount - 1.0).abs() < 1e-4 {
+        return;
+    }
+    for px in map.pixels.chunks_exact_mut(4) {
+        let [r, g, b] = [px[0], px[1], px[2]].map(f32::from);
+        let grey = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        for (c, v) in px[..3].iter_mut().zip([r, g, b]) {
+            *c = (grey + (v - grey) * amount).round().clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 /// How far, in rg chromaticity, a pixel can stray from the atlas's leaf colour and still

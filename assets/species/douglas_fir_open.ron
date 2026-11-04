@@ -346,7 +346,13 @@
         // The card went from 0.9 long to 1.2, so holding the old 4.46 would put the
         // overlap at 5.4 and dissolve exactly the spray outlines the long card exists to
         // draw. 3.45 puts it back at 4.1.
-        density: 3.7,
+        // Cut from 3.7 for the same reason as the douglas fir's: the spruce it is
+        // measured against was opened up to match a photograph.
+        // Lowered from 1.6 when leaves began to be laid back from the tip of a twig,
+        // which puts the first of them at the very end of every shoot: the same
+        // count of cards as before, and a little under, since the spruce it is held
+        // to half the needle of took lacier sprays at the same time.
+        density: 1.41,
         spacing_variance: 0.85,
         // The shell of foliage over bare branchwork, and at 1.8 it was not one. This
         // is measured back from a twig's tip along the length it actually grew, and

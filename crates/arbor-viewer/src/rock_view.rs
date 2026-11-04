@@ -177,6 +177,7 @@ impl RockScene {
             tangents: lod.tangents.clone(),
             uvs: lod.uvs.clone(),
             weathering: vec![0.0; n],
+            stem_radius: vec![0.0; n],
             sway: vec![Default::default(); n],
             sway_at: vec![Default::default(); n],
             indices: lod.indices.clone(),
@@ -234,14 +235,9 @@ impl RockScene {
     /// its occlusion among it.
     pub fn look() -> BarkLook {
         BarkLook {
-            moss_color: glam::Vec3::ZERO,
-            moss_height: 0.0,
-            moss_amount: 0.0,
-            darken_low: 0.0,
-            tint: glam::Vec3::ONE,
             dead_color: glam::Vec3::ZERO,
-            dead_weathering: 0.0,
             baked_occlusion: 1.0,
+            ..BarkLook::plain()
         }
     }
 }

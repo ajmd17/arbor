@@ -14,12 +14,16 @@
     trunk: (
         length: 28.0,
         length_variance: 0.06,
-        radius: 0.42,
+        // The studio reference's bole is a sixtieth of its height across; at 0.42 and
+        // the usual exponent, with the limbs' wood summed in, this one was twice that.
+        radius: 0.3,
         radius_ratio: 0.6,
         taper: 0.08,
-        da_vinci_exponent: 2.4,
-        // A whorl on every segment, so this is the spacing of the tiers.
-        segment_length: 1.1,
+        da_vinci_exponent: 2.7,
+        // A whorl every other segment (see `pattern`), so twice this is the spacing of
+        // the tiers. Closer than the 1.1 it was: the studio reference's tiers stack nearer, and at the wider
+        // spacing the cone read as a ladder.
+        segment_length: 0.9,
         curvature: 0.004,
         phototropism: 0.03,
         gravity: 0.003,
@@ -40,7 +44,7 @@
             pattern: Whorl(every: 2, count: 7),
             start_fraction: 0.12,
             end_fraction: 0.99,
-            crotch_angle_deg: 110.0,
+            crotch_angle_deg: 100.0,
             crotch_angle_tip_deg: 50.0,
             crotch_variance_deg: 10.0,
             roll_variance_deg: 30.0,
@@ -48,7 +52,7 @@
             scale: 0.5,
             scale_variance: 0.5,
             dominance: 0.5,
-            acrotony: -0.2,
+            acrotony: -0.22,
             planarity: 0.4,
             count_variance: 2,
             // The crown has climbed past the lower half of the bole, and what it left
@@ -59,33 +63,44 @@
             // band at all. `pine_carries_its_dead_limbs_under_a_living_crown` holds it.
             shade_line: 0.58,
             shade_blend: 0.08,
-            // Once dead, a limb settles about its base; most a little, a few nearly
-            // to the trunk. Without it the dead band radiated as tidily as the crown.
-            dead_sag_deg: 35.0,
+            // Once dead, a limb settles about its base, a little. Without it the dead
+            // band radiated as tidily as the crown; at 35 degrees the long ones hung
+            // down the bole in strings, and the reference's dead limbs mostly stand
+            // out level or a touch above.
+            dead_sag_deg: 8.0,
             // The dead limbs stopped growing when they died and have lost their ends
             // since, so the oldest, lowest ones keep only this much of their length,
             // rising to all of it for the ones that have only just died under the
             // crown. It is what tapers the dead band in toward the ground.
-            shade_keep: 0.4,
+            // A forest pine keeps few of its dead: the reference carries a handful of
+            // stubs, not a thicket, and the lowest are pegs.
+            shade_keep: 0.1,
+            // And half have dropped off whole: the reference's bole carries one dead
+            // limb here and another there, where keeping them all stood a whorl of
+            // pegs at every node.
+            shed: 0.5,
         ),
     ),
     branch_levels: [
         (
-            // The limbs. Long, and sinuous rather than straight: a pine limb is laid
-            // down a season at a time and each season's shoot sets off at its own
-            // angle, which is what the zigzag and the curvature stand for.
-            length: 8.0,
+            // The limbs. Sinuous rather than straight: a pine limb is laid down a
+            // season at a time and each season's shoot sets off at its own angle, which
+            // is what the zigzag and the curvature stand for. Held near level, though:
+            // the studio reference carries each whorl as one flat tier, and the longer,
+            // hanging, wandering limbs this had blurred the tiers into a single mass
+            // with foliage trailing below the crown.
+            length: 6.0,
             length_variance: 0.4,
             radius: 0.11,
             radius_ratio: 0.45,
             taper: 0.12,
             da_vinci_exponent: 2.3,
             segment_length: 0.4,
-            curvature: 0.12,
+            curvature: 0.05,
             phototropism: 0.03,
             gravity: 0.03,
-            droop: 1.2,
-            zigzag_deg: 7.0,
+            droop: 0.4,
+            zigzag_deg: 4.0,
             vigor_falloff: 0.5,
             dieback: 0.02,
             snap_radius: 0.02,
@@ -130,7 +145,9 @@
             dieback: 0.04,
             snap_radius: 0.008,
             curvature: 0.05,
-            phototropism: 0.09,
+            // Little lift and held flat to the limb's plane, so a limb's branchlets
+            // lie as a pad rather than standing up off it in brushes.
+            phototropism: 0.03,
             gravity: 0.02,
             vigor_falloff: 0.6,
             split_probability: 0.04,
@@ -149,7 +166,7 @@
                 scale_variance: 0.4,
                 dominance: 0.35,
                 acrotony: 0.3,
-                planarity: 0.85,
+                planarity: 0.95,
                 count_variance: 0,
                 shade_line: 0.15,
                 shade_blend: 0.2,
@@ -229,7 +246,10 @@
         // about 12k triangles; see `card_length`. Raised with `leafy_length` cut, so the
         // same needle sits on the last stretch of each shoot: that is what makes each
         // limb's branchlets read as one flat pad rather than a fuzz along the limb.
-        density: 1.8,
+        // Lowered from 6.0 when leaves began to be laid back from the tip of a twig,
+        // which puts the first of them at the very end of every shoot: the same
+        // count of cards as before, so the crown is as full as it was tuned.
+        density: 5.592,
         spacing_variance: 0.8,
         // Pine carries its needles on the last few seasons of each shoot, so the
         // foliage is a brush over the end of every twig with bare wood behind it.
@@ -262,15 +282,18 @@
         // barely at all from a whole-tree distance. Three-card stars at 0.65 m fixed
         // most of that for 28k triangles, and were judged not worth it. At 1.05 m and
         // twenty shoots (about 6.6k in all) the tufts read as leafy clumps even from a
-        // whole-tree distance, which is where this stops.
-        card_length: 0.9,
-        card_width: 0.9,
+        // whole-tree distance, which is where this stopped. Against Quixel's Megaplants
+        // Baltic pine in a white studio (`tools/refmatch.py`) those clumps were still
+        // half again the reference's grain, and 0.66 m at more to the metre matches it,
+        // filling the cone below, for 8.2k triangles of needles.
+        card_length: 0.66,
+        card_width: 0.66,
         size_variance: 0.3,
         crotch_angle_deg: 10.0,
         crotch_variance_deg: 8.0,
         phyllotaxis_deg: 137.5,
         droop_deg: -15.0,
-        twist_deg: 90.0,
+        twist_deg: 30.0,
         // Rolled evenly, so the two cards of a tuft are always a cross. At random they
         // line up often enough that a tuft of two goes thin from one side.
         even_roll: 1.0,
@@ -278,17 +301,26 @@
         // should light as one mass with a sunny side and a shaded side.
         normal_blend: 0.8,
         curvature: 0.3,
-        tint: (0.78, 0.88, 1.0),
-        hue_variance: 0.08,
+        // Fitted to the reference's colour under a white light (`tools/fitcolour.py`),
+        // with the cards varied both ways, yellow to blue and green to olive, as the
+        // photograph's crown is: one green throughout read as plastic. A tuft passes
+        // an eighth of what the scan's map says; at the full amount the crown glowed
+        // pale with the sun behind it.
+        tint: (1.241, 1.241, 1.053),
+        saturation: 0.594,
+        transmission: 0.13,
+        hue_variance: 0.5,
+        green_variance: 0.6,
         interior_shade: 0.45,
         // Soft. Sharpening kept the single airy shoots resolving as strands, but a
         // bundle's interior is dense enough to close up a few mips down, and a sharp
         // cutoff there draws each card as one jagged leaf; left soft it frays into
         // needles at the edges instead.
         edge_sharpness: 0.0,
-        // A tuft of needles is a volume with no front or back, so a card seen from
-        // behind keeps the crown's outward shading rather than going dark.
-        backface_volume: 1.0,
+        // Off. A tuft is a volume with no front or back, but lit as one the undersides
+        // of the upper tufts, which the camera looks up at, came out a pale band over
+        // the top of the crown that the reference does not have.
+        backface_volume: 0.0,
         // Light comes through a needle crown in a thousand gaps; the shaded side of it
         // is darker blue-green, not black.
         self_shadow: 0.55,
@@ -373,22 +405,24 @@
         root_count: 3,
         tip_length: 0.06,
         socket_flare: 0.35,
-        // The pale grey, finely scaled bark of an old pine's lower bole — the white
-        // spruce set from the FreePBR pack, warmed a little. The red-brown pine bark
-        // the preset used before is the young bark of the upper crown.
+        // The finely scaled bark of the white spruce set from the FreePBR pack, tinted
+        // to the red-brown a Scots pine's bole is from a distance in the studio
+        // reference, and darkened at the foot where the old bark goes grey-brown.
         bark_texture: "bark_spruce",
-        bark_tint: (1.0, 0.95, 0.86),
-        // Dead wood bleaches silver-grey. Dark enough that the band still reads as
-        // wood in full sun: at twice this it went white and looked like frost.
+        bark_tint: (1.05, 0.62, 0.44),
+        bark_darken_low: 0.65,
+        // Dead wood bleaches toward silver-grey, but on these the bark has mostly
+        // held: the reference's dead limbs are the bole's own orange-brown, a little
+        // greyer. Carried most of the way to the grey they read as bleached dowels.
         dead_wood_color: (0.26, 0.255, 0.24),
-        dead_wood_weathering: 0.85,
+        dead_wood_weathering: 0.3,
         // The living twigs are culled at `min_bark_radius` because needles hide them;
-        // the dead band carries nothing, and its fine twigs are most of what it is, so
-        // they are meshed far finer — down to 12 mm. The finest of them, under that, are
-        // dropped for the triangle budget and only show at close range. Dead twigs
-        // inside the living crown are hidden like the living ones and are culled with
-        // them.
-        dead_bark_radius: 0.012,
+        // the dead band carries nothing, so it is meshed finer, down to 15 mm: enough
+        // for the forked remnant of a twig or two on each. At 12 mm, with every dead
+        // limb kept, they made a fan of grey twiglets that read from any distance as
+        // wire hanging off the bole. Dead twigs inside the living crown are hidden like the living ones
+        // and are culled with them.
+        dead_bark_radius: 0.015,
         irregularity: (
             flute_depth: 0.06,
             flute_waves: 5.0,
@@ -435,7 +469,11 @@
         // shortest. `pine_carries_its_dead_limbs_under_a_living_crown` holds its reach
         // and how much twig it carries, both ways.
         volumes: [
-            Ellipsoid(center: (0.0, 23.0, 0.0), radii: (7.2, 8.0, 7.2)),
+            // The living crown: a cone, as the studio reference's is, widest at its
+            // foot and closing to a point over the leader, a third of the tree's height
+            // across. An ellipsoid here gave the round, top-heavy head of an open-grown
+            // pine.
+            Cone(base_y: 16.5, apex_y: 29.6, base_radius: 5.8, apex_radius: 0.2),
             Cone(base_y: 4.5, apex_y: 17.5, base_radius: 2.0, apex_radius: 3.6),
         ],
         falloff: 0.18,

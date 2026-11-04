@@ -112,7 +112,10 @@
         enabled: true,
         min_level: 1,
         max_twig_radius: 0.015,
-        density: 4.0,
+        // Lowered from 4.0 when leaves began to be laid back from the tip of a twig,
+        // which puts the first of them at the very end of every shoot: the same
+        // count of cards as before, so the crown is as full as it was tuned.
+        density: 3.761,
         spacing_variance: 0.72,
         leafy_length: 0.45,
         cluster_size: 2,

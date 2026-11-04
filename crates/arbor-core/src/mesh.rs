@@ -18,6 +18,9 @@ pub struct Mesh {
     /// Per vertex, 1 on wood the tree has lost and 0 on living wood, for the renderer
     /// to weather by `dead_wood_weathering`.
     pub weathering: Vec<f32>,
+    /// Per vertex, the radius of the stem where it sits, before any bark relief: what
+    /// young wood is told apart by, for `twig_tint`.
+    pub stem_radius: Vec<f32>,
     /// Per vertex, the wood it hangs off, for the renderer to sway in the wind.
     pub sway: Vec<Sway>,
     /// Per vertex, the same told by stem, for an engine that keeps a table of stems.
@@ -435,6 +438,9 @@ struct MeshSink {
     /// Written onto every vertex pushed until it is changed: the stem being swept is
     /// dead or it is not, and everything in it is the same.
     weathering: f32,
+    /// Written onto every vertex pushed until it is changed: the radius of the ring
+    /// being swept.
+    radius: f32,
     /// How the stem being swept hangs off the wood carrying it, read off at each
     /// vertex's distance along it.
     sway: StemSway,
@@ -450,6 +456,7 @@ impl MeshSink {
         self.mesh.tangents.push([t.x, t.y, t.z, 1.0]);
         self.mesh.uvs.push(uv);
         self.mesh.weathering.push(self.weathering);
+        self.mesh.stem_radius.push(self.radius);
         self.mesh.sway.push(self.sway.at(arc));
         self.mesh.sway_at.push(self.sway.place(arc));
     }
@@ -646,9 +653,11 @@ struct StemPath {
 
 impl StemPath {
     /// A branch that only ever got one segment: an anchor ring and a single node.
-    /// Most of a tree is these, so what they cost decides what the mesh costs.
+    /// Most of a tree is these, so what they cost decides what the mesh costs. Drawn
+    /// as one cone to a point, which a stem the tree has lost is not: a dead stub
+    /// broke off, and is swept as a short tube with a flat end like any dead stem.
     fn is_single_segment(&self) -> bool {
-        !self.is_trunk && self.points.len() == 2
+        !self.is_trunk && !self.is_dead && self.points.len() == 2
     }
 
     fn build(
@@ -1034,6 +1043,11 @@ fn gets_bark(sk: &Skeleton, first: usize, mp: &MeshParams) -> bool {
         .is_none_or(|cutoff| node.radius >= cutoff)
 }
 
+/// How far past its last ring a broken stem's splinter reaches, and how far it leans
+/// off the axis, both in multiples of the radius there.
+const DEAD_SPLINTER_REACH: f32 = 2.2;
+const DEAD_SPLINTER_LEAN: f32 = 0.6;
+
 /// One cone: the anchor ring of a stem drawn straight to its tip.
 fn emit_spike(
     sink: &mut MeshSink,
@@ -1047,6 +1061,7 @@ fn emit_spike(
     let arc = path.arc[1];
 
     let base = sink.vertex_offset();
+    sink.radius = path.radii[0];
     for j in 0..=radial {
         let a = j as f32 / radial as f32 * TAU;
         let e_r = n * a.cos() + b * a.sin();
@@ -1067,6 +1082,7 @@ fn emit_spike(
     let reach = mp.tip_length.max(path.radii[1] * 1.2);
     let tip = path.points[1] + path.dirs[1] * reach;
     let apex = sink.vertex_offset();
+    sink.radius = path.radii[1];
     sink.push_vertex(
         tip,
         path.dirs[1],
@@ -1348,6 +1364,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         let radial = sides[i];
         let d = path.dirs[i];
         let (n, b) = path.frames[i];
+        sink.radius = path.radii[i];
 
         // Neighbours used for the axial slope of the radius, so the normal follows
         // taper and flare instead of pointing straight out of the axis.
@@ -1391,6 +1408,7 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         // The rim is duplicated with the cap normal to keep the edge crisp.
         let cap_n = -path.dirs[0];
         let (n0, b0) = path.frames[0];
+        sink.radius = path.radii[0];
         let rim_sides = sides[0];
         let rim = sink.vertex_offset();
         for j in 0..=rim_sides {
@@ -1410,12 +1428,19 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
 
     // Every stem closes with a cone: from its last ring for the trunk, and from the
     // ring before it for everything else, which is what makes the tip a taper. A stem
-    // the tree has lost ends where it snapped instead, so it gets a flat break.
+    // the tree has lost ends where it snapped instead: a short splintered point off to
+    // one side, the way wood tears across the grain. A flat end reads as sawn, and a
+    // band of them as a bole studded with dowels.
     let end_dir = path.dirs[last];
     let r_end = path.radii[last];
-    let reach = if path.is_dead { 0.0 } else { mp.tip_length.max(r_end * 1.2) };
-    let tip = path.points[last] + end_dir * reach;
+    let (reach, lean) = if path.is_dead {
+        (r_end * DEAD_SPLINTER_REACH, path.frames[last].0 * (r_end * DEAD_SPLINTER_LEAN))
+    } else {
+        (mp.tip_length.max(r_end * 1.2), Vec3::ZERO)
+    };
+    let tip = path.points[last] + end_dir * reach + lean;
     let apex = sink.vertex_offset();
+    sink.radius = r_end;
     sink.push_vertex(
         tip,
         end_dir,
@@ -1495,7 +1520,10 @@ mod tests {
                 }
                 checked += 1;
             }
-            assert!(checked > 50, "{name}: only {checked} junctions");
+            // Enough to mean something. The pine has the fewest: its living twigs are
+            // culled inside the needles and most of its dead limbs have been shed, so
+            // it sweeps under two dozen branches off limbs.
+            assert!(checked > 12, "{name}: only {checked} junctions");
         }
     }
 
@@ -2220,7 +2248,9 @@ mod tests {
 
     #[test]
     fn indices_in_range_and_normals_unit() {
-        let params = parse_species(PINE_RON).unwrap();
+        // The oak rather than the pine: the pine's bark is cut so hard for the triangle
+        // budget that it is no longer a large mesh, and this wants one.
+        let params = parse_species(OAK_RON).unwrap();
         let sk = crate::grow(&params);
         let mesh = build_mesh(&sk, &params);
         let count = mesh.vertex_count() as u32;

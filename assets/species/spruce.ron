@@ -12,16 +12,19 @@
     trunk: (
         length: 27.0,
         length_variance: 0.1,
-        radius: 0.45,
+        radius: 0.3,
         radius_ratio: 0.6,
-        // The straightest timber tree here and the slowest to taper: nearly a metre
-        // through at the foot and still holding its girth well up the bole. That is
-        // what carries a crown to thirty metres without the spire going spindly.
+        // The straightest timber tree here and the slowest to taper, holding its girth
+        // well up the bole. That is what carries a crown to thirty metres without the
+        // spire going spindly. Against Quixel's Megaplants Norway spruce in a white
+        // studio (`tools/refmatch.py`) the bole was twice the reference's width for its
+        // height, most of it the limbs' wood summed into it, hence the thinner base
+        // and the higher exponent below.
         taper: 0.075,
-        da_vinci_exponent: 2.45,
+        da_vinci_exponent: 2.8,
         segment_length: 0.6,
-        curvature: 0.008,
-        phototropism: 0.042,
+        curvature: 0.003,
+        phototropism: 0.015,
         gravity: 0.003,
         zigzag_deg: 0.0,
         vigor_falloff: 0.22,
@@ -40,15 +43,16 @@
             // deep that the tiers above and below could not cover, and the silhouette
             // pinched in at the waist. A pine whorls in tidy cohorts; a spruce does not.
             pattern: Whorl(every: 1, count: 3),
-            start_fraction: 0.02,
+            start_fraction: 0.09,
             end_fraction: 0.995,
-            // Just past horizontal at the foot and steeply up at the leader. That
+            // Down past horizontal at the foot and steeply up at the leader. That
             // sweep down the trunk is what draws the outline in: the lowest limbs
             // leave level while the top ones are still climbing, so the crown narrows
             // to a spire rather than stopping flat. Any further past horizontal and a
             // limb spends its length going down instead of out, and the crown loses
-            // half a metre of width through its whole middle.
-            crotch_angle_deg: 92.0,
+            // half a metre of width through its whole middle. The lowest whorls start
+            // a little way up the bole: the reference stands on a short bare foot.
+            crotch_angle_deg: 95.0,
             crotch_angle_tip_deg: 38.0,
             crotch_variance_deg: 13.0,
             roll_variance_deg: 32.0,
@@ -56,10 +60,11 @@
             scale: 0.46,
             scale_variance: 0.52,
             dominance: 0.18,
-            // Strongly negative: the lowest whorls have had thirty seasons to extend
-            // and the top one has had a single season, and on a tree this tall that
-            // spread of ages is the whole silhouette.
-            acrotony: -0.22,
+            // Negative: the lowest whorls have had thirty seasons to extend and the top
+            // one has had a single season, and on a tree this tall that spread of ages
+            // is the whole silhouette. It was twice this, which left the top quarter of
+            // the crown at half the reference's fill.
+            acrotony: -0.1,
             planarity: 1.0,
             count_variance: 2,
         ),
@@ -69,11 +74,12 @@
             // The limbs. Long enough that the ones in the middle of the crown reach
             // the envelope rather than stopping short of it; the lowest overshoot it
             // and are cut back, which is the way round the envelope is meant to be
-            // used. They are also the one level here that does not hang. A spruce's droop
-            // is in its branchlets, and putting it in the limbs as well was what pinched
-            // the crown: a limb that sags spends its length dropping rather than
-            // reaching, and the whole lower half came out half a metre narrow.
-            length: 10.0,
+            // used. A spruce's droop is mostly in its branchlets, and putting it in the
+            // limbs as forces pinched the crown: a limb that sags spends its length
+            // dropping rather than reaching. The studio reference's limbs leave the
+            // trunk heading down, bottom out partway and turn their tips back up, and
+            // that is drawn as a shape instead (`swoop_deg`).
+            length: 8.0,
             length_variance: 0.3,
             radius: 0.085,
             radius_ratio: 0.5,
@@ -84,6 +90,7 @@
             phototropism: 0.017,
             gravity: 0.016,
             droop: 0.7,
+            swoop_deg: 30.0,
             zigzag_deg: 1.5,
             vigor_falloff: 0.42,
             dieback: 0.06,
@@ -133,7 +140,7 @@
             snap_radius: 0.04,
             curvature: 0.045,
             phototropism: 0.006,
-            gravity: 0.042,
+            gravity: 0.08,
             droop: 3.0,
             vigor_falloff: 0.55,
             split_probability: 0.05,
@@ -227,7 +234,12 @@
     envelope_scale: 1.0,
     leaves: (
         enabled: true,
-        min_level: 2,
+        // Needles on every shoot thin enough to carry them, leader and limbs as well
+        // as twigs, and along all of it (`leafy_length` 0): a spruce keeps its needles
+        // seven years or more, so a shoot is clothed back from its tip, not tufted at
+        // it. Held to the twigs, the top of the tree, whose limbs are too short to
+        // have twigs yet, stood as a bare leader hung with sticks.
+        min_level: 0,
         max_twig_radius: 0.05,
         // The needle art is a whole branchlet rather than a fascicle, and 29% of its own
         // cell is opaque against the pine needle's 16%. That is nearly twice the foliage
@@ -248,13 +260,29 @@
         // third less needle per cubic metre, most of it needle that sat behind other
         // needle — which `open_grown_douglas_fir_is_a_sparse_spire_that_still_hangs`
         // measures against, since the open fir is judged relative to this tree.
-        density: 1.6,
+        //
+        // The studio reference then wanted a finer grain than 0.84 m cards give: at
+        // that size the crown read as a cone of flat flakes three times coarser than
+        // the photograph's. Half-metre cards at 1.9 to the metre match its grain and
+        // the sky through it, for 7.6k triangles; held near the twig's plane (`twist`)
+        // they lie in the flat tiers a spruce is seen in from the ground. The scanned
+        // sprays the cards are now baked from are lacier than the ones before, a sixth
+        // of their cell rather than a fifth; with the shoots clothed their whole length
+        // 1.2 to the metre carries the same sky through the crown as the reference.
+        density: 1.2,
         spacing_variance: 0.72,
-        leafy_length: 0.8,
+        leafy_length: 0.0,
         cluster_size: 1,
         cluster_spread_deg: 28.0,
-        card_length: 0.84,
-        card_width: 0.84,
+        card_length: 0.6,
+        card_width: 0.6,
+        // The sprays sag in the middle and turn back up at the tip (`dip_deg`) rather
+        // than standing out flat, three quads to a card: longer, fewer cards than a
+        // flat spray takes, for 29k to 35k triangles of needle. That is what reads as
+        // a spruce close to; a distant LOD can go back to one quad.
+        arch_deg: 0.0,
+        dip_deg: 35.0,
+        card_segments: 3,
         size_variance: 0.35,
         crotch_angle_deg: 44.0,
         crotch_variance_deg: 18.0,
@@ -262,14 +290,32 @@
         // A spruce's needles come off the shoot all the way round and the spray hangs, so
         // the cards sit shallower to the twig and droop further than a pine's.
         droop_deg: 18.0,
-        twist_deg: 60.0,
+        twist_deg: 15.0,
         normal_blend: 0.65,
         curvature: 0.3,
-        // Cooler and darker than the pine. A spruce reads blue-green where a pine reads
-        // yellow-green, and the difference is visible across a whole hillside.
-        tint: (0.63, 0.80, 0.66),
-        hue_variance: 0.08,
-        interior_shade: 0.55,
+        // Cooler than the pine. A spruce reads blue-green where a pine reads yellow-
+        // green, and the difference is visible across a whole hillside. The scans are
+        // a grown crown's dark olive, so the tint lifts them to the reference's
+        // lightness under a white light and moves them off yellow (`tools/fitcolour.py`,
+        // then `tools/fitscore.py` over six seeds), and the cards vary both ways, old
+        // needle and new, as the photograph's crown does. The crown's inside is held
+        // dark (`interior_shade`) against the lift: a dark scan brightened evenly
+        // flattens the crown to a grey-green felt, a third less contrast than the
+        // photograph's, where the reference is bright at its tips and near black
+        // against the trunk. A shoot packed with needles passes
+        // a tenth of what the scan's map says; at the full amount a spruce seen
+        // against the light glows pale as frost. `backface_volume` is off: it lit the
+        // undersides of the upper sprays, which the camera looks up at, a pale band
+        // over the top half of the tree.
+        tint: (2.298, 2.298, 6.591),
+        saturation: 0.801,
+        transmission: 0.10,
+        hue_variance: 0.2,
+        green_variance: 0.15,
+        interior_shade: 0.7,
+        edge_sharpness: 0.6,
+        backface_volume: 0.0,
+        self_shadow: 0.35,
         cluster: Some((
             // Thirteen sprays to a card, curved hard. `leaf_length` holds a spray to
             // the size it would have had on its own, so this buys cards rather than
@@ -277,15 +323,16 @@
             // of standing up like a hand of cards. Past about twenty the bake stops
             // getting fuller, and the card starts to read as felt.
             //
-            // That was thirteen of the dense branchlet this was first built from. A
-            // scanned spruce spray is airier, flat side shoots with air between them,
-            // and it takes twenty-eight of them, each a little longer at 47 cm, to bake
-            // the cell to the two fifths thirteen of the other made. They do not go to
-            // felt as that did, because a real spray has a shape of its own to show
-            // through the overlap. The open fir's sparseness is asserted against this
-            // tree's needle, so the cell cannot be let go thinner than it was.
-            count: 28,
-            leaf_length: 0.56,
+            // That was thirteen of the dense branchlet this was first built from, then
+            // twenty-eight of a young, airy scanned spray. The grown sprays it uses now
+            // are whole side shoots, branchlets on branchlets, so twelve of them at
+            // 63 cm fill the cell to a third, and fewer layers over each other keep
+            // the needle grain the reference has instead of baking it to felt: the
+            // crown's grain went from 0.83 of the photograph's to 0.93. The open fir's
+            // sparseness is asserted against this tree's needle, so the cell cannot be
+            // let go much thinner than it is.
+            count: 12,
+            leaf_length: 0.75,
             base_angle_deg: 56.0,
             tip_angle_deg: 26.0,
             tip_scale: 0.88,
@@ -302,28 +349,28 @@
             shoot_base: 0.88,
             shoot_tip: 0.22,
             source_aspect: 0.667,
-            sources: 4,
+            sources: 6,
             cell_size: 1024,
         )),
-        // The bake's source: four Norway spruce sprays stacked down the sheet, Raw
-        // Catalog's Atlas-832-A to Atlas-835-A, each turned to stand on its cut end,
-        // with the map of the light each lets through. The scans are the yellow-green
-        // of new growth and are recoloured to the darker green of a grown crown,
-        // twigs left brown. To rebuild it:
+        // The bake's source: six Norway spruce sprays stacked down the sheet, cut from
+        // Raw Catalog's Atlas-666-A to Atlas-669-A, the darker green of a grown crown
+        // rather than new growth, so they are used as scanned. The sheets carry no map
+        // of the light through them, and a spruce needle passes little enough that the
+        // albedo stands in. Each is a spray that already stands on its cut end, but
+        // for the one turned over. To rebuild it:
         //
-        //   import_textures spruce_scan_sheet --size 2048 --rawcatalog
-        //       1640_green-spruce-branch,1641_green-spruce-branch,
-        //       1642_green-spruce-branch,1643_green-spruce-branch
-        //   repack_atlas spruce_scan_sheet needle_spruce --keep 4 --cell 512x768
-        //       --rot 90,90,90,90
-        //   recolor needle_spruce --band 44,140 --hue 34 --sat 0.8 --val 0.6
+        //   import_textures spruce_dark_sheet --size 2048 --rawcatalog
+        //       1156_spruce-branches,1157_spruce-branches,
+        //       1158_spruce-branches,1159_spruce-branches
+        //   repack_atlas spruce_dark_sheet needle_spruce_dark --keep 14
+        //       --pick 1,2,4,5,6,11 --rot 0,180,0,0,0,0 --cell 512x768
         //
         // after which the sheet can be deleted.
         atlas_cols: 1,
         atlas_rows: 1,
         atlas_front: 0,
         atlas_back: 0,
-        texture: "needle_spruce",
+        texture: "needle_spruce_dark",
     ),
     wind: (
         flutter: 0.4,
@@ -348,8 +395,13 @@
         root_count: 4,
         tip_length: 0.06,
         socket_flare: 0.35,
-        bark_texture: "bark_pine",
-        bark_darken_low: 0.3,
+        // The scaly grey spruce scan, nearly as it comes: the studio reference's bole is
+        // a cool mid-grey (L 32). The pine's art lifted toward it stayed half as light
+        // and brown, and a dark trunk that size pulled the whole tree's colour down so
+        // far that the needles were fitted pale to make it up.
+        bark_texture: "bark_spruce",
+        bark_tint: (0.95, 0.94, 0.86),
+        bark_darken_low: 0.1,
         irregularity: (
             flute_depth: 0.09,
             flute_waves: 7.0,
@@ -378,8 +430,7 @@
         volumes: [
             // Two cones, because one cannot do both jobs. The foliage fills whatever
             // envelope it is given, so this is the silhouette, and the reference has a
-            // body that widens dead straight from the tip down — half a metre of radius
-            // for every two and a half of drop — with a separate narrow spire over the
+            // body that widens dead straight from the tip down with a separate spire over the
             // top of it. A single cone through the body overshoots the spire by half
             // again; a single cone through the spire loses a third of the width at
             // mid-height. Carried nearly to the ground, so the lowest whorls live and
@@ -389,8 +440,8 @@
             // top whorls need that much crown around them to grow limbs long enough to
             // carry a twig; closed at the leader's own height, the spruce stood half a
             // metre to a metre and a half of bare leader over its needles.
-            Cone(base_y: 2.4, apex_y: 21.5, base_radius: 7.3, apex_radius: 2.75),
-            Cone(base_y: 20.0, apex_y: 27.6, base_radius: 3.2, apex_radius: 0.25),
+            Cone(base_y: 2.8, apex_y: 21.5, base_radius: 4.9, apex_radius: 3.1),
+            Cone(base_y: 19.5, apex_y: 27.8, base_radius: 2.9, apex_radius: 0.35),
         ],
         // Tighter than the default quarter. Drive fades from `1 - falloff` of the way
         // out, so at 0.25 a limb is already being starved from three quarters of the

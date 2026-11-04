@@ -1,0 +1,229 @@
+{
+ "_doc": "Studio references for tools/refmatch.py: one tree per entry, box = [x0, y0, x1, y1] in the source image, bottom edge at the foot of the trunk. Images live in out/refs/megaplants (Quixel Megaplants listings on Fab). Below shadow_y, only strongly dark pixels count, so the soft floor shadow is left out. Exclude boxes, in source pixels, are blanked out of the mask (labels, node wires).",
+ "birch": [
+  {
+   "file": "birch_2.jpg",
+   "box": [
+    330,
+    110,
+    720,
+    972
+   ],
+   "shadow_y": 930
+  },
+  {
+   "file": "birch_2.jpg",
+   "box": [
+    1195,
+    240,
+    1530,
+    972
+   ],
+   "shadow_y": 930,
+   "exclude": [
+    [
+     1225,
+     240,
+     1275,
+     345
+    ]
+   ]
+  },
+  {
+   "file": "birch_0.jpg",
+   "box": [
+    1330,
+    100,
+    1650,
+    975
+   ],
+   "shadow_y": 880
+  },
+  {
+   "file": "birch_3.jpg",
+   "box": [
+    300,
+    120,
+    600,
+    975
+   ],
+   "shadow_y": 880
+  }
+ ],
+ "oak": [
+  {
+   "file": "oak_0.jpg",
+   "box": [
+    950,
+    210,
+    1270,
+    975
+   ],
+   "shadow_y": 925
+  },
+  {
+   "file": "oak_0.jpg",
+   "box": [
+    1360,
+    85,
+    1620,
+    975
+   ],
+   "shadow_y": 925
+  },
+  {
+   "file": "oak_2.jpg",
+   "box": [
+    300,
+    80,
+    760,
+    975
+   ],
+   "shadow_y": 925,
+   "exclude": [
+    [
+     700,
+     150,
+     800,
+     340
+    ]
+   ]
+  },
+  {
+   "file": "oak_3.jpg",
+   "box": [
+    300,
+    70,
+    680,
+    975
+   ],
+   "shadow_y": 925
+  }
+ ],
+ "spruce": [
+  {
+   "file": "spruce_0.jpg",
+   "box": [
+    860,
+    240,
+    1170,
+    975
+   ],
+   "shadow_y": 925
+  },
+  {
+   "file": "spruce_0.jpg",
+   "box": [
+    1260,
+    60,
+    1600,
+    975
+   ],
+   "shadow_y": 925
+  },
+  {
+   "file": "spruce_2.jpg",
+   "box": [
+    460,
+    60,
+    790,
+    975
+   ],
+   "shadow_y": 925,
+   "exclude": [
+    [
+     700,
+     170,
+     800,
+     340
+    ]
+   ]
+  },
+  {
+   "file": "spruce_3.jpg",
+   "box": [
+    360,
+    70,
+    760,
+    975
+   ],
+   "shadow_y": 925,
+   "exclude": [
+    [
+     680,
+     170,
+     770,
+     320
+    ]
+   ]
+  }
+ ],
+ "pine": [
+  {
+   "file": "pine_0.jpg",
+   "box": [
+    900,
+    170,
+    1180,
+    975
+   ],
+   "shadow_y": 930
+  },
+  {
+   "file": "pine_0.jpg",
+   "box": [
+    1260,
+    215,
+    1570,
+    975
+   ],
+   "shadow_y": 930
+  },
+  {
+   "file": "pine_0.jpg",
+   "box": [
+    580,
+    260,
+    810,
+    975
+   ],
+   "shadow_y": 930
+  },
+  {
+   "file": "pine_2.jpg",
+   "box": [
+    390,
+    70,
+    710,
+    975
+   ],
+   "shadow_y": 925,
+   "exclude": [
+    [
+     700,
+     170,
+     800,
+     340
+    ]
+   ]
+  },
+  {
+   "file": "pine_2.jpg",
+   "box": [
+    1210,
+    245,
+    1530,
+    975
+   ],
+   "shadow_y": 925,
+   "exclude": [
+    [
+     1225,
+     250,
+     1278,
+     345
+    ]
+   ]
+  }
+ ]
+}

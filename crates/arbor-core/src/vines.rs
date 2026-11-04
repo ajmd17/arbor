@@ -310,6 +310,7 @@ impl Support {
         }
         let n = mesh.positions.len();
         mesh.weathering = vec![0.0; n];
+        mesh.stem_radius = vec![0.0; n];
         mesh.sway = vec![[[0.0; 4]; crate::wind::SWAY_ORDERS]; n];
         mesh.sway_at = vec![SwayAt::default(); n];
         mesh

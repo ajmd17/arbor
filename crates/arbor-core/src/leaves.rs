@@ -54,11 +54,15 @@ pub struct LeafMesh {
     /// Per vertex, the same told by stem, for an engine that keeps a table of stems.
     pub sway_at: Vec<SwayAt>,
     pub indices: Vec<u32>,
+    /// Cards emitted. A card is four vertices when it is flat and more when it arches,
+    /// so the count is kept rather than worked out; zero means a mesh built elsewhere
+    /// of plain quads.
+    pub cards: usize,
 }
 
 impl LeafMesh {
     pub fn leaf_count(&self) -> usize {
-        self.positions.len() / 4
+        if self.cards > 0 { self.cards } else { self.positions.len() / 4 }
     }
 
     pub fn vertex_count(&self) -> usize {
@@ -201,9 +205,26 @@ fn place_on_stem(
         .sum();
     let mut frame = ortho_of((points[1].0 - points[0].0).normalize_or(Vec3::Y));
     let mut azimuth = range_f32(&mut rng, 0.0, std::f32::consts::TAU);
-    // Stagger the first leaf so twigs do not all start their sequence flush with
-    // the junction.
-    let mut until_next = range_f32(&mut rng, 0.0, spacing);
+    // Anchors are laid back from the tip, not out from the junction. A shoot ends in
+    // its newest leaves, and counted from the base the last anchor fell anywhere up to
+    // a whole spacing short of the end, so the bare tip of every twig stood out of its
+    // foliage as a spike. The first is staggered a little off the tip so twigs do not
+    // all end flush on a card. The odd remainder goes to the foot instead, where the
+    // run stops a random part of a spacing short of the junction: that keeps the count
+    // a twig gets what it was, its length over the spacing, so a twig shorter than one
+    // spacing still carries a leaf only by its odds rather than every time.
+    let mut anchors = Vec::new();
+    let stagger = range_f32(&mut rng, 0.0, 0.25 * spacing);
+    let mut s = total - stagger;
+    let foot = range_f32(&mut rng, 0.0, spacing) - stagger;
+    while s > foot && anchors.len() < MAX_LEAVES {
+        anchors.push(s);
+        // Anchors scattered rather than stepped: an even pitch draws a pinstripe
+        // down every twig and gives the whole canopy one grain, where scattering
+        // lets the cards bunch into masses and leave holes between them.
+        s -= spacing * (1.0 + range_f32(&mut rng, -jitter, jitter));
+    }
+    let mut next = anchors.len();
     let mut prev_dir = (points[1].0 - points[0].0).normalize_or(Vec3::Y);
     let mut walked = 0.0f32;
 
@@ -219,13 +240,9 @@ fn place_on_stem(
         frame = ortho_unit(transport(prev_dir, dir, frame), dir);
         prev_dir = dir;
 
-        let mut travelled = 0.0;
-        while until_next <= seg_len - travelled {
-            travelled += until_next;
-            // Anchors scattered rather than stepped: an even pitch draws a pinstripe
-            // down every twig and gives the whole canopy one grain, where scattering
-            // lets the cards bunch into masses and leave holes between them.
-            until_next = spacing * (1.0 + range_f32(&mut rng, -jitter, jitter));
+        while next > 0 && anchors[next - 1] - walked <= seg_len {
+            next -= 1;
+            let travelled = (anchors[next] - walked).max(0.0);
             if out.len() >= MAX_LEAVES {
                 return;
             }
@@ -311,7 +328,6 @@ fn place_on_stem(
                 out.push(card);
             }
         }
-        until_next -= seg_len - travelled;
         walked += seg_len;
     }
 }
@@ -453,6 +469,24 @@ fn crown_bounds(cards: &[Card]) -> (Vec3, f32) {
     (center, radius)
 }
 
+/// The most a card's colour can come to in each channel, `tint` and both variations
+/// at their furthest, and never under 1. A glTF vertex colour stops at 1, so an export
+/// divides the cards' colours by this and multiplies the leaf maps by it instead: the
+/// same product, carried where it fits.
+pub fn tint_ceiling(lp: &LeafParams) -> [f32; 3] {
+    let (h, g) = (lp.hue_variance.abs(), lp.green_variance.abs());
+    let spread = [h * 0.60 + g * 0.15, h * 0.15 + g * 0.20, h * 0.50 + g * 0.05];
+    [0, 1, 2].map(|c| (lp.tint[c] * (1.0 + spread[c])).max(1.0))
+}
+
+/// A number from -1 to 1 that a point keeps wherever it is asked about: the same card
+/// gets the same answer every build, without a draw from the tree's random stream.
+fn position_hash(p: Vec3) -> f32 {
+    let q = (p * 37.17).floor();
+    let n = q.x * 127.1 + q.y * 311.7 + q.z * 74.7;
+    (n.sin() * 43758.547).fract() * 2.0 - 1.0
+}
+
 fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, radius: f32) {
     let half = card.side * (card.width * 0.5);
     let tip = card.axis * card.length;
@@ -479,37 +513,94 @@ fn emit_card(mesh: &mut LeafMesh, card: &Card, lp: &LeafParams, center: Vec3, ra
     };
     let shade = 1.0 - lp.interior_shade.clamp(0.0, 1.0) * (1.0 - depth.clamp(0.0, 1.0));
     let h = card.hue * lp.hue_variance;
+    // The second axis, across the first: a card greener than its neighbours or going
+    // olive. Read off where the card is rather than drawn, so turning it up changes no
+    // tree's shape.
+    let g = position_hash(card.origin) * lp.green_variance;
     let tint = [
-        (lp.tint[0] * (1.0 + h * 0.60)).max(0.0),
-        (lp.tint[1] * (1.0 + h * 0.15)).max(0.0),
-        (lp.tint[2] * (1.0 - h * 0.50)).max(0.0),
+        (lp.tint[0] * (1.0 + h * 0.60) * (1.0 - g * 0.15)).max(0.0),
+        (lp.tint[1] * (1.0 + h * 0.15) * (1.0 + g * 0.20)).max(0.0),
+        (lp.tint[2] * (1.0 - h * 0.50) * (1.0 + g * 0.05)).max(0.0),
         shade,
     ];
 
-    let base = mesh.positions.len() as u32;
-    // v runs 1 at the stem to 0 at the tip: the source art has the leaf tip at the
-    // top of the image, which is v = 0 once the rows are uploaded in order.
-    for (corner, uv) in [
-        (card.origin - half, [0.0, 1.0]),
-        (card.origin + half, [1.0, 1.0]),
-        (card.origin + tip + half, [1.0, 0.0]),
-        (card.origin + tip - half, [0.0, 0.0]),
-    ] {
-        // Curving the normal across the width keeps a card from lighting as one flat
-        // facet and gives each leaf a rounded falloff.
-        let bend = card.side * ((uv[0] - 0.5) * 2.0 * lp.curvature);
-        mesh.positions.push(corner.to_array());
-        mesh.normals
-            .push((blended + bend).normalize_or(blended).to_array());
-        mesh.uvs.push(uv);
-        mesh.atlas_v.push(card.atlas_v);
-        mesh.tints.push(tint);
-        mesh.origins.push(card.origin.to_array());
-        mesh.sway.push(card.sway);
-        mesh.sway_at.push(card.sway_at);
+    mesh.cards += 1;
+    let segments = lp.card_segments.max(1);
+    let arch = lp.arch_deg.to_radians();
+    let dip = lp.dip_deg.to_radians();
+    if segments == 1 || (arch.abs() < 1e-4 && dip.abs() < 1e-4) {
+        let base = mesh.positions.len() as u32;
+        // v runs 1 at the stem to 0 at the tip: the source art has the leaf tip at the
+        // top of the image, which is v = 0 once the rows are uploaded in order.
+        for (corner, uv) in [
+            (card.origin - half, [0.0, 1.0]),
+            (card.origin + half, [1.0, 1.0]),
+            (card.origin + tip + half, [1.0, 0.0]),
+            (card.origin + tip - half, [0.0, 0.0]),
+        ] {
+            push_corner(mesh, card, lp, corner, uv, blended, tint);
+        }
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        return;
     }
-    mesh.indices
-        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+    // An arching card bends about its own width, so it stays a level ribbon and only
+    // its run along its length turns, toward whichever face looks down.
+    let mut down = flat;
+    if down.y > 0.0 {
+        down = -down;
+    }
+    // The turn off the card's own line at `t` along it: the arch builds toward the
+    // tip, and the dip starts down and runs out through level to as far up.
+    let turn = |t: f32| arch * t + dip * (1.0 - 2.0 * t);
+    let along = |t: f32| (card.axis * turn(t).cos() + down * turn(t).sin()).normalize_or(card.axis);
+    let step = card.length / segments as f32;
+    let mut at = card.origin;
+    let base = mesh.positions.len() as u32;
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        // The face turns with the run, so the shading follows the arch.
+        let mut face = card.side.cross(along(t)).normalize_or(flat);
+        if face.dot(flat) < 0.0 {
+            face = -face;
+        }
+        let shading = face.lerp(outward, lp.normal_blend.clamp(0.0, 1.0));
+        let v = 1.0 - t;
+        push_corner(mesh, card, lp, at - half, [0.0, v], shading, tint);
+        push_corner(mesh, card, lp, at + half, [1.0, v], shading, tint);
+        if i < segments {
+            at += along((i as f32 + 0.5) / segments as f32) * step;
+        }
+    }
+    for i in 0..segments {
+        let (a, b) = (base + i * 2, base + i * 2 + 2);
+        mesh.indices.extend_from_slice(&[a, a + 1, b + 1, a, b + 1, b]);
+    }
+}
+
+/// One corner of a card, with every attribute it carries.
+fn push_corner(
+    mesh: &mut LeafMesh,
+    card: &Card,
+    lp: &LeafParams,
+    corner: Vec3,
+    uv: [f32; 2],
+    blended: Vec3,
+    tint: [f32; 4],
+) {
+    // Curving the normal across the width keeps a card from lighting as one flat
+    // facet and gives each leaf a rounded falloff.
+    let bend = card.side * ((uv[0] - 0.5) * 2.0 * lp.curvature);
+    mesh.positions.push(corner.to_array());
+    mesh.normals
+        .push((blended + bend).normalize_or(blended).to_array());
+    mesh.uvs.push(uv);
+    mesh.atlas_v.push(card.atlas_v);
+    mesh.tints.push(tint);
+    mesh.origins.push(card.origin.to_array());
+    mesh.sway.push(card.sway);
+    mesh.sway_at.push(card.sway_at);
 }
 
 #[cfg(test)]

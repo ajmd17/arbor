@@ -7,6 +7,7 @@ use crate::vines::VineParams;
 pub const PINE_RON: &str = include_str!("../../../assets/species/pine.ron");
 pub const OAK_RON: &str = include_str!("../../../assets/species/oak.ron");
 pub const BIRCH_RON: &str = include_str!("../../../assets/species/birch.ron");
+pub const OAK_FOREST_RON: &str = include_str!("../../../assets/species/oak_forest.ron");
 pub const SPRUCE_RON: &str = include_str!("../../../assets/species/spruce.ron");
 pub const DOUGLAS_FIR_RON: &str = include_str!("../../../assets/species/douglas_fir.ron");
 pub const DOUGLAS_FIR_OPEN_RON: &str =
@@ -28,6 +29,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str)> {
     vec![
         ("pine", PINE_RON),
         ("oak", OAK_RON),
+        ("oak_forest", OAK_FOREST_RON),
         ("birch", BIRCH_RON),
         ("spruce", SPRUCE_RON),
         ("fir", DOUGLAS_FIR_RON),
@@ -472,6 +474,13 @@ pub struct MeshParams<V = f32> {
     /// Colour multiplier over the bark texture, for pulling a bark set to the tone a
     /// species wants without re-authoring the art.
     pub bark_tint: [V; 3],
+    /// Colour multiplier over the bark of young wood. A birch is white on the bole and
+    /// limbs and dark red-brown out in the twigs, and the white only comes with age, so
+    /// thin wood takes this on top of `bark_tint`: in full at `twig_tint_radius` and
+    /// below, fading out by `twig_tint_fade`, both in metres of stem radius.
+    pub twig_tint: [V; 3],
+    pub twig_tint_radius: V,
+    pub twig_tint_fade: V,
     /// Colour dead wood weathers toward.
     ///
     /// A branch that has lost its bark, or kept it and been bleached for years, goes
@@ -521,11 +530,27 @@ impl Default for MeshParams {
             moss_amount: 0.0,
             bark_darken_low: 0.0,
             bark_tint: [1.0, 1.0, 1.0],
+            twig_tint: [1.0, 1.0, 1.0],
+            twig_tint_radius: 0.0,
+            twig_tint_fade: 0.0,
             dead_wood_color: [0.62, 0.61, 0.58],
             dead_wood_weathering: 0.0,
             dead_bark_radius: 0.0,
             irregularity: BarkIrregularity::default(),
         }
+    }
+}
+
+impl MeshParams {
+    /// How much of `twig_tint` wood of this radius takes, 0 to 1. The shader reads the
+    /// same off the radius each vertex carries.
+    pub fn twig_amount(&self, radius: f32) -> f32 {
+        let (full, fade) = (self.twig_tint_radius, self.twig_tint_fade.max(self.twig_tint_radius + 1e-4));
+        if self.twig_tint == [1.0; 3] || fade <= 1e-4 {
+            return 0.0;
+        }
+        let t = ((fade - radius) / (fade - full)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
     }
 }
 
@@ -562,6 +587,9 @@ impl<V: Scalar> MeshParams<V> {
             moss_amount: f(&key(at, "moss_amount"), self.moss_amount),
             bark_darken_low: f(&key(at, "bark_darken_low"), self.bark_darken_low),
             bark_tint: map_array(&key(at, "bark_tint"), self.bark_tint, f),
+            twig_tint: map_array(&key(at, "twig_tint"), self.twig_tint, f),
+            twig_tint_radius: f(&key(at, "twig_tint_radius"), self.twig_tint_radius),
+            twig_tint_fade: f(&key(at, "twig_tint_fade"), self.twig_tint_fade),
             dead_wood_color: map_array(&key(at, "dead_wood_color"), self.dead_wood_color, f),
             dead_wood_weathering: f(&key(at, "dead_wood_weathering"), self.dead_wood_weathering),
             dead_bark_radius: f(&key(at, "dead_bark_radius"), self.dead_bark_radius),
@@ -606,6 +634,12 @@ pub struct StemParams<V = f32> {
     /// changes is that the wood stops reading as extruded. It matters most on the fine
     /// levels, which are short enough that nothing else bends them measurably.
     pub zigzag_deg: V,
+    /// A stem that leaves this far below the course it was given, in degrees, and
+    /// turns steadily back up along its length to end as far above it: the sag-and-lift
+    /// of a spruce limb, bowed in the middle and its tip turned up. Drawn as a shape
+    /// rather than as forces, since gravity and phototropism are one vertical pull and
+    /// cannot sag a stem first and lift it after. Takes nothing from the turn bank.
+    pub swoop_deg: V,
     pub vigor_falloff: V,
     pub split_probability: V,
     /// How far a co-dominant fork leans away from the stem it splits from.
@@ -670,6 +704,7 @@ impl StemParams {
             gravity: 0.012,
             droop: 0.0,
             zigzag_deg: 0.0,
+            swoop_deg: 0.0,
             vigor_falloff: 0.5,
             split_probability: 0.04,
             split_angle_deg: 22.0,
@@ -699,6 +734,7 @@ impl Default for StemParams {
             gravity: 0.005,
             droop: 0.0,
             zigzag_deg: 0.0,
+            swoop_deg: 0.0,
             vigor_falloff: 0.35,
             split_probability: 0.02,
             split_angle_deg: 25.0,
@@ -734,6 +770,7 @@ impl<V: Scalar> StemParams<V> {
             gravity: f(&key(at, "gravity"), self.gravity),
             droop: f(&key(at, "droop"), self.droop),
             zigzag_deg: f(&key(at, "zigzag_deg"), self.zigzag_deg),
+            swoop_deg: f(&key(at, "swoop_deg"), self.swoop_deg),
             vigor_falloff: f(&key(at, "vigor_falloff"), self.vigor_falloff),
             split_probability: f(&key(at, "split_probability"), self.split_probability),
             split_angle_deg: f(&key(at, "split_angle_deg"), self.split_angle_deg),
@@ -825,6 +862,16 @@ pub struct ChildParams<V = f32> {
     /// at the shade line, where the limbs have only just died. At 1 nothing is cut back
     /// and the dead band is as long as the tree grew it.
     pub shade_keep: V,
+    /// The share of shaded-out children that have fallen off altogether, and of the
+    /// stubs left where the crown refused a branch at birth.
+    ///
+    /// A pine does not carry every limb it ever grew down its bole: most of the old
+    /// ones have dropped whole and left only a knot in the bark, and what stands is a
+    /// few, one here and another there, rather than a whorl of pegs at every node.
+    /// Drawn evenly down the dead band: `shade_keep` already makes the old ones short,
+    /// and a share that fell away toward the crown left the band, which mostly lies
+    /// just under it, nearly as full as before.
+    pub shed: V,
     /// How far a shaded-out child may settle down about its base once it has died, in
     /// degrees.
     ///
@@ -872,6 +919,7 @@ impl Default for ChildParams {
             shade_line: 0.0,
             shade_blend: 0.0,
             shade_keep: 1.0,
+            shed: 0.0,
             dead_sag_deg: 0.0,
             tip_reach: 0.0,
         }
@@ -904,6 +952,7 @@ impl<V: Scalar> ChildParams<V> {
             shade_line: f(&key(at, "shade_line"), self.shade_line),
             shade_blend: f(&key(at, "shade_blend"), self.shade_blend),
             shade_keep: f(&key(at, "shade_keep"), self.shade_keep),
+            shed: f(&key(at, "shed"), self.shed),
             dead_sag_deg: f(&key(at, "dead_sag_deg"), self.dead_sag_deg),
             tip_reach: f(&key(at, "tip_reach"), self.tip_reach),
         }
@@ -1086,6 +1135,18 @@ pub struct LeafParams<V = f32> {
     pub cluster_spread_deg: V,
     pub card_length: V,
     pub card_width: V,
+    /// How far a card's tip bends down off the line it leaves its twig on, in degrees,
+    /// spread evenly along its length: a spray of needles or a long blade arching under
+    /// its own weight instead of standing out flat. Negative curls it up.
+    pub arch_deg: V,
+    /// How steeply a card heads down off that line where it leaves its twig, in
+    /// degrees, coming level through its middle and turning as far back up by its tip:
+    /// the sag-and-lift of a spruce spray, which bows under its weight and still ends
+    /// pointing up. Takes `card_segments` of three or more to read as a curve.
+    pub dip_deg: V,
+    /// Quads along a card's length, to carry the arch. One is a flat card; each more
+    /// costs two triangles a card.
+    pub card_segments: u32,
     pub size_variance: V,
     /// Angle between the leaf and the twig it grows from.
     pub crotch_angle_deg: V,
@@ -1114,6 +1175,20 @@ pub struct LeafParams<V = f32> {
     /// the colour a species wants without re-authoring the art.
     pub tint: [V; 3],
     pub hue_variance: V,
+    /// Card-to-card variation across the other axis: some cards greener, some going
+    /// olive. `hue_variance` moves cards between yellow-green and blue-green only, and
+    /// a real crown varies the other way as much, old needle against new.
+    pub green_variance: V,
+    /// How much of the leaf art's own colour is kept, 1 for all of it and 0 for grey.
+    /// Scans are often far greener than a canopy reads from a distance, and `tint`
+    /// cannot take that out: multiplying a channel the art barely has does nothing.
+    /// It is applied to the maps before they are baked, so the export carries it too.
+    pub saturation: V,
+    /// How much of the light the art's translucency map lets through is kept. A blade
+    /// passes a good share of the sun; a shoot of needles packed round its twig passes
+    /// little, and at the full measured value a conifer seen against the light glows
+    /// pale as frost. Applied to the map before it is baked, so the export carries it.
+    pub transmission: V,
     /// Darkening applied to leaves deep inside the crown.
     pub interior_shade: V,
     /// How crisp the cutout edge stays as a card shrinks on screen, from 0 to 1.
@@ -1174,6 +1249,9 @@ impl Default for LeafParams {
             cluster_spread_deg: 38.0,
             card_length: 0.22,
             card_width: 0.16,
+            arch_deg: 0.0,
+            dip_deg: 0.0,
+            card_segments: 1,
             size_variance: 0.25,
             crotch_angle_deg: 55.0,
             crotch_variance_deg: 18.0,
@@ -1185,6 +1263,9 @@ impl Default for LeafParams {
             curvature: 0.35,
             tint: [1.0, 1.0, 1.0],
             hue_variance: 0.12,
+            green_variance: 0.0,
+            saturation: 1.0,
+            transmission: 1.0,
             interior_shade: 0.35,
             edge_sharpness: 0.0,
             backface_volume: 0.0,
@@ -1218,6 +1299,9 @@ impl<V: Scalar> LeafParams<V> {
             cluster_spread_deg: f(&key(at, "cluster_spread_deg"), self.cluster_spread_deg),
             card_length: f(&key(at, "card_length"), self.card_length),
             card_width: f(&key(at, "card_width"), self.card_width),
+            arch_deg: f(&key(at, "arch_deg"), self.arch_deg),
+            dip_deg: f(&key(at, "dip_deg"), self.dip_deg),
+            card_segments: self.card_segments,
             size_variance: f(&key(at, "size_variance"), self.size_variance),
             crotch_angle_deg: f(&key(at, "crotch_angle_deg"), self.crotch_angle_deg),
             crotch_variance_deg: f(&key(at, "crotch_variance_deg"), self.crotch_variance_deg),
@@ -1229,6 +1313,9 @@ impl<V: Scalar> LeafParams<V> {
             curvature: f(&key(at, "curvature"), self.curvature),
             tint: map_array(&key(at, "tint"), self.tint, f),
             hue_variance: f(&key(at, "hue_variance"), self.hue_variance),
+            green_variance: f(&key(at, "green_variance"), self.green_variance),
+            saturation: f(&key(at, "saturation"), self.saturation),
+            transmission: f(&key(at, "transmission"), self.transmission),
             interior_shade: f(&key(at, "interior_shade"), self.interior_shade),
             edge_sharpness: f(&key(at, "edge_sharpness"), self.edge_sharpness),
             backface_volume: f(&key(at, "backface_volume"), self.backface_volume),

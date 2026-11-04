@@ -582,6 +582,7 @@ in vec3 a_normal;
 in vec2 a_uv;
 in vec4 a_tangent;
 in float a_weathering;
+in float a_stem_radius;
 in vec4 a_wind1;
 in vec4 a_wind2;
 in vec4 a_wind3;
@@ -594,6 +595,7 @@ out vec2 v_uv;
 out vec4 v_tangent;
 out vec4 v_shadow;
 out float v_weathering;
+out float v_stem_radius;
 void main() {
     vec3 pos = wind_displace(a_pos, a_wind1, a_wind2, a_wind3);
     v_world = pos;
@@ -601,6 +603,7 @@ void main() {
     v_uv = a_uv;
     v_tangent = a_tangent;
     v_weathering = a_weathering;
+    v_stem_radius = a_stem_radius;
     // Looked up a little along the normal rather than at the surface itself. With a
     // low sun the light grazes everything, and that is where plain depth bias either
     // stripes the bark with acne or lifts the shadow off its caster.
@@ -630,7 +633,10 @@ in vec2 v_uv;
 in vec4 v_tangent;
 in vec4 v_shadow;
 in float v_weathering;
+in float v_stem_radius;
 uniform vec3 u_albedo_color;
+uniform vec3 u_twig_tint;
+uniform vec2 u_twig_radius;
 uniform vec3 u_dead_color;
 uniform float u_dead_weathering;
 uniform vec3 u_moss_color;
@@ -681,6 +687,10 @@ void main() {
     // face up rather than ones rain runs off. Both are read straight off world
     // position and the surface normal, so no extra mesh data is needed for either.
     albedo *= 1.0 - u_bark_darken_low * exp(-max(v_world.y, 0.0) * 0.35);
+    // Young wood is its own colour, read off the stem's radius: `twig_amount` in the
+    // species, which the export bakes into the vertex colours the same way.
+    float young = smoothstep(u_twig_radius.y, u_twig_radius.x, v_stem_radius);
+    albedo *= mix(vec3(1.0), u_twig_tint, young);
     // Dead wood bleaches toward one silver-grey whatever the living bark was. The
     // texture's own light and dark are kept as a modulation around that colour, so
     // the grain survives and only the hue and the tone move across.

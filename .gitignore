@@ -3,3 +3,9 @@ Cargo.lock
 *.obj.tmp
 .opencode
 /exports
+/out/iter/
+/out/refs/
+/out/report/
+out/*
+/out/hdd/
+/out/fix/

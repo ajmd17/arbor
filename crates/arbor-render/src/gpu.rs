@@ -62,8 +62,10 @@ fn for_this_gl(src: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Bark vertex attributes, in the order the mesh vertex array binds them. The colour
-/// pass, the shadow pass and the wireframe all draw from that one array.
-const MESH_ATTRIBS: [&str; 8] = [
+/// pass, the shadow pass and the wireframe all draw from that one array. The stem
+/// radius comes after the slot the leaves keep their origin in, which the bark leaves
+/// empty, so the sway sits where the leaf arrays have it.
+const MESH_ATTRIBS: [&str; 10] = [
     "a_pos",
     "a_normal",
     "a_uv",
@@ -72,7 +74,12 @@ const MESH_ATTRIBS: [&str; 8] = [
     "a_wind1",
     "a_wind2",
     "a_wind3",
+    "a_leaf_origin",
+    "a_stem_radius",
 ];
+
+/// Where the bark's stem radius sits in its vertex array.
+const STEM_RADIUS_SLOT: u32 = 9;
 
 /// The wireframe draws both vertex arrays, so it names the bark's layout with the leaf
 /// origin after it. The two arrays put the sway in the same slots, which is what lets
@@ -772,6 +779,7 @@ pub struct GpuMesh {
     vbo_tan: glow::Buffer,
     vbo_weather: glow::Buffer,
     vbo_sway: glow::Buffer,
+    vbo_radius: glow::Buffer,
     ibo: glow::Buffer,
     index_count: i32,
     u_view_proj: glow::UniformLocation,
@@ -782,6 +790,8 @@ pub struct GpuMesh {
     u_moss_height: glow::UniformLocation,
     u_moss_amount: glow::UniformLocation,
     u_bark_darken_low: glow::UniformLocation,
+    u_twig_tint: glow::UniformLocation,
+    u_twig_radius: glow::UniformLocation,
     u_roughness: glow::UniformLocation,
     u_metallic: glow::UniformLocation,
     u_mode: glow::UniformLocation,
@@ -798,6 +808,9 @@ pub struct BarkLook {
     pub moss_amount: f32,
     pub darken_low: f32,
     pub tint: Vec3,
+    /// Young wood's tint, and the stem radii it is taken in full and faded out by.
+    pub twig_tint: Vec3,
+    pub twig_radius: [f32; 2],
     pub dead_color: Vec3,
     pub dead_weathering: f32,
     /// How far the green of the roughness map is taken as occlusion baked into the
@@ -814,6 +827,8 @@ impl BarkLook {
             moss_amount: 0.0,
             darken_low: 0.0,
             tint: Vec3::ONE,
+            twig_tint: Vec3::ONE,
+            twig_radius: [0.0, 0.0],
             dead_color: Vec3::ONE,
             dead_weathering: 0.0,
             baked_occlusion: 0.0,
@@ -827,6 +842,8 @@ impl BarkLook {
             moss_amount: mp.moss_amount,
             darken_low: mp.bark_darken_low,
             tint: Vec3::from(mp.bark_tint),
+            twig_tint: Vec3::from(mp.twig_tint),
+            twig_radius: [mp.twig_tint_radius, mp.twig_tint_fade.max(mp.twig_tint_radius + 1e-4)],
             dead_color: Vec3::from(mp.dead_wood_color),
             dead_weathering: mp.dead_wood_weathering,
             baked_occlusion: 0.0,
@@ -860,9 +877,13 @@ impl GpuMesh {
             let vbo_tan = gl.create_buffer().expect("vbo tan");
             let vbo_weather = gl.create_buffer().expect("vbo weathering");
             let vbo_sway = gl.create_buffer().expect("vbo sway");
+            let vbo_radius = gl.create_buffer().expect("vbo stem radius");
             let ibo = gl.create_buffer().expect("ibo");
 
             gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo_radius));
+            gl.enable_vertex_attrib_array(STEM_RADIUS_SLOT);
+            gl.vertex_attrib_pointer_f32(STEM_RADIUS_SLOT, 1, glow::FLOAT, false, 4, 0);
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo_pos));
             gl.enable_vertex_attrib_array(0);
             gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
@@ -894,6 +915,7 @@ impl GpuMesh {
                 vbo_tan,
                 vbo_weather,
                 vbo_sway,
+                vbo_radius,
                 ibo,
                 index_count: 0,
                 u_view_proj: u("u_view_proj"),
@@ -904,6 +926,8 @@ impl GpuMesh {
                 u_moss_height: u("u_moss_height"),
                 u_moss_amount: u("u_moss_amount"),
                 u_bark_darken_low: u("u_bark_darken_low"),
+                u_twig_tint: u("u_twig_tint"),
+                u_twig_radius: u("u_twig_radius"),
                 u_roughness: u("u_roughness"),
                 u_metallic: u("u_metallic"),
                 u_mode: u("u_mode"),
@@ -917,12 +941,21 @@ impl GpuMesh {
     pub fn upload(&mut self, gl: &glow::Context, mesh: &arbor_core::Mesh) {
         unsafe {
             gl.bind_vertex_array(Some(self.vao));
+            // A mesh built without radii, as a rock's is, reads as old wood throughout.
+            let radius_fallback;
+            let radii: &[f32] = if mesh.stem_radius.len() == mesh.positions.len() {
+                &mesh.stem_radius
+            } else {
+                radius_fallback = vec![1.0f32; mesh.positions.len()];
+                &radius_fallback
+            };
             for (buffer, data) in [
                 (self.vbo_pos, cast_slice(&mesh.positions)),
                 (self.vbo_nrm, cast_slice(&mesh.normals)),
                 (self.vbo_uv, cast_slice(&mesh.uvs)),
                 (self.vbo_tan, cast_slice(&mesh.tangents)),
                 (self.vbo_weather, cast_slice(&mesh.weathering)),
+                (self.vbo_radius, cast_slice(radii)),
                 (self.vbo_sway, cast_slice(&mesh.sway)),
             ] {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
@@ -967,6 +1000,8 @@ impl GpuMesh {
             gl.uniform_1_f32(Some(&self.u_moss_height), p.bark.moss_height);
             gl.uniform_1_f32(Some(&self.u_moss_amount), p.bark.moss_amount);
             gl.uniform_1_f32(Some(&self.u_bark_darken_low), p.bark.darken_low);
+            set3(gl, &self.u_twig_tint, p.bark.twig_tint);
+            gl.uniform_2_f32(Some(&self.u_twig_radius), p.bark.twig_radius[0], p.bark.twig_radius[1]);
             gl.uniform_1_f32(Some(&self.u_baked_occlusion), p.bark.baked_occlusion);
             gl.uniform_1_i32(Some(&self.u_mode), p.mode);
             gl.uniform_1_i32(

@@ -149,7 +149,10 @@
         max_twig_radius: 0.02,
         // Two crossed cards to a tuft, each carrying a spray of about ten leaves a
         // hand across, baked from the painted hazel leaf.
-        density: 3.2,
+        // Lowered from 3.2 when leaves began to be laid back from the tip of a twig,
+        // which puts the first of them at the very end of every shoot: the same
+        // count of cards as before, so the crown is as full as it was tuned.
+        density: 2.941,
         spacing_variance: 0.8,
         leafy_length: 0.6,
         cluster_size: 2,

@@ -224,7 +224,10 @@
         // Small leaves in loose sprays on the last stretch of each shoot, and few
         // enough of them that the crown is mostly sky: the branchwork is the tree and
         // the foliage is a veil over the ends of it.
-        density: 2.5,
+        // Lowered from 2.5 when leaves began to be laid back from the tip of a twig,
+        // which puts the first of them at the very end of every shoot: the same
+        // count of cards as before, so the crown is as full as it was tuned.
+        density: 2.208,
         spacing_variance: 0.85,
         leafy_length: 0.6,
         cluster_size: 2,

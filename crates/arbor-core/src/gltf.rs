@@ -177,15 +177,20 @@ impl Textures {
         let lp = &params.leaves;
         if lp.enabled {
             match textures::load_leaf_maps(source, lp) {
-                Some(maps) => {
-                    out.leaf_albedo = Some(textures::encode_png(&maps.albedo)?);
+                Some(mut maps) => {
                     if let Some(n) = &maps.normal {
                         out.leaf_normal = Some(textures::encode_png(n)?);
                     }
                     let mask = textures::transmission_mask(&maps.albedo, maps.translucency.as_ref());
                     let roughness = leaf_roughness(maps.roughness.as_ref(), &maps.albedo, &mask);
                     out.leaf_roughness = Some(textures::encode_png(&roughness)?);
-                    if let Some(t) = &maps.translucency {
+                    // What the cards' colours carry over 1 goes into the maps, since the
+                    // vertex colours cannot hold it; see `tint_ceiling`.
+                    let ceiling = crate::leaves::tint_ceiling(lp);
+                    textures::scale_channels(&mut maps.albedo, ceiling);
+                    out.leaf_albedo = Some(textures::encode_png(&maps.albedo)?);
+                    if let Some(t) = maps.translucency.as_mut() {
+                        textures::scale_channels(t, ceiling);
                         out.leaf_translucency = Some(textures::encode_png(t)?);
                     }
                 }
@@ -621,13 +626,19 @@ fn bark_mesh(
         ("TEXCOORD_0", doc.floats(&flat(&mesh.uvs), 2, false)),
     ];
     let darken = params.mesh.bark_darken_low.clamp(0.0, 1.0);
-    if darken > 0.0 {
+    let young = |i: usize| mesh.stem_radius.get(i).map_or(0.0, |&r| params.mesh.twig_amount(r));
+    let twig = params.mesh.twig_tint;
+    if darken > 0.0 || (0..n).any(|i| young(i) > 0.0) {
+        // The foot's darkening and young wood's tint, as the viewer's bark shader puts
+        // them over the texture.
         let shade: Vec<[f32; 3]> = mesh
             .positions
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 let k = (1.0 - darken * (-p[1].max(0.0) * DARKEN_FALLOFF).exp()).clamp(0.0, 1.0);
-                [k, k, k]
+                let y = young(i);
+                [0, 1, 2].map(|c| k * (1.0 + (twig[c] - 1.0) * y))
             })
             .collect();
         attrs.push(("COLOR_0", doc.floats(&flat(&shade), 3, false)));
@@ -690,10 +701,11 @@ fn leaf_mesh(
     // sits, which the viewer takes from the light gathered from around it and not from
     // the sun. glTF reads a colour's alpha as opacity, so the shade is an attribute of
     // its own that other tools leave alone.
+    let ceiling = crate::leaves::tint_ceiling(lp);
     let tints: Vec<[f32; 3]> = leaves
         .tints
         .iter()
-        .map(|t| [0, 1, 2].map(|i| t[i].clamp(0.0, 1.0)))
+        .map(|t| [0, 1, 2].map(|i| (t[i] / ceiling[i]).clamp(0.0, 1.0)))
         .collect();
     let shades: Vec<f32> = leaves.tints.iter().map(|t| t[3].clamp(0.0, 1.0)).collect();
 

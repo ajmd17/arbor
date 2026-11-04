@@ -285,7 +285,15 @@
         // leaves went from 42.5k triangles to 15.8k. The crown still reads as tiers from
         // any distance a fifty-metre tree is seen whole at; the cost is up close, where
         // the bigger cards show as spiky slabs at the crown's edge.
-        density: 1.6,
+        // Cut from 1.6 when the spruce was matched to a photograph of a Norway spruce
+        // and came out the more open crown of the two, and from 0.9 to this when the
+        // spruce took lacier scanned sprays and clothed its shoots; this is the fir
+        // that is meant to be, and `douglas_fir_has_a_clear_bole_and_an_open_crown`
+        // says so.
+        // Lowered from 0.52 when leaves began to be laid back from the tip of a twig,
+        // which puts the first of them at the very end of every shoot: the same
+        // count of cards as before, so the crown is as full as it was tuned.
+        density: 0.457,
         spacing_variance: 0.85,
         // The shell of foliage over bare branchwork, and at 1.8 it was not one. This
         // is measured back from a twig's tip along the length it actually grew, and
