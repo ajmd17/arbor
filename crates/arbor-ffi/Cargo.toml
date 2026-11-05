@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 
 # A C API over arbor-core for engines that grow and draw the plants themselves.
-# `tools/hyperion-drop.sh` builds the static library for Hyperion's ArborToolkit.
+# Hyperion's ArborToolkit plugin builds the static library from a submodule of this repo, with Corrosion.
 [lib]
 crate-type = ["staticlib", "rlib"]
 
