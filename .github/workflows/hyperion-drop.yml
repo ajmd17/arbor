@@ -1,9 +1,11 @@
-# Builds arbor-ffi the way tools/hyperion-drop.sh does and publishes it as a release
-# asset, arbor-hyperion-<tag>.zip, which Hyperion's ArborToolkit plugin downloads at a
-# pinned tag and SHA-256 when it has no local drop. The texture sets stay out of it:
-# Hyperion keeps them as BC texture assets in the plugin's Content.
+# Builds arbor-ffi the way tools/hyperion-drop.sh does, for each platform Hyperion's editor
+# ships on, and publishes them as release assets, arbor-hyperion-<tag>-<platform>.zip. The
+# ArborToolkit plugin downloads its platform's at a pinned tag and SHA-256 when it has no
+# local drop. The texture sets stay out of them: Hyperion keeps those as BC texture assets in
+# the plugin's Content.
 #
-# Push a tag named hyperion-drop-<anything> to publish one.
+# Push a tag named hyperion-drop-<anything> to publish one. A manual run only uploads the
+# zips as workflow artifacts.
 name: Hyperion drop
 
 on:
@@ -15,50 +17,70 @@ permissions:
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-2025
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # the runners Hyperion's release workflow builds the editor on
+          - { platform: windows-x64, os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { platform: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
+          - { platform: linux-x64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      # the script calls the toolchain by its full name, as a machine with the GNU one as default needs
+      # on Windows the script calls the toolchain by its full name, as a machine with the GNU one as default needs
       - name: Name the MSVC toolchain
+        if: runner.os == 'Windows'
         shell: bash
         run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --target x86_64-pc-windows-msvc
 
       - name: Build
         shell: bash
+        env:
+          ARBOR_TARGET: ${{ matrix.target }}
         run: tools/hyperion-drop.sh --out dist/arbor
 
       - name: Package
-        id: package
         shell: bash
         run: |
-          name="arbor-hyperion-${GITHUB_REF_NAME}.zip"
+          name="arbor-hyperion-${GITHUB_REF_NAME}-${{ matrix.platform }}.zip"
           cd dist/arbor
-          7z a -tzip "../$name" lib include native-libs.txt VERSION
+          cmake -E tar cf "../$name" --format=zip lib include native-libs.txt VERSION
           cd ..
-          sha256sum "$name" | tee "$name.sha256"
-          echo "name=$name" >> "$GITHUB_OUTPUT"
+          cmake -E sha256sum "$name" | tee "$name.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: arbor-hyperion
+          name: arbor-hyperion-${{ matrix.platform }}
           path: dist/arbor-hyperion-*
 
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: arbor-hyperion-*
+          merge-multiple: true
+          path: dist
+
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/${{ steps.package.outputs.name }}" \
-            "dist/${{ steps.package.outputs.name }}.sha256" \
+          gh release create "$GITHUB_REF_NAME" dist/arbor-hyperion-* \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Hyperion drop $GITHUB_REF_NAME" \
-            --notes "arbor-ffi for Hyperion's ArborToolkit plugin, built from $GITHUB_SHA. Pin the tag and the SHA-256 in the plugin's Module.cmake."
+            --notes "arbor-ffi for Hyperion's ArborToolkit plugin on Windows x64, macOS arm64 and Linux x64, built from $GITHUB_SHA. Pin the tag and each platform's SHA-256 in the plugin's Module.cmake."
