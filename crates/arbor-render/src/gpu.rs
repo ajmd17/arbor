@@ -1059,7 +1059,8 @@ pub struct LeafMaterialParams {
     /// much of that lean a card seen from behind keeps.
     pub normal_blend: f32,
     pub backface_volume: f32,
-    /// How much of the sun a leaf in shadow still loses.
+    /// How much of the sun a leaf in shadow still loses, at the surface of the crown;
+    /// deeper in, the foliage opacity map takes the rest.
     pub self_shadow: f32,
 }
 
@@ -1335,6 +1336,8 @@ impl GpuLeaves {
             p.wind.bind(gl, self.program);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.albedo));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(p.material.normal));
             gl.active_texture(glow::TEXTURE2);
             gl.bind_texture(glow::TEXTURE_2D, Some(p.material.roughness));
             // The sampler has to read something even when the art has no such map, and

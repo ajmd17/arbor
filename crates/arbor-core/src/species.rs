@@ -1328,7 +1328,9 @@ pub struct LeafParams<V = f32> {
     /// throw a shadow that dense. A crown of needles does not — light comes through it
     /// in a thousand gaps — and holding every card behind another to the sky alone
     /// makes the shaded side of the crown go black where it should stay green. Below 1
-    /// that much of the sun is let through the shadow.
+    /// that much of the sun is let through the shadow at the surface of the crown, and
+    /// less the deeper into it the light has had to come (the viewer's foliage opacity
+    /// map), so the heart of a crown still goes dark.
     pub self_shadow: V,
     /// When set, the leaf texture named below is a single leaf, and the atlas the
     /// renderer actually samples is generated from it at load. `atlas_cols` and

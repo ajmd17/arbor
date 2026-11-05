@@ -254,8 +254,12 @@
         even_roll: 1.0,
         normal_blend: 0.5,
         curvature: 0.3,
-        tint: (1.954, 1.954, 2.112),
-        saturation: 0.359,
+        // Held to a real leaf's colour (`tools/fitalbedo.py ... broadleaf`): fitted to
+        // the photograph's lightness alone the leaves went to green 0.24, half again
+        // as reflective as any real oak leaf, and greyed to saturation 0.36 to match,
+        // which drew the lit crown pale cream.
+        tint: (1.314, 1.236, 2.242),
+        saturation: 0.700,
         transmission: 0.32,
         hue_variance: 0.14,
         green_variance: 0.0,

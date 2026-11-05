@@ -295,10 +295,13 @@
         curvature: 0.3,
         // Cooler than the pine. A spruce reads blue-green where a pine reads yellow-
         // green, and the difference is visible across a whole hillside. The scans are
-        // a grown crown's dark olive, so the tint lifts them to the reference's
-        // lightness under a white light and moves them off yellow (`tools/fitcolour.py`,
-        // then `tools/fitscore.py` over six seeds), and the cards vary both ways, old
-        // needle and new, as the photograph's crown does. The crown's inside is held
+        // a grown crown's dark olive, so the tint moves them toward the reference's
+        // colour under a white light, but only as far as a real needle's colour goes
+        // (`tools/fitalbedo.py ... conifer`): green 0.11, red and blue at most 0.75
+        // and 0.45 of it. Fitted to the photograph alone the needles went to blue
+        // 0.64 of green, a grey-blue no shoot has, which read as frost under any real
+        // sky; the studio's own sheen is what greys the photograph's crown. The cards
+        // vary both ways, old needle and new, as the photograph's crown does. The crown's inside is held
         // dark (`interior_shade`) against the lift: a dark scan brightened evenly
         // flattens the crown to a grey-green felt, a third less contrast than the
         // photograph's, where the reference is bright at its tips and near black
@@ -307,7 +310,7 @@
         // against the light glows pale as frost. `backface_volume` is off: it lit the
         // undersides of the upper sprays, which the camera looks up at, a pale band
         // over the top half of the tree.
-        tint: (2.298, 2.298, 6.591),
+        tint: (2.218, 2.587, 5.255),
         saturation: 0.801,
         transmission: 0.10,
         hue_variance: 0.2,

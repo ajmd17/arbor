@@ -1003,6 +1003,7 @@ impl App {
             normal_bias: 0.0,
             ao_texel: [0.0, 0.0],
             canopy: render::CanopyPlacement::default(),
+            foliage: None,
         };
         let (Some(photo), Built::Photo(name)) = (&self.photo, &self.built) else {
             return base;
@@ -2415,7 +2416,7 @@ impl eframe::App for App {
                             },
                             _ => render::CanopyPlacement::default(),
                         };
-                        let lighting = Lighting {
+                        let mut lighting = Lighting {
                             canopy,
                             shadow: frustum,
                             shadow_size: shadow.size,
@@ -2478,6 +2479,17 @@ impl eframe::App for App {
                                         &leaf_mat,
                                         leaf_params,
                                         &wind,
+                                    );
+                                    // How much crown the sun has come through, for the
+                                    // light to fall off into it.
+                                    lighting.foliage = renderer.foliage(
+                                        gl,
+                                        &leaf_depth_pass,
+                                        &leaves_gpu,
+                                        &leaf_mat,
+                                        leaf_params,
+                                        &wind,
+                                        &frustum,
                                     );
                                 }
                             }

@@ -19,7 +19,7 @@ use crate::shaders;
 /// Where every lit program reads each of its textures. Set once per program, since a
 /// sampler left unset reads unit 0, and two samplers of different kinds on one unit
 /// fail every draw the program makes.
-const SAMPLER_UNITS: [(&str, u32); 11] = [
+const SAMPLER_UNITS: [(&str, u32); 13] = [
     ("u_albedo_tex", 0),
     ("u_normal_tex", 1),
     ("u_rough_tex", 2),
@@ -31,6 +31,8 @@ const SAMPLER_UNITS: [(&str, u32); 11] = [
     ("u_equirect", UNIT_EQUIRECT),
     ("u_canopy", UNIT_CANOPY),
     ("u_translucency_tex", UNIT_TRANSLUCENCY),
+    ("u_foliage_depth", UNIT_FOLIAGE_DEPTH),
+    ("u_foliage_opacity", UNIT_FOLIAGE_OPACITY),
 ];
 const UNIT_SHADOW: u32 = 3;
 const UNIT_SHADOW_CMP: u32 = 4;
@@ -40,6 +42,8 @@ const UNIT_AO: u32 = 7;
 const UNIT_EQUIRECT: u32 = 8;
 const UNIT_CANOPY: u32 = 9;
 pub(crate) const UNIT_TRANSLUCENCY: u32 = 10;
+const UNIT_FOLIAGE_DEPTH: u32 = 11;
+const UNIT_FOLIAGE_OPACITY: u32 = 12;
 
 /// The crown's coverage from above is drawn at this size, and blurred at a quarter of it.
 const CANOPY_SIZE: i32 = 256;
@@ -48,6 +52,17 @@ const CANOPY_BLUR_LOD: i32 = 2;
 /// in under the edge of the crown from the sky low down, which looking straight up
 /// does not see.
 const CANOPY_STRENGTH: f32 = 0.85;
+
+/// The foliage seen from the sun is drawn at this size. Coarse on purpose: it says how
+/// much crown the light has come through, which changes over tens of centimetres, and
+/// the shadow map is still there for the sharp edges.
+const FOLIAGE_SIZE: i32 = 512;
+/// How deep past the first leaf the sun meets each layer of the opacity map reaches, in
+/// metres. Close together near the surface, where the light changes fastest.
+const FOLIAGE_LAYERS: [f32; 4] = [0.4, 1.2, 2.8, 6.0];
+/// How much light one card's worth of opacity takes. Cards are mostly air and the light
+/// that a needle stops is partly scattered on through the crown, so this is under one.
+const FOLIAGE_EXTINCTION: f32 = 0.75;
 
 /// Points each sampler `program` declares at its unit.
 pub unsafe fn assign_units(gl: &glow::Context, program: glow::Program) {
@@ -155,6 +170,9 @@ pub struct Lighting {
     pub ao_texel: [f32; 2],
     /// Where the canopy map lies and how much it counts.
     pub canopy: CanopyPlacement,
+    /// Whether the foliage opacity map was drawn this frame, and how much one stored
+    /// unit of it stands for.
+    pub foliage: Option<f32>,
 }
 
 /// Where the canopy map was drawn: its centre on the ground, one over its half-width
@@ -239,6 +257,14 @@ impl Lighting {
             if let Some(l) = loc("u_canopy_heights") {
                 let h = self.canopy.heights;
                 gl.uniform_2_f32(Some(&l), h[0], h[1]);
+            }
+            if let Some(l) = loc("u_foliage_layers") {
+                let b = FOLIAGE_LAYERS;
+                gl.uniform_4_f32(Some(&l), b[0], b[1], b[2], b[3]);
+            }
+            if let Some(l) = loc("u_foliage") {
+                let (on, k) = self.foliage.map_or((0.0, 0.0), |unscale| (1.0, FOLIAGE_EXTINCTION * unscale));
+                gl.uniform_2_f32(Some(&l), on, k);
             }
         }
     }
@@ -489,9 +515,75 @@ impl Canopy {
     }
 }
 
+/// The crown seen from the sun, for how much of it the light has come through.
+///
+/// A deep opacity map (Yuksel and Keyser): the cards are drawn once for the first leaf
+/// the sun meets over each texel, and then again adding up their opacity into four
+/// layers, each reaching a set depth past that first leaf. A point in the crown reads
+/// how much foliage lies between it and the sun from the layers either side of its own
+/// depth. The shadow map alone can only say lit or not, so a leaf a hand's width behind
+/// the surface and one in the heart of the crown were shaded the same.
+struct Foliage {
+    depth: glow::Texture,
+    depth_fbo: glow::Framebuffer,
+    opacity: glow::Texture,
+    opacity_fbo: glow::Framebuffer,
+    draw: glow::Program,
+    /// Opacity is stored scaled by this, to fit a target that clips at one.
+    scale: f32,
+}
+
+impl Foliage {
+    unsafe fn new(gl: &glow::Context, float: bool) -> Self {
+        unsafe {
+            let depth = texture_2d(
+                gl,
+                FOLIAGE_SIZE,
+                FOLIAGE_SIZE,
+                glow::DEPTH_COMPONENT24,
+                glow::DEPTH_COMPONENT,
+                glow::UNSIGNED_INT,
+                glow::NEAREST,
+            );
+            let depth_fbo = gl.create_framebuffer().expect("foliage depth fbo");
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(depth_fbo));
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, Some(depth), 0);
+            gl.draw_buffers(&[glow::NONE]);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            // Eight-bit opacity runs out at a few cards' worth unless it is scaled down,
+            // and a half float has room for a whole crown.
+            let (format, ty, scale) = if float {
+                (glow::RGBA16F, glow::FLOAT, 1.0)
+            } else {
+                (glow::RGBA8, glow::UNSIGNED_BYTE, 1.0 / 12.0)
+            };
+            let opacity = texture_2d(gl, FOLIAGE_SIZE, FOLIAGE_SIZE, format, glow::RGBA, ty, glow::LINEAR);
+            let draw = compile_program(
+                gl,
+                &shaders::leaf_depth_vs(),
+                shaders::FOLIAGE_OPACITY_FS,
+                &crate::gpu::LEAF_ATTRIBS,
+            );
+            gl.use_program(Some(draw));
+            gl.uniform_1_i32(gl.get_uniform_location(draw, "u_albedo_tex").as_ref(), 0);
+            gl.uniform_1_i32(gl.get_uniform_location(draw, "u_foliage_depth").as_ref(), 1);
+            gl.use_program(None);
+            Self {
+                depth,
+                depth_fbo,
+                opacity_fbo: color_fbo(gl, opacity),
+                opacity,
+                draw,
+                scale,
+            }
+        }
+    }
+}
+
 pub struct Renderer {
     targets: Option<Targets>,
     canopy: Canopy,
+    foliage: Foliage,
     /// Whether half-float targets can be made here. Without them the frame still
     /// draws, clipped at white.
     float: bool,
@@ -560,6 +652,7 @@ impl Renderer {
             Self {
                 targets: None,
                 canopy: Canopy::new(gl),
+                foliage: Foliage::new(gl, float),
                 float,
                 max_samples: gl.get_parameter_i32(glow::MAX_SAMPLES).max(0),
                 vao: gl.create_vertex_array().expect("post vao"),
@@ -709,6 +802,72 @@ impl Renderer {
         }
     }
 
+    /// Draws the foliage opacity map from the sun, through the shadow's own projection so
+    /// the two line up, and returns what the lit shaders want told about it.
+    /// `depth_pass` is the alpha-tested leaf depth pass.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn foliage(
+        &self,
+        gl: &glow::Context,
+        depth_pass: &crate::gpu::LeafDepthPass,
+        leaves: &GpuLeaves,
+        material: &MaterialTextures,
+        p: LeafMaterialParams,
+        wind: &WindUniforms,
+        shadow: &ShadowFrustum,
+    ) -> Option<f32> {
+        if !leaves.has_cards() {
+            return None;
+        }
+        unsafe {
+            let f = &self.foliage;
+            plain(gl);
+            gl.viewport(0, 0, FOLIAGE_SIZE, FOLIAGE_SIZE);
+
+            // The first leaf over each texel.
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f.depth_fbo));
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_mask(true);
+            gl.clear_depth_f32(1.0);
+            gl.clear(glow::DEPTH_BUFFER_BIT);
+            depth_pass.draw(gl, leaves, shadow.view_proj, material, p, wind);
+
+            // Every leaf's opacity, into each layer deep enough to hold it.
+            gl.disable(glow::DEPTH_TEST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f.opacity_fbo));
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            gl.enable(glow::BLEND);
+            gl.blend_equation(glow::FUNC_ADD);
+            gl.blend_func(glow::ONE, glow::ONE);
+            gl.use_program(Some(f.draw));
+            wind.bind(gl, f.draw);
+            let u = |name: &str| gl.get_uniform_location(f.draw, name);
+            gl.uniform_matrix_4_f32_slice(u("u_light_view_proj").as_ref(), false, &shadow.view_proj.to_cols_array());
+            gl.uniform_2_f32(u("u_atlas_scale").as_ref(), p.atlas_scale[0], p.atlas_scale[1]);
+            gl.uniform_2_f32(u("u_atlas_front").as_ref(), p.atlas_front[0], p.atlas_front[1]);
+            gl.uniform_2_f32(u("u_atlas_back").as_ref(), p.atlas_back[0], p.atlas_back[1]);
+            let b = FOLIAGE_LAYERS;
+            gl.uniform_4_f32(u("u_foliage_layers").as_ref(), b[0], b[1], b[2], b[3]);
+            gl.uniform_1_f32(u("u_depth_range").as_ref(), shadow.depth_range);
+            gl.uniform_1_f32(u("u_scale").as_ref(), f.scale);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(f.depth));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(material.albedo));
+            leaves.bind_and_draw(gl);
+            gl.disable(glow::BLEND);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.use_program(None);
+            Some(1.0 / f.scale)
+        }
+    }
+
     /// Binds the camera depth target, cleared, for the depth pass to draw into.
     pub unsafe fn begin_prepass(&self, gl: &glow::Context) {
         unsafe {
@@ -812,6 +971,10 @@ impl Renderer {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.env.equirect));
             gl.active_texture(glow::TEXTURE0 + UNIT_CANOPY);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.canopy.blur[1]));
+            gl.active_texture(glow::TEXTURE0 + UNIT_FOLIAGE_DEPTH);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.foliage.depth));
+            gl.active_texture(glow::TEXTURE0 + UNIT_FOLIAGE_OPACITY);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.foliage.opacity));
             gl.active_texture(glow::TEXTURE0);
         }
     }
@@ -820,7 +983,16 @@ impl Renderer {
     /// unit they would override egui's own textures' filtering there.
     pub unsafe fn unbind_lighting(&self, gl: &glow::Context) {
         unsafe {
-            for unit in [UNIT_SHADOW, UNIT_SHADOW_CMP, UNIT_DFG, UNIT_AO, UNIT_EQUIRECT, UNIT_CANOPY] {
+            for unit in [
+                UNIT_SHADOW,
+                UNIT_SHADOW_CMP,
+                UNIT_DFG,
+                UNIT_AO,
+                UNIT_EQUIRECT,
+                UNIT_CANOPY,
+                UNIT_FOLIAGE_DEPTH,
+                UNIT_FOLIAGE_OPACITY,
+            ] {
                 gl.active_texture(glow::TEXTURE0 + unit);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }

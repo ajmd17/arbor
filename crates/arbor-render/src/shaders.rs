@@ -854,9 +854,54 @@ uniform float u_translucency;
 uniform float u_translucency_map;
 uniform int u_mode;
 uniform sampler2D u_albedo_tex;
+uniform sampler2D u_normal_tex;
 uniform sampler2D u_rough_tex;
 uniform sampler2D u_translucency_tex;
+// The crown seen from the sun (`render.rs`, `Foliage`): the depth of the first leaf over
+// each texel, and the opacity of everything behind it added up into four layers, each
+// reaching `u_foliage_layers` metres past that first leaf. `u_foliage`: x is 1 when the
+// map was drawn, y how much light one unit of stored opacity takes.
+uniform sampler2D u_foliage_depth;
+uniform sampler2D u_foliage_opacity;
+uniform vec4 u_foliage_layers;
+uniform vec2 u_foliage;
 out vec4 out_color;
+
+// The share of the sun that comes through the foliage between `sc` (a point in the
+// shadow's clip space) and the sun, read `back_m` metres nearer the sun than the point
+// itself so that a card does not shade itself.
+float foliage_transmittance(vec4 sc, float back_m) {
+    if (u_foliage.x <= 0.0) {
+        return 1.0;
+    }
+    vec3 p = sc.xyz / sc.w * 0.5 + 0.5;
+    if (p.x <= 0.0 || p.x >= 1.0 || p.y <= 0.0 || p.y >= 1.0 || p.z >= 1.0) {
+        return 1.0;
+    }
+    float first = textureLod(u_foliage_depth, p.xy, 0.0).r;
+    if (first >= 1.0) {
+        return 1.0;
+    }
+    float d = (p.z - first) * u_shadow_params.y - back_m;
+    vec4 o = textureLod(u_foliage_opacity, p.xy, 0.0);
+    vec4 b = u_foliage_layers;
+    // Piecewise linear through the layers, from nothing at the first leaf.
+    float opacity = 0.0;
+    if (d > 0.0) {
+        if (d < b.x) {
+            opacity = o.x * d / b.x;
+        } else if (d < b.y) {
+            opacity = mix(o.x, o.y, (d - b.x) / (b.y - b.x));
+        } else if (d < b.z) {
+            opacity = mix(o.y, o.z, (d - b.y) / (b.z - b.y));
+        } else if (d < b.w) {
+            opacity = mix(o.z, o.w, (d - b.z) / (b.w - b.z));
+        } else {
+            opacity = o.w;
+        }
+    }
+    return exp(-u_foliage.y * opacity);
+}
 
 void main() {
     // A leaf is one quad seen from both sides: the lit face and the underside are
@@ -912,6 +957,25 @@ void main() {
         vec3 kept = normalize(N - 2.0 * (1.0 - u_normal_blend) * dot(N, face) * face);
         N = normalize(mix(-N, kept, u_backface_volume));
     }
+    // The cluster bake leaves each blade's own facing in the normal map, which is all
+    // that stops a card of a hundred needles lighting as one flat sheet. It is laid
+    // over the crown-bent normal, the way the card's own plane would carry it, along
+    // the card's uv as the screen sees it change (Schuler's cotangent frame): the
+    // cards carry no tangents. The map's green runs up the image, which is -v.
+    {
+        vec3 dp1 = dFdx(v_world);
+        vec3 dp2 = dFdy(v_world);
+        vec2 duv1 = dFdx(v_card_uv);
+        vec2 duv2 = dFdy(v_card_uv);
+        vec3 face = cross(dp1, dp2);
+        vec3 t = cross(dp2, face) * duv1.x + cross(face, dp1) * duv2.x;
+        vec3 b = cross(dp2, face) * duv1.y + cross(face, dp1) * duv2.y;
+        t -= N * dot(N, t);
+        b -= N * dot(N, b);
+        float scale = inversesqrt(max(max(dot(t, t), dot(b, b)), 1e-20));
+        vec3 nm = texture(u_normal_tex, uv).xyz * 2.0 - 1.0;
+        N = normalize(t * (nm.x * scale) - b * (nm.y * scale) + N * nm.z);
+    }
     if (u_mode == 2) {
         out_color = vec4(N * 0.5 + 0.5, 1.0);
         return;
@@ -941,10 +1005,18 @@ void main() {
     vec2 tuft = env_dfg(s.NoV, rough);
     s.E = mix(tuft.xxx, tuft.yyy, s.f0);
 
-    // A needle crown lets light through in a thousand gaps, so shadow on foliage is
-    // not the yes-or-no the shadow map says.
+    // The shadow map says whether the straight line to the sun is clear. Where it is
+    // not, the light has still come through leaves rather than wood, and leaves pass
+    // some of it on: weakened by how much crown it crossed, and coloured by the blades
+    // it went through. That is what lets the light fall off into a crown instead of
+    // either reaching every leaf in it or none, and what keeps the inside green rather
+    // than grey.
     float NoL = dot(N, L);
-    float shadow = mix(1.0, soft_shadow(v_shadow, abs(NoL), 0.08, 8), u_self_shadow);
+    float hard = soft_shadow(v_shadow, abs(NoL), 0.08, 8);
+    float crown = foliage_transmittance(v_shadow, 0.3);
+    float peak = max(max(through_color.r, through_color.g), max(through_color.b, 1e-4));
+    vec3 passed = mix(vec3(1.0), through_color / peak, 0.5);
+    vec3 shadow = vec3(hard) + (1.0 - hard) * (1.0 - u_self_shadow) * crown * passed;
 
     // A leaf is a thin sheet that scatters light out of both faces: reflected back
     // off the lit face and transmitted through to the other, each close to Lambert.
@@ -959,22 +1031,30 @@ void main() {
     float forward = pow(saturate(dot(V, -L)), 4.0);
     float transmitted = u_translucency * through * (0.5 + 2.0 * forward);
     vec3 sun = u_sun_color * shadow;
-    vec3 color = ((albedo * reflected + through_color * transmitted) / PI
-        + specular_lobe(s, L, saturate(NoL)) * saturate(NoL)) * sun;
+    // The highlight is the sun mirrored, which only the clear line to it can give.
+    vec3 color = (albedo * reflected + through_color * transmitted) / PI * sun
+        + specular_lobe(s, L, saturate(NoL)) * saturate(NoL) * u_sun_color * hard;
 
     // Everything but the sun. The lit face gathers the environment it faces; the far
     // face gathers the one behind and passes on the translucent share of it. Leaves
     // buried in the crown see less of either, by the crown depth the card was built
-    // with and by what the screen can see crowding round them.
-    float visibility = screen_ao() * v_tint.a;
+    // with, by what the screen can see crowding round them, and by the crown hanging
+    // over them.
+    float visibility = screen_ao() * v_tint.a * canopy_sky(v_world);
+    // The far face looks into the crown, so what reaches it has the crown in the way
+    // twice over.
     vec3 gathered = albedo * irradiance(N) * (1.0 - s.E)
-        + through_color * irradiance(-N) * (0.5 * u_translucency);
+        + through_color * irradiance(-N) * (0.5 * u_translucency * v_tint.a);
+    // What a buried leaf sees in place of the sky is other leaves, and they pass on
+    // about a quarter of what reaches them, greener than it came. Without this the
+    // occluded share goes to black and the inside of a crown reads as grey soot.
+    vec3 filtered = visibility + (1.0 - visibility) * 0.25 * (through_color / peak);
     // The reflection is of one direction of sky, which the rest of the crown is far
     // likelier to block than the whole dome the diffuse gathers, so it is occluded
     // harder.
     vec3 spec = s.E * prefiltered_radiance(reflect(-V, N), rough) * s.energy
         * specular_occlusion(s.NoV, visibility * visibility, s.alpha);
-    color += gathered * multi_bounce(visibility, albedo) + spec;
+    color += gathered * filtered + spec;
     out_color = vec4(color * u_exposure, coverage);
 }"#;
 
@@ -1025,6 +1105,30 @@ void main() {
         discard;
     }
     out_color = vec4(1.0);
+}"#;
+
+/// Leaf cards seen from the sun, each adding its opacity into every layer of the foliage
+/// map deep enough to hold it (see `Foliage` in `render.rs`).
+pub const FOLIAGE_OPACITY_FS: &str = r#"#version 150
+in vec2 v_card_uv;
+in float v_atlas_v;
+uniform vec2 u_atlas_scale;
+uniform vec2 u_atlas_front;
+uniform vec2 u_atlas_back;
+uniform sampler2D u_albedo_tex;
+// The first leaf the sun meets over each texel of this same target.
+uniform sampler2D u_foliage_depth;
+uniform vec4 u_foliage_layers;
+// Metres per unit of stored depth.
+uniform float u_depth_range;
+uniform float u_scale;
+out vec4 out_color;
+void main() {
+    vec2 cell = gl_FrontFacing ? u_atlas_front : u_atlas_back;
+    float a = texture(u_albedo_tex, cell + vec2(0.0, v_atlas_v) + v_card_uv * u_atlas_scale).a;
+    float first = texelFetch(u_foliage_depth, ivec2(gl_FragCoord.xy), 0).r;
+    float d = (gl_FragCoord.z - first) * u_depth_range;
+    out_color = a * u_scale * step(vec4(d), u_foliage_layers);
 }"#;
 
 /// Leaf cards seen from straight above, each taking its share of what light is left:

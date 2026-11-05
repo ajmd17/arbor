@@ -286,12 +286,13 @@
         even_roll: 1.0,
         normal_blend: 0.8,
         curvature: 0.35,
-        // Fitted to the reference's colour under a white light (`tools/fitcolour.py`).
-        // The scans are a yellower green than a birch crown reads from across a field,
-        // so the tint lifts blue against the other two rather than darkening anything;
-        // and a birch blade lets through a third of what the scan's map says, or the
-        // whole crown glows yellow with the sun anywhere behind it.
-        tint: (1.194, 1.194, 2.782),
+        // Fitted to the reference's colour under a white light, held to a real leaf's
+        // colour (`tools/fitalbedo.py ... broadleaf`: green at most 0.16, red and blue
+        // at most 0.75 and 0.45 of it). The photograph alone asked for blue as high as
+        // red, which turned the crown mint under a blue sky. A birch blade lets
+        // through a third of what the scan's map says, or the whole crown glows yellow
+        // with the sun anywhere behind it.
+        tint: (1.213, 1.152, 1.605),
         saturation: 0.923,
         transmission: 0.32,
         hue_variance: 0.10,

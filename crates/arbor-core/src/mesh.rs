@@ -593,9 +593,17 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
         // than the budget without it, and the stem turning more than a span may
         // across it.
         let turns = path.dirs[prev].angle_between(path.dirs[i + 1]) > max_turn;
-        if !path.pinned[i] && !turns && ring_error(path, mp, phase, prev, i, i + 1) < limit {
-            // Dropped. The next ring is measured against the same neighbour, so a long
-            // smooth run collapses rather than losing every other ring.
+        // Every ring dropped since the last one kept is measured against the span that
+        // would now be drawn across it, not only this one against its neighbour. Each
+        // ring of a gentle bow sits on the line to the next, so measured one at a time
+        // they all went, and the birch's trunk was swept as a single straight span from
+        // the ground to the top. Its limbs leave the bowed skeleton, and they started up
+        // to two and a half trunk radii off the bark — and three in a gust, which bends
+        // the true trunk along a curve and the drawn one along its chord.
+        let drifts = (prev + 1..=i).any(|k| ring_error(path, mp, phase, prev, k, i + 1) >= limit);
+        if !path.pinned[i] && !turns && !drifts {
+            // Dropped. The next ring is measured against the same kept neighbour, so a
+            // long smooth run collapses rather than losing every other ring.
             i += 1;
         } else {
             keep.push(i);
@@ -691,7 +699,9 @@ impl StemPath {
         let mut radii: Vec<f32> = Vec::with_capacity(stem.len() + 1);
         let mut pinned: Vec<bool> = Vec::with_capacity(stem.len() + 1);
         // Only a branch sways about where it is attached; the trunk bends by height
-        // alone, which is smooth across any ring spacing, so it pins nothing.
+        // alone, so it pins nothing. That is smooth, but not straight: its rings are
+        // kept close enough by `keep_rings` holding the whole span to the budget, which
+        // keeps the drawn bend within a fifth of a radius of the true one.
         let sways = sk.nodes[first].level > 0;
         // How wide the socket may get before it stops being swallowed by the parent.
         let mut socket_ceiling = f32::INFINITY;
@@ -1597,11 +1607,15 @@ mod tests {
                     continue;
                 }
                 // The shading normals are built outward by construction, so they say
-                // which side is outside.
-                let shading: Vec3 = tri
-                    .iter()
-                    .map(|&i| Vec3::from(mesh.normals[i as usize]))
-                    .sum();
+                // which side is outside — where they agree. A triangle across a root
+                // groove, or down a three-sided twig, has corners facing opposite
+                // walls, and their sum points nowhere in particular.
+                let normals: Vec<Vec3> =
+                    tri.iter().map(|&i| Vec3::from(mesh.normals[i as usize])).collect();
+                if normals[0].dot(normals[1]).min(normals[1].dot(normals[2])).min(normals[2].dot(normals[0])) <= 0.0 {
+                    continue;
+                }
+                let shading: Vec3 = normals.iter().sum();
                 assert!(
                     geometric.normalize().dot(shading.normalize_or_zero()) > 0.0,
                     "{}: triangle {tri:?} is wound inward",
@@ -2510,6 +2524,42 @@ mod tests {
             }
             assert!(checked > 30, "{}: only {checked} limbs measured", params.name);
             assert!(worst > 0.05, "{}: no limb bends at all, so nothing was tested", params.name);
+        }
+    }
+
+    #[test]
+    fn thinning_keeps_every_dropped_ring_on_the_span_drawn_across_it() {
+        // Measured one at a time against its neighbour, every ring of a gentle bow could
+        // go, and the birch's trunk was drawn as one straight span from the ground to
+        // the top with its limbs starting beside it. Each ring of the dense stem has to
+        // lie within the budget of the span the mesh actually draws past it.
+        for (name, src) in crate::species::builtin_presets() {
+            let params = parse_species(src).unwrap();
+            let mp = &params.mesh;
+            let tol = mp.irregularity.ring_tolerance.min(mp.silhouette_tolerance);
+            let sk = crate::grow(&params);
+            let children = child_index(&sk);
+            let mut checked = 0;
+            for stem in sk.stem_runs() {
+                let Some(dense) = StemPath::build_dense(&sk, &stem, mp, params.seed, &children) else { continue };
+                let keep = keep_rings(&dense, mp, seed_phases(params.seed));
+                for w in keep.windows(2) {
+                    let (a, c) = (dense.points[w[0]], dense.points[w[1]]);
+                    let span = c - a;
+                    for k in w[0] + 1..w[1] {
+                        let b = dense.points[k];
+                        let t = ((b - a).dot(span) / span.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                        let off = (a + span * t - b).length();
+                        assert!(
+                            off < tol + 1e-4,
+                            "{name}: a dropped ring of stem {} sits {off} off the span drawn past it",
+                            stem[0]
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            assert!(checked > 0, "{name}: thinning dropped nothing, so nothing was tested");
         }
     }
 }
