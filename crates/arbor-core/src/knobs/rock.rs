@@ -1,8 +1,7 @@
 //! Controls for a rock.
 
 use super::{knob, Group};
-use crate::ranged::Ranged;
-use crate::rocks::{RockFace, RockTemplate};
+use crate::rocks::RockTemplate;
 
 pub static SHAPE: Group<RockTemplate> = Group {
     title: "Shape",
@@ -61,29 +60,3 @@ pub static MOSS: Group<RockTemplate> = Group {
 };
 
 pub static GROUPS: [&Group<RockTemplate>; 3] = [&SHAPE, &SURFACE, &MOSS];
-
-/// A cliff face's carving: shown for a rock that is one.
-pub static FACE: Group<RockFace<Ranged>> = Group {
-    title: "Face",
-    knobs: &[
-        knob("Joint spacing", (1.0, 40.0), "How far apart the joints the stone has broken along run across the face, metres.", |p| &mut p.joint_spacing),
-        knob("Joint aspect", (0.3, 6.0), "How much taller than wide the blocks between the joints stand.", |p| &mut p.joint_aspect),
-        knob("Joint sets", (1.0, 4.0), "How many ways the joints run: the same few faces come round again across the cliff.", |p| &mut p.joint_sets),
-        knob("Turn", (0.0, 60.0), "How far the blocks' faces turn from the cliff's own, degrees.", |p| &mut p.turn),
-        knob("Relief", (0.0, 15.0), "How far the blocks stand proud of or back from one another, metres.", |p| &mut p.relief),
-        knob("Detail", (0.0, 1.0), "A smaller breaking of each block, as a share of the first.", |p| &mut p.detail),
-        knob("Chimneys", (0.0, 12.0), "Chimneys running up the face, in each hundred metres across.", |p| &mut p.chimneys),
-        knob("Chimney depth", (0.0, 20.0), "How deep a chimney cuts into the face, metres.", |p| &mut p.chimney_depth),
-        knob("Chimney width", (0.2, 10.0), "How wide a chimney is, metres.", |p| &mut p.chimney_width),
-        knob("Flutes", (0.0, 4.0), "Grooves worn down the face, as down chalk: how deep, metres.", |p| &mut p.flutes),
-        knob("Flute spacing", (0.3, 12.0), "How far apart the flutes are, metres.", |p| &mut p.flute_spacing),
-        knob("Ledges", (0.0, 5.0), "How far each bed of the stone stands out or back from the next, as ledges and roofs, metres.", |p| &mut p.ledges),
-        knob("Ledge spacing", (0.5, 30.0), "How far apart the beds are, metres.", |p| &mut p.ledge_spacing),
-        knob("Lean", (-15.0, 45.0), "Degrees the face leans back from upright.", |p| &mut p.lean),
-        knob("Brow", (0.0, 20.0), "How far the top rounds over, metres.", |p| &mut p.brow),
-        knob("Foot", (0.0, 10.0), "How far the foot flares out, metres.", |p| &mut p.foot),
-        knob("Tuck", (0.0, 20.0), "How far the ends curve back, so a neighbouring face set over them hides the join, metres.", |p| &mut p.tuck),
-        knob("Bow", (-10.0, 10.0), "How far the face curves back across its width, metres.", |p| &mut p.bow),
-    ],
-    counts: &[],
-};
