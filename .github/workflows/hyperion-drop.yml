@@ -1,0 +1,64 @@
+# Builds arbor-ffi the way tools/hyperion-drop.sh does and publishes it as a release
+# asset, arbor-hyperion-<tag>.zip, which Hyperion's ArborToolkit plugin downloads at a
+# pinned tag and SHA-256 when it has no local drop. The texture sets stay out of it:
+# Hyperion keeps them as BC texture assets in the plugin's Content.
+#
+# Push a tag named hyperion-drop-<anything> to publish one.
+name: Hyperion drop
+
+on:
+  push:
+    tags: ["hyperion-drop-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      # the script calls the toolchain by its full name, as a machine with the GNU one as default needs
+      - name: Name the MSVC toolchain
+        shell: bash
+        run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --target x86_64-pc-windows-msvc
+
+      - name: Build
+        shell: bash
+        run: tools/hyperion-drop.sh --out dist/arbor
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          name="arbor-hyperion-${GITHUB_REF_NAME}.zip"
+          cd dist/arbor
+          7z a -tzip "../$name" lib include native-libs.txt VERSION
+          cd ..
+          sha256sum "$name" | tee "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arbor-hyperion
+          path: dist/arbor-hyperion-*
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/${{ steps.package.outputs.name }}" \
+            "dist/${{ steps.package.outputs.name }}.sha256" \
+            --title "Hyperion drop $GITHUB_REF_NAME" \
+            --notes "arbor-ffi for Hyperion's ArborToolkit plugin, built from $GITHUB_SHA. Pin the tag and the SHA-256 in the plugin's Module.cmake."

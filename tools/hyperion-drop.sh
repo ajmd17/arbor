@@ -3,33 +3,39 @@
 # it rather than building Rust itself:
 #
 #   tools/hyperion-drop.sh ~/Dev/HyperionEngine
+#   tools/hyperion-drop.sh --out dist/arbor      (what the release workflow packs)
 #
-# Writes Source/Plugins/ArborToolkit/External/arbor/ there:
+# Writes Source/Plugins/ArborToolkit/External/arbor/ there, or the folder --out names:
 #   lib/arbor_ffi.lib     static library, MSVC ABI, dynamic CRT (/MD) as Hyperion builds
 #   include/arbor.h
 #   native-libs.txt       system libraries the static library needs linked beside it
-#   textures/             the texture sets the built-in species name
+#   textures/             the texture sets the built-in species name, which the plugin's
+#                         buildarbortextures commandlet turns into BC texture assets; the
+#                         release package leaves them out
 #   VERSION               the arbor commit it was built from
 #
 # Needs the MSVC toolchain beside the default GNU one:
 #   rustup toolchain install stable-x86_64-pc-windows-msvc
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-    echo "usage: $0 <HyperionEngine dir>" >&2
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ $# -eq 2 ] && [ "$1" = "--out" ]; then
+    mkdir -p "$2"
+    out="$(cd "$2" && pwd)"
+elif [ $# -eq 1 ]; then
+    hyperion="$(cd "$1" && pwd)"
+    plugin="$hyperion/Source/Plugins/ArborToolkit"
+    if [ ! -d "$plugin" ]; then
+        echo "no ArborToolkit plugin in $hyperion" >&2
+        exit 1
+    fi
+    out="$plugin/External/arbor"
+else
+    echo "usage: $0 <HyperionEngine dir> | --out <dir>" >&2
     exit 2
 fi
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-hyperion="$(cd "$1" && pwd)"
-plugin="$hyperion/Source/Plugins/ArborToolkit"
-out="$plugin/External/arbor"
 target=x86_64-pc-windows-msvc
 cd "$root"
-
-if [ ! -d "$plugin" ]; then
-    echo "no ArborToolkit plugin in $hyperion" >&2
-    exit 1
-fi
 
 # `--print native-static-libs` is how rustc says what the library leans on. It goes
 # to stderr, alongside cargo's own progress.

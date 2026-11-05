@@ -15,17 +15,19 @@
 //! reason in `arbor_last_error`.
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arbor_core::controls::{self, Control, Kind, Value};
 use arbor_core::cover::{CoverTemplate, build_cover, builtin_cover_presets, parse_cover_template};
-use arbor_core::gltf::{self, CoverTextures, ExportOptions, Exporter, RockTextures};
+use arbor_core::gltf::{self, CoverTextures, ExportOptions, Exporter, RockTextures, Textures};
 use arbor_core::rocks::{RockTemplate, build_rock, builtin_rock_presets, parse_rock_template};
 use arbor_core::species::{SpeciesTemplate, builtin_presets, parse_template};
-use arbor_core::{Ranged, build_leaves, build_mesh, grow};
+use arbor_core::textures::{self, MapSource};
+use arbor_core::{Bitmap, Ranged, build_leaves, build_mesh, grow};
 
 pub const ARBOR_TREE: u32 = 0;
 pub const ARBOR_COVER: u32 = 1;
@@ -110,6 +112,46 @@ fn texture_dir() -> Option<PathBuf> {
     TEXTURE_DIR.lock().ok().and_then(|d| d.clone())
 }
 
+/// Where tree maps come from: the host's reader when it has set one, else the folder.
+#[derive(Clone, Copy)]
+struct MapReader {
+    read: ArborMapReader,
+    user: usize,
+    /// Counts up each time a reader is set, so textures prepared from an earlier one
+    /// are not taken for this one's.
+    generation: u64,
+}
+
+static MAP_READER: Mutex<Option<MapReader>> = Mutex::new(None);
+
+fn map_reader() -> Option<MapReader> {
+    MAP_READER.lock().ok().and_then(|r| *r)
+}
+
+/// What a reader hands a map to.
+pub struct ArborMapSink {
+    bitmap: Option<Bitmap>,
+}
+
+/// Asks the host for a map by its file name, as `<name>_<map>.png`. It answers by
+/// passing the pixels to `arbor_map_sink_put` and returning true, or returns false
+/// when it has no such map. It may be called from any thread, and from several at once.
+pub type ArborMapReader = unsafe extern "C" fn(user: *mut c_void, file: *const c_char, sink: *mut ArborMapSink) -> bool;
+
+impl MapSource for MapReader {
+    fn read(&self, file: &str) -> Option<Vec<u8>> {
+        textures::encode_png(&self.read_bitmap(file)?).ok()
+    }
+
+    fn read_bitmap(&self, file: &str) -> Option<Bitmap> {
+        let file = CString::new(file).ok()?;
+        let mut sink = ArborMapSink { bitmap: None };
+        // The host promised the reader is safe to call while it is set.
+        let found = unsafe { (self.read)(self.user as *mut c_void, file.as_ptr(), &mut sink) };
+        if found { sink.bitmap } else { None }
+    }
+}
+
 impl Template for SpeciesTemplate {
     fn controls(&self) -> Vec<Control<Self>> {
         controls::tree(self)
@@ -140,7 +182,14 @@ impl Template for SpeciesTemplate {
         let (mp, lp) = (&params.mesh, &params.leaves);
         let key = format!(
             "{:?} {:?}",
-            (texture_dir(), &mp.bark_texture, mp.dead_wood_weathering, mp.bark_tint, mp.dead_wood_color),
+            (
+                map_reader().map(|r| r.generation),
+                texture_dir(),
+                &mp.bark_texture,
+                mp.dead_wood_weathering,
+                mp.bark_tint,
+                mp.dead_wood_color,
+            ),
             (
                 lp.enabled,
                 &lp.texture,
@@ -157,8 +206,10 @@ impl Template for SpeciesTemplate {
             match &*prepared {
                 Prepared::Tree(k, e) if *k == key => e.clone(),
                 _ => {
-                    let options = ExportOptions { textures: texture_dir(), wind: true };
-                    let e = Arc::new(Exporter::new(&params, &options)?);
+                    let e = Arc::new(match map_reader() {
+                        Some(reader) => Exporter::with_textures(Textures::load(&params, &reader)?, true),
+                        None => Exporter::new(&params, &ExportOptions { textures: texture_dir(), wind: true })?,
+                    });
                     *prepared = Prepared::Tree(key, e.clone());
                     e
                 }
@@ -531,6 +582,44 @@ pub unsafe extern "C" fn arbor_set_texture_dir(dir: *const c_char) -> bool {
     guard(false, || {
         let path = if dir.is_null() { None } else { Some(PathBuf::from(unsafe { read_str(dir) }?)) };
         *TEXTURE_DIR.lock().map_err(|_| "texture folder poisoned".to_string())? = path;
+        Ok(true)
+    })
+}
+
+/// Reads tree maps through `reader` in place of a folder; null goes back to the folder.
+/// `user` is passed back to every call.
+///
+/// # Safety
+/// `reader` is safe to call from any thread, with `user`, until another is set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbor_set_map_reader(reader: Option<ArborMapReader>, user: *mut c_void) -> bool {
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+    guard(false, || {
+        let reader = reader.map(|read| MapReader {
+            read,
+            user: user as usize,
+            generation: GENERATION.fetch_add(1, Ordering::Relaxed) + 1,
+        });
+        *MAP_READER.lock().map_err(|_| "map reader poisoned".to_string())? = reader;
+        Ok(true)
+    })
+}
+
+/// A map's pixels, `width` x `height` RGBA8 rows top first, copied in. Call it once from
+/// inside a reader.
+///
+/// # Safety
+/// `sink` is the one the reader was given; `rgba` holds `width * height * 4` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbor_map_sink_put(sink: *mut ArborMapSink, width: u32, height: u32, rgba: *const u8) -> bool {
+    guard(false, || {
+        if sink.is_null() || rgba.is_null() {
+            return Err("null map sink or pixels".to_string());
+        }
+        let len = width as usize * height as usize * 4;
+        let pixels = unsafe { std::slice::from_raw_parts(rgba, len) }.to_vec();
+        let bitmap = Bitmap::from_rgba(width, height, pixels).ok_or_else(|| format!("bad {width}x{height} map"))?;
+        unsafe { (*sink).bitmap = Some(bitmap) };
         Ok(true)
     })
 }

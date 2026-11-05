@@ -28,6 +28,12 @@ pub const TRANSLUCENCY: &str = "translucency";
 pub trait MapSource {
     /// The bytes of `file`, or `None` when there is no such file.
     fn read(&self, file: &str) -> Option<Vec<u8>>;
+
+    /// `file` decoded. A source that holds pixels rather than files answers this
+    /// directly, and `read` for it encodes them.
+    fn read_bitmap(&self, file: &str) -> Option<Bitmap> {
+        decode(&self.read(file)?)
+    }
 }
 
 /// A folder of maps on disk.
@@ -64,7 +70,7 @@ pub fn decode(bytes: &[u8]) -> Option<Bitmap> {
 
 /// One map of the set called `name`, decoded.
 pub fn load_bitmap<S: MapSource + ?Sized>(source: &S, name: &str, map: &str) -> Option<Bitmap> {
-    decode(&source.read(&map_file(name, map))?)
+    source.read_bitmap(&map_file(name, map))
 }
 
 /// The albedo, normal and roughness maps a set of bark is drawn with. `None` when there

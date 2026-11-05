@@ -131,3 +131,27 @@ fn nonsense_fails_with_a_reason() {
     assert!(unsafe { arbor_recipe_from_ron(ARBOR_ROCK, junk.as_ptr()) }.is_null());
     assert!(unsafe { arbor_recipe_from_preset(7, name.as_ptr()) }.is_null());
 }
+
+#[test]
+fn trees_take_their_maps_from_a_reader_when_one_is_set() {
+    use std::sync::Mutex;
+
+    static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn reader(_: *mut std::ffi::c_void, file: *const std::ffi::c_char, sink: *mut ArborMapSink) -> bool {
+        let file = unsafe { CStr::from_ptr(file) }.to_string_lossy().into_owned();
+        ASKED.lock().unwrap().push(file.clone());
+        let pixels = [128u8; 8 * 8 * 4];
+        file.contains("_albedo") && unsafe { arbor_map_sink_put(sink, 8, 8, pixels.as_ptr()) }
+    }
+
+    assert!(unsafe { arbor_set_map_reader(Some(reader), std::ptr::null_mut()) });
+    let r = preset(ARBOR_TREE, "hazel");
+    let out = glb(r);
+    unsafe { arbor_recipe_free(r) };
+    assert!(unsafe { arbor_set_map_reader(None, std::ptr::null_mut()) });
+
+    let asked = ASKED.lock().unwrap();
+    assert!(asked.iter().any(|f| f.ends_with("_albedo.png")), "asked for {asked:?}");
+    assert!(json(&out).contains("\"images\""), "no images in the glb");
+}

@@ -82,6 +82,15 @@ const char* arbor_last_error(void);
 /* Where tree textures are read from; NULL forgets it. Cover and rocks bake their own. */
 bool arbor_set_texture_dir(const char* dir);
 
+/* Tree maps from the host in place of a folder. The reader is asked for a map by file name,
+   "<name>_<map>.png", answers with arbor_map_sink_put and true, or false when it has none.
+   It may be called from any thread, and from several at once. NULL goes back to the folder. */
+typedef struct ArborMapSink ArborMapSink;
+typedef bool (*ArborMapReader)(void* user, const char* file, ArborMapSink* sink);
+bool arbor_set_map_reader(ArborMapReader reader, void* user);
+/* width x height RGBA8, rows top first, copied in. */
+bool arbor_map_sink_put(ArborMapSink* sink, uint32_t width, uint32_t height, const uint8_t* rgba);
+
 uint32_t arbor_preset_count(uint32_t kind);
 const char* arbor_preset_name(uint32_t kind, uint32_t i);
 
