@@ -360,11 +360,14 @@ pub fn cover(template: &CoverTemplate) -> Vec<Control<CoverTemplate>> {
 }
 
 /// Every control of a rock.
-pub fn rock(_template: &RockTemplate) -> Vec<Control<RockTemplate>> {
+pub fn rock(template: &RockTemplate) -> Vec<Control<RockTemplate>> {
     let mut list = List::<RockTemplate>::new();
     list.section("Rock");
     for group in knobs::rock::GROUPS {
         list.group("", |t, _| Some(t), 0, group);
+    }
+    if template.face.is_some() {
+        list.group("", |t, _| t.face.as_mut(), 0, &knobs::rock::FACE);
     }
     list.out
 }

@@ -339,7 +339,7 @@ impl Simplifier {
             let uv0 = tri.map(|v| self.chart_st(v, chart));
             let uv1 = tri.map(|v| self.chart_st(if v == a { b } else { v }, chart));
             let (s0, s1) = (signed_area(uv0), signed_area(uv1));
-            if s0 * s1 <= 0.0 || s1.abs() < 1e-9 {
+            if s0 * s1 <= 0.0 || s1.abs() < 1e-8 {
                 return None;
             }
             let q1 = quality(after);

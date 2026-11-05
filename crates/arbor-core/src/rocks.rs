@@ -42,8 +42,11 @@ use crate::cluster::Bitmap;
 use crate::ranged::{key, Ranged, Scalar};
 use crate::seed::PortableRng;
 
+mod face;
 mod simplify;
 
+pub use face::RockFace;
+use face::{FaceField, BACK_SHARE};
 use simplify::{Simplifier, Source};
 
 pub const BOULDER_RON: &str = include_str!("../../../assets/rocks/boulder.ron");
@@ -51,6 +54,8 @@ pub const MOSSY_BOULDER_RON: &str = include_str!("../../../assets/rocks/mossy_bo
 pub const SLAB_RON: &str = include_str!("../../../assets/rocks/slab.ron");
 pub const STONE_RON: &str = include_str!("../../../assets/rocks/stone.ron");
 pub const GNEISS_RON: &str = include_str!("../../../assets/rocks/gneiss.ron");
+pub const SEA_CLIFF_RON: &str = include_str!("../../../assets/rocks/sea_cliff.ron");
+pub const CHALK_CLIFF_RON: &str = include_str!("../../../assets/rocks/chalk_cliff.ron");
 
 /// Where presets saved from the viewer go, and are found by name from the CLI.
 pub const CUSTOM_ROCK_DIR: &str = "assets/rocks/custom";
@@ -62,6 +67,8 @@ pub fn builtin_rock_presets() -> Vec<(&'static str, &'static str)> {
         ("slab", SLAB_RON),
         ("stone", STONE_RON),
         ("gneiss", GNEISS_RON),
+        ("sea_cliff", SEA_CLIFF_RON),
+        ("chalk_cliff", CHALK_CLIFF_RON),
     ]
 }
 
@@ -84,6 +91,8 @@ const MAX_LODS: usize = 4;
 /// Quads along each edge of each cube face the LODs are cut down from: fewest and most.
 const MIN_SOURCE: u32 = 24;
 const MAX_SOURCE: u32 = 128;
+/// A cliff face carries its joints, ledges and chimneys in the mesh over tens of metres.
+const MAX_CLIFF_SOURCE: u32 = 224;
 /// Smallest and largest sheet of maps, texels a side.
 const MIN_TEXTURE: u32 = 64;
 const MAX_TEXTURE: u32 = 4096;
@@ -103,6 +112,9 @@ pub struct RockParams<V = f32> {
     pub shape: RockShape<V>,
     pub surface: RockSurface<V>,
     pub moss: RockMoss<V>,
+    /// Set for a cliff face, carved across its front where a boulder is cut all round:
+    /// see `face`.
+    pub face: Option<RockFace<V>>,
     pub colour: RockColour,
     /// Finest first.
     pub lod: Vec<RockLod>,
@@ -117,6 +129,7 @@ impl Default for RockParams {
             shape: RockShape::default(),
             surface: RockSurface::default(),
             moss: RockMoss::default(),
+            face: None,
             colour: RockColour::default(),
             lod: vec![
                 RockLod { triangles: 1600, screen_size: 0.0 },
@@ -141,6 +154,7 @@ impl<V: Scalar> RockParams<V> {
             shape: self.shape.map(&key(at, "shape"), f),
             surface: self.surface.map(&key(at, "surface"), f),
             moss: self.moss.map(&key(at, "moss"), f),
+            face: self.face.as_ref().map(|face| face.map(&key(at, "face"), f)),
             colour: self.colour.clone(),
             lod: self.lod.clone(),
             texture: self.texture.clone(),
@@ -669,6 +683,8 @@ struct Sample {
     chip: f32,
     /// On a ledge's flat, where water and soil sit.
     tread: f32,
+    /// Down in a cleft or chimney of a cliff face, 0 to 1.
+    deep: f32,
     /// In a crack, in a pit, in a small hollow of the grain.
     crack: f32,
     pit: f32,
@@ -726,13 +742,16 @@ struct Surface {
     chips: Vec<Chip>,
     cracks: Vec<Crack>,
     salt: u32,
+    /// A cliff face's carved front, where the rock is one.
+    field: Option<FaceField>,
 }
 
 impl Surface {
     fn new(p: &RockParams) -> Self {
         let mut rng = PortableRng::seed_from_u64(p.seed ^ 0x0B0C_4000_5EED_0001);
         let s = &p.shape;
-        let facets = (s.facets.round().max(0.0) as u32).min(MAX_FACETS);
+        let cliff = p.face.is_some();
+        let facets = if cliff { 0 } else { (s.facets.round().max(0.0) as u32).min(MAX_FACETS) };
         let depth = s.facet_depth.clamp(0.0, 0.8);
         let asked = Vec3::new(s.width, s.height, s.depth).max(Vec3::splat(0.02)) * 0.5;
         // Each face the best of a few tries at keeping clear of those before it, so the
@@ -763,10 +782,10 @@ impl Surface {
         let bedding = Vec3::new(rng.random_range(-0.3f32..0.3), 1.0, rng.random_range(-0.3f32..0.3)).normalize();
         let salt: u32 = rng.random();
         let sharpness = s.sharpness.clamp(2.0, 80.0);
-        if s.flat_top > 0.0 {
+        if s.flat_top > 0.0 && !cliff {
             faces.push((bedding, s.flat_top.clamp(0.1, 1.0)));
         }
-        if s.sides > 0.0 {
+        if s.sides > 0.0 && !cliff {
             let share = s.sides.clamp(0.1, 1.0);
             for n in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
                 faces.push((n, share));
@@ -776,8 +795,10 @@ impl Surface {
 
         // The cuts take the rock in from the size it was asked for, so it is scaled back
         // out until its faces stand where width, height and depth say.
-        let mut half = asked;
-        for _ in 0..2 {
+        // A cliff face is a box as asked, reaching back from the face most of its depth
+        // behind the point its rays leave from.
+        let mut half = if cliff { Vec3::new(asked.x, asked.y, asked.z * 2.0 * (1.0 - BACK_SHARE)) } else { asked };
+        for _ in 0..if cliff { 0 } else { 2 } {
             let planes = set(half);
             let radius = (half.x + half.y + half.z) / 3.0;
             let mut lo = Vec3::splat(-0.3) * half;
@@ -786,7 +807,7 @@ impl Surface {
                 for j in 0..24 {
                     let (az, el) = (i as f32 / 48.0 * std::f32::consts::TAU, (j as f32 + 0.5) / 24.0 * std::f32::consts::PI);
                     let d = Vec3::new(el.sin() * az.cos(), el.cos(), el.sin() * az.sin());
-                    let p = d * half * polytope(&planes, &[], false, d, half, radius, sharpness / radius).r;
+                    let p = d * half * polytope(&planes, &[], None, false, d, half, radius, sharpness / radius).r;
                     lo = lo.min(p);
                     hi = hi.max(p);
                 }
@@ -794,9 +815,16 @@ impl Surface {
             half *= asked / ((hi - lo) * 0.5).max(half * 0.3);
         }
         let mut planes = set(half);
-        // Then the flat it sits on, one more plane, left out of the sizing: the height
-        // asked for is to where the rock would have gone on below it.
-        planes.push((Vec3::NEG_Y, s.flat_bottom.clamp(0.0, 0.9) * half.y));
+        if cliff {
+            // Its sides, top, back and the ground it stands on; its front is the face.
+            let back = asked.z * 2.0 * BACK_SHARE;
+            planes.extend([(Vec3::X, half.x), (Vec3::NEG_X, half.x), (Vec3::Y, half.y), (Vec3::NEG_Y, half.y), (Vec3::NEG_Z, back)]);
+        } else {
+            // Then the flat it sits on, one more plane, left out of the sizing: the height
+            // asked for is to where the rock would have gone on below it.
+            planes.push((Vec3::NEG_Y, s.flat_bottom.clamp(0.0, 0.9) * half.y));
+        }
+        let field = p.face.as_ref().map(|face| FaceField::new(face, half, half.z, p.seed));
 
         let mut surface = Self {
             planes,
@@ -816,6 +844,7 @@ impl Surface {
             chips: Vec::new(),
             cracks: Vec::new(),
             salt,
+            field,
         };
 
         // Chips struck off the edges: some big enough for the mesh to carry, and three
@@ -949,7 +978,7 @@ impl Surface {
         let q = e / r_m;
 
         let k = self.wear_sharpness(d);
-        let cut = polytope(&self.planes, &self.chips, texel.is_some(), d, self.half, r_m, k);
+        let cut = polytope(&self.planes, &self.chips, self.field.as_ref(), texel.is_some(), d, self.half, r_m, k);
         let edge = cut.edge;
         let r = cut.r * (1.0 + s.bulge * self.noise.fbm(q * s.bulge_scale.max(0.1), 3));
 
@@ -981,6 +1010,13 @@ impl Surface {
         sample.plate = 0.5;
         if let Some(tx) = texel {
             let f = &self.surface;
+            // The maps' detail is laid where the stone is, in metres. Laid on the ellipsoid
+            // the rock was cut from, it stretches across a deep cut's flat face from the
+            // middle out, which on a big slab reads as a star of streaks.
+            let at = e * r;
+            if let Some(field) = &self.field {
+                sample.deep = field.deep_at(at.x, at.y) * smoothstep(0.0, 0.4, cut.facing.z);
+            }
             // Plates flaking off the stone where it has weathered into them, and a finer
             // flaking over those: the maps' alone, since a step a centimetre high moves the
             // outline of a rock by nothing, and in the mesh would only blur.
@@ -1003,11 +1039,11 @@ impl Surface {
                     // three texels, so a step reads as eroded stone and not as a drawn line.
                     let cell = size * 0.11;
                     let rise = (3.0 * tx).max(0.12 * cell);
-                    let big = self.plates(e, cell, rise, self.salt, bedded, level);
+                    let big = self.plates(at, cell, rise, self.salt, bedded, level);
                     // Thick in one stretch, thinning to nothing in the next, so a plate's
                     // edge stands out along some of its length and runs back into the stone
                     // along the rest.
-                    let thick = smoothstep(-0.5, 0.6, self.noise2.fbm(e / (size * 0.6) + Vec3::new(0.0, 0.0, 91.0), 3)) * 1.6;
+                    let thick = smoothstep(-0.5, 0.6, self.noise2.fbm(at / (size * 0.6) + Vec3::new(0.0, 0.0, 91.0), 3)) * 1.6;
                     out += s.flake_step * r_m * mask * thick * (big.h - bedded);
                     let height = (big.h - bedded + PLATE_LEVELS) / (2.0 * PLATE_LEVELS);
                     sample.plate = height.clamp(0.0, 1.0) * mask + 0.5 * (1.0 - mask);
@@ -1024,8 +1060,8 @@ impl Surface {
                 let cell = size * 0.16;
                 let rise = (3.0 * tx).max(0.15 * cell);
                 let level = |c: Vec3| self.crust_field(c, cell).clamp(-0.99, 0.99);
-                let big = self.plates(e, cell, rise, self.salt, 0.0, level);
-                let thick = smoothstep(-0.6, 0.5, self.noise2.fbm(e / (size * 0.6) + Vec3::new(0.0, 0.0, 91.0), 3)) * 1.4;
+                let big = self.plates(at, cell, rise, self.salt, 0.0, level);
+                let thick = smoothstep(-0.6, 0.5, self.noise2.fbm(at / (size * 0.6) + Vec3::new(0.0, 0.0, 91.0), 3)) * 1.4;
                 out += s.flake_step * r_m * thick * (big.h + 0.5);
                 sample.plate = big.top;
                 sample.crust = Some(big.top);
@@ -1041,10 +1077,10 @@ impl Surface {
             // The stone's texture at two scales: hollows and swells a hand across,
             // weathered into it, and the grain of its crystals, rougher in some stretches
             // than others.
-            let fe = self.foliated(e);
-            let worn = self.noise2.fbm_limited(e + Vec3::splat(9.0), 7.0, tx, 3);
+            let fe = self.foliated(at);
+            let worn = self.noise2.fbm_limited(at + Vec3::splat(9.0), 7.0, tx, 3);
             let crystals = self.noise.fbm_rough(fe, 45.0, tx, 6, 0.62);
-            let rougher = 0.45 + 0.9 * smoothstep(-0.4, 0.4, self.noise2.fbm(e * 2.5 + Vec3::splat(21.0), 2));
+            let rougher = 0.45 + 0.9 * smoothstep(-0.4, 0.4, self.noise2.fbm(at * 2.5 + Vec3::splat(21.0), 2));
             // The weathered crust on the plates is rougher than the stone they flaked from.
             let crust = smoothstep(0.35, 0.75, sample.plate);
             let grain = 2.5 * worn + 0.5 * rougher * (0.6 + 1.2 * crust) * crystals;
@@ -1059,7 +1095,7 @@ impl Surface {
                 self.noise.at(fe * 9.0 + Vec3::splat(23.0)),
             );
             let knob = 0.6 * self.noise2.fbm_rough(fe + warp * 0.014 + Vec3::splat(3.3), 13.0, tx, 5, 0.55)
-                + 0.4 * self.noise.fbm_rough(e + warp * 0.02 + Vec3::splat(8.1), 9.0, tx, 4, 0.55);
+                + 0.4 * self.noise.fbm_rough(at + warp * 0.02 + Vec3::splat(8.1), 9.0, tx, 4, 0.55);
             let knob = knob - 0.7 * knob * knob;
             let crunch = f.crunch.max(0.0) * 2.2 * knob * (0.6 + 0.4 * rougher) * (1.0 - 0.6 * sample.chip);
             out += crunch;
@@ -1071,7 +1107,7 @@ impl Surface {
             sample.hollow = smoothstep(0.0, 0.9, -rel);
             sample.ridge = smoothstep(0.05, 0.7, rel);
 
-            let (pit, pit_depth) = self.pits(e, f.pitting * (0.3 + 1.4 * smoothstep(0.35, 0.8, sample.plate)), tx);
+            let (pit, pit_depth) = self.pits(at, f.pitting * (0.3 + 1.4 * smoothstep(0.35, 0.8, sample.plate)), tx);
             out -= pit_depth;
             sample.pit = pit;
 
@@ -1243,7 +1279,17 @@ impl Surface {
 
     /// How far a point from `point` is moved to stand on the rock's origin: its flat
     /// bottom on the ground, sunk by `bury`.
+    /// How far every point is moved to stand on the rock's origin: up by the lift, and a
+    /// cliff face back by its depth, so its origin is on the line of its face at the foot,
+    /// where a cliff is set out.
+    fn shift(&self) -> Vec3 {
+        Vec3::new(0.0, self.lift(), if self.field.is_some() { -self.half.z } else { 0.0 })
+    }
+
     fn lift(&self) -> f32 {
+        if self.field.is_some() {
+            return self.half.y - self.shape.bury.clamp(0.0, 0.9) * 2.0 * self.half.y;
+        }
         let flat = self.shape.flat_bottom.clamp(0.0, 0.9);
         let height = self.half.y * (1.0 + flat);
         flat * self.half.y - self.shape.bury.clamp(0.0, 0.9) * height
@@ -1284,12 +1330,17 @@ struct Cut {
 
 /// The rock's faces cut from the ellipsoid `half` across, and its chips; `fine` takes the
 /// chips only the maps carry as well.
-fn polytope(planes: &[(Vec3, f32)], chips: &[Chip], fine: bool, d: Vec3, half: Vec3, radius: f32, k: f32) -> Cut {
+fn polytope(planes: &[(Vec3, f32)], chips: &[Chip], field: Option<&FaceField>, fine: bool, d: Vec3, half: Vec3, radius: f32, k: f32) -> Cut {
     let e = d * half;
     let len = e.length().max(1e-6);
     let u = e / len;
-    // The ellipsoid, the facets and the flat top and bottom, then the chips.
-    let mut dists = [(len, (d / half).normalize_or(u), false); MAX_FACETS as usize + 3 + MAX_CHIPS];
+    // The ellipsoid, or a cliff's face in its place, the facets and the flat top and
+    // bottom, then the chips.
+    let first = match field {
+        Some(field) => field.exit(u).map_or((1e6, u, false), |(t, normal)| (t, normal, false)),
+        None => (len, (d / half).normalize_or(u), false),
+    };
+    let mut dists = [first; MAX_FACETS as usize + 8 + MAX_CHIPS];
     let mut n = 1;
     for &(normal, offset) in planes {
         let c = u.dot(normal);
@@ -1393,8 +1444,8 @@ impl RockAtlas {
     /// will fit, a metre of each getting as much of the sheet as any other. With six
     /// faces every order is tried, each face as it is, or all turned to lie long or all
     /// to stand tall.
-    fn pack(extents: [(f32, f32); 6]) -> Self {
-        let share = |f: usize| if f == UNDERSIDE { UNDERSIDE_SHARE } else { 1.0 };
+    fn pack(extents: [(f32, f32); 6], shares: [f32; 6]) -> Self {
+        let share = |f: usize| shares[f];
         let orders = permutations();
         let turnings: [[bool; 6]; 3] = [
             [false; 6],
@@ -1637,8 +1688,19 @@ impl Grid {
 
 /// Quads along each cube face edge of the fine mesh the LODs are cut down from: about
 /// twenty source triangles to each one LOD0 keeps.
-fn source_resolution(finest: u32) -> u32 {
-    ((finest as f32 * 1.6).sqrt().ceil() as u32).clamp(MIN_SOURCE, MAX_SOURCE)
+fn source_resolution(finest: u32, most: u32) -> u32 {
+    ((finest as f32 * 1.6).sqrt().ceil() as u32).clamp(MIN_SOURCE, most)
+}
+
+/// Each chart's share of the sheet a metre of it gets: the buried underside less; on a
+/// cliff face, nearly all of it to the face, since its back, top and ends are buried in
+/// the cliff behind it.
+fn chart_shares(cliff: bool) -> [f32; 6] {
+    if cliff {
+        [0.45, 0.45, 0.3, 0.15, 1.0, 0.15]
+    } else {
+        std::array::from_fn(|f| if f == UNDERSIDE { UNDERSIDE_SHARE } else { 1.0 })
+    }
 }
 
 /// Builds the rock a preset's seed lands on. Deterministic.
@@ -1651,15 +1713,16 @@ pub fn build_rock(p: &RockParams) -> RockMesh {
         .take(MAX_LODS)
         .map(|l| (l.triangles.clamp(MIN_TRIANGLES, MAX_TRIANGLES), l.screen_size.max(0.0)))
         .collect();
-    let n = source_resolution(targets.first().map_or(1600, |t| t.0));
+    let cliff = surface.field.is_some();
+    let n = source_resolution(targets.first().map_or(1600, |t| t.0), if cliff { MAX_CLIFF_SOURCE } else { MAX_SOURCE });
     let grid = Grid::new(&surface, n);
-    let atlas = RockAtlas::pack(grid.extents());
+    let atlas = RockAtlas::pack(grid.extents(), chart_shares(cliff));
     let mut simplifier = Simplifier::new(grid.source(lift, surface.half.y * 2.0), face_axes());
     let lods: Vec<RockLodMesh> = targets
         .into_iter()
         .map(|(triangles, screen_size)| {
             simplifier.simplify_to(triangles as usize);
-            emit(&simplifier, &atlas, lift, screen_size)
+            emit(&simplifier, &atlas, surface.shift(), screen_size)
         })
         .collect();
     let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -1676,8 +1739,7 @@ pub fn build_rock(p: &RockParams) -> RockMesh {
 
 /// One LOD as it stands: a vertex for each chart each kept vertex is in, normals shared
 /// across the seams, and tangents along each chart's u.
-fn emit(simplifier: &Simplifier, atlas: &RockAtlas, lift: f32, screen_size: f32) -> RockLodMesh {
-    let lift = Vec3::Y * lift;
+fn emit(simplifier: &Simplifier, atlas: &RockAtlas, lift: Vec3, screen_size: f32) -> RockLodMesh {
     let mut out = RockLodMesh { screen_size, ..Default::default() };
     let mut slot = vec![u32::MAX; simplifier.vertex_count() * 6];
     let mut from = Vec::new();
@@ -1776,7 +1838,7 @@ const NO_CHART: u8 = u8::MAX;
 pub fn bake_rock_at(p: &RockParams, mesh: &RockMesh, size: u32) -> RockMaps {
     let surface = Surface::new(p);
     let size = size.clamp(MIN_TEXTURE, MAX_TEXTURE);
-    let texels = frames(mesh, surface.lift(), size);
+    let texels = frames(mesh, surface.shift(), size);
     let painter = Painter::new(&surface, p);
     let rows = par_map(size as usize, |y| {
         (0..size)
@@ -1801,7 +1863,7 @@ pub fn bake_rock_at(p: &RockParams, mesh: &RockMesh, size: u32) -> RockMaps {
 /// LOD0 laid out in the sheet: under each texel of each triangle, the point and frame
 /// there; then each frame carried out over the pad round its chart, so the pad's normals
 /// are told against a frame that continues its chart's.
-fn frames(mesh: &RockMesh, lift: f32, size: u32) -> Vec<Texel> {
+fn frames(mesh: &RockMesh, lift: Vec3, size: u32) -> Vec<Texel> {
     let n = size as usize;
     let atlas = &mesh.atlas;
     let blank = Texel {
@@ -1833,7 +1895,7 @@ fn frames(mesh: &RockMesh, lift: f32, size: u32) -> Vec<Texel> {
         let Some(chart) = atlas.chart_at((uv[0] + uv[1] + uv[2]) / (3.0 * scale)) else { continue };
         let lo = uv[0].min(uv[1]).min(uv[2]).floor().max(Vec2::ZERO);
         let hi = uv[0].max(uv[1]).max(uv[2]).ceil().min(Vec2::splat(scale - 1.0));
-        let p = [0, 1, 2].map(|k| Vec3::from(lod.positions[tri[k] as usize]) - Vec3::Y * lift);
+        let p = [0, 1, 2].map(|k| Vec3::from(lod.positions[tri[k] as usize]) - lift);
         let nr = [0, 1, 2].map(|k| Vec3::from(lod.normals[tri[k] as usize]));
         let tg = [0, 1, 2].map(|k| {
             let t = lod.tangents[tri[k] as usize];
@@ -2007,7 +2069,10 @@ impl<'a> Painter<'a> {
         let stain = smoothstep(0.1, 0.55, n2.fbm(p * 3.5 + Vec3::new(0.0, 17.0, 0.0), 4));
         col *= 1.0 - 0.2 * c.tone * stain;
         // A green film of algae low on the shaded sides, where the stone stays damp.
-        let damp = (1.0 - nf.y.max(0.0)) * (1.0 - smoothstep(0.1, 0.6, height01))
+        let cliff = s.field.is_some();
+        // On a cliff the damp keeps to its foot, a few metres up.
+        let low = if cliff { (world_y / 8.0).clamp(0.0, 1.0) } else { height01 };
+        let damp = (1.0 - nf.y.max(0.0)) * (1.0 - smoothstep(0.1, 0.6, low))
             * smoothstep(-0.2, 0.4, n1.fbm(p * 2.0 + Vec3::new(8.0, 0.0, 3.0), 3));
         col = col.lerp(col * Vec3::new(0.8, 0.95, 0.72), damp * 0.6);
         if s.surface.strata > 0.0 {
@@ -2019,7 +2084,9 @@ impl<'a> Painter<'a> {
         col = col.lerp(col * Vec3::new(1.2, 1.16, 1.1), smp.chip * 0.8);
         // Water down the steep faces.
         let steep = 1.0 - nf.y.abs();
-        let streak = smoothstep(0.1, 0.6, n2.fbm(Vec3::new(p.x * 9.0, p.y * 0.9, p.z * 9.0), 3)) * c.streaks * steep;
+        // Down a cliff they run metres wide and tens of metres long.
+        let reach = if cliff { 0.13 } else { 1.0 };
+        let streak = smoothstep(0.1, 0.6, n2.fbm(Vec3::new(p.x * 9.0 * reach, p.y * 0.9 * reach, p.z * 9.0 * reach), 3)) * c.streaks * steep;
         col *= 1.0 - 0.55 * streak;
 
         // Lichen: rosettes where the stone is exposed and settled, not on fresh breaks,
@@ -2055,6 +2122,8 @@ impl<'a> Painter<'a> {
         // The rock's own hollows, a hand or two across, darker and grimier; its swells
         // paler.
         col *= (1.0 - cavity.min(1.5) * 0.35 * hollow.max(0.0)) * (1.0 + 0.2 * (-hollow).max(0.0));
+        // Down in a cliff's clefts and chimneys, out of the light and stained.
+        col *= 1.0 - cavity.min(1.5) * 0.4 * smp.deep;
 
         // Moss.
         let (cover, tuft) = self.moss_at(p, nf.y, &smp, height01, texel);
@@ -2104,6 +2173,7 @@ impl<'a> Painter<'a> {
         let mut occl = (1.0 - cavity * shade) * (1.0 - cavity.min(1.5) * 0.45 * hollow.max(0.0));
         occl *= 1.0 - 0.35 * cover * (1.0 - tuft);
         occl *= 0.75 + 0.25 * smoothstep(-0.02, 0.2, world_y);
+        occl *= 1.0 - 0.55 * smp.deep;
         let mut rough = c.roughness + 0.05 * mottle - 0.05 * smp.chip - 0.06 * streak + 0.06 * (crust - 0.5);
         rough += (0.92 - rough) * lichen;
         rough += (c.moss_roughness - rough) * cover;
@@ -2436,8 +2506,9 @@ mod tests {
             let p = small(src);
             let m = build_rock(&p);
             let lod = &m.lods[0];
-            // Every triangle faces away from the middle of the rock.
-            let centre = (Vec3::from(m.min) + Vec3::from(m.max)) * 0.5;
+            // Every triangle faces away from where its radius is measured from: the middle
+            // of a boulder, near the back of a cliff face.
+            let centre = Surface::new(&p).shift();
             let mut inward = 0;
             for tri in lod.indices.chunks_exact(3) {
                 let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(lod.positions[tri[k] as usize]));
@@ -2563,7 +2634,10 @@ mod tests {
                 }
             }
             assert!(sum / count as f32 > 0.85, "{name}: mean z {}", sum / count as f32);
-            assert!(steep * 100 < count, "{name}: {steep} of {count} texels steeper than 70 degrees");
+            // A cliff's clefts and the arrises between its blocks are sharper than its LOD0
+            // carries across a texel half a metre wide.
+            let allowed = if p.face.is_some() { 3 } else { 1 };
+            assert!(steep * 100 < count * allowed, "{name}: {steep} of {count} texels steeper than 70 degrees");
         }
     }
 }
