@@ -162,6 +162,10 @@ struct Collar {
     radius: f32,
 }
 
+/// How many of its own reaches along the stem a collar is evaluated over. Its swelling
+/// falls off as exp(-ds²) and its bark ridge faster, so at 4.5 both are under 2e-9.
+const COLLAR_CUTOFF: f32 = 4.5;
+
 /// A scar where a limb was lost: a dimple inside a raised collar.
 struct Knot {
     arc: f32,
@@ -409,6 +413,12 @@ impl Irregular {
         for c in &self.collars {
             let reach = (c.radius * 2.6).max(0.04);
             let ds = (s - c.arc) / reach;
+            // A trunk carries a hundred-odd collars and every sample of its surface
+            // used to pay for all of them. Past `COLLAR_CUTOFF` reaches both the collar
+            // and its ridge are below a billionth, which no f32 radius can tell from 0.
+            if ds.abs() > COLLAR_CUTOFF {
+                continue;
+            }
             // Only on the side the branch leaves from.
             let facing = e_r.dot(c.dir).max(0.0);
             let share = (c.radius / radius.max(1e-4)).min(1.0);
@@ -520,8 +530,11 @@ fn arcs_for(points: &[Vec3]) -> Vec<f32> {
 ///
 /// Measured on the surface the mesher would actually emit, not on the centreline: a
 /// ring sitting on a burl matters even where the centreline through it is straight.
-fn ring_error(path: &StemPath, mp: &MeshParams, phase: (f32, f32), prev: usize, i: usize, next: usize) -> f32 {
-    const ANGLES: usize = 8;
+///
+/// `radii` is each ring's surface radius at the `RING_ERROR_ANGLES` it is measured at,
+/// worked out once per stem: thinning measures the same few rings against each other
+/// over and over, and the surface radius is the expensive part.
+fn ring_error(path: &StemPath, radii: &[[f32; RING_ERROR_ANGLES]], prev: usize, i: usize, next: usize) -> f32 {
     let (a, b, c) = (path.points[prev], path.points[i], path.points[next]);
     let span = c - a;
     let t = if span.length_squared() > 1e-12 {
@@ -530,14 +543,27 @@ fn ring_error(path: &StemPath, mp: &MeshParams, phase: (f32, f32), prev: usize, 
         0.5
     };
     let mut worst = (a + span * t - b).length();
-    for k in 0..ANGLES {
-        let ang = k as f32 / ANGLES as f32 * TAU;
-        let here = path.radius_at(i, ang, mp, phase);
-        let guess = path.radius_at(prev, ang, mp, phase) * (1.0 - t)
-            + path.radius_at(next, ang, mp, phase) * t;
+    for k in 0..RING_ERROR_ANGLES {
+        let here = radii[i][k];
+        let guess = radii[prev][k] * (1.0 - t) + radii[next][k] * t;
         worst = worst.max((here - guess).abs());
     }
     worst
+}
+
+/// How many angles round a ring `ring_error` measures the surface at.
+const RING_ERROR_ANGLES: usize = 8;
+
+/// Every ring's surface radius at the angles `ring_error` measures.
+fn ring_error_radii(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<[f32; RING_ERROR_ANGLES]> {
+    (0..path.len())
+        .map(|i| {
+            std::array::from_fn(|k| {
+                let ang = k as f32 / RING_ERROR_ANGLES as f32 * TAU;
+                path.radius_at(i, ang, mp, phase)
+            })
+        })
+        .collect()
 }
 
 /// How far above `flare_height` the trunk keeps its fine rings, as a multiple of it.
@@ -584,6 +610,7 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
     let flare_top = mp.flare_height * FLARE_RING_REACH;
     let flare_tol = tol.min(FLARE_RING_TOLERANCE);
     let max_turn = if path.is_dead { DEAD_SPAN_TURN } else { MAX_SPAN_TURN };
+    let radii = ring_error_radii(path, mp, phase);
     let mut i = 1;
     while i < path.len() - 1 {
         let prev = *keep.last().unwrap();
@@ -600,7 +627,7 @@ fn keep_rings(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<usize>
         // the ground to the top. Its limbs leave the bowed skeleton, and they started up
         // to two and a half trunk radii off the bark — and three in a gust, which bends
         // the true trunk along a curve and the drawn one along its chord.
-        let drifts = (prev + 1..=i).any(|k| ring_error(path, mp, phase, prev, k, i + 1) >= limit);
+        let drifts = (prev + 1..=i).any(|k| ring_error(path, &radii, prev, k, i + 1) >= limit);
         if !path.pinned[i] && !turns && !drifts {
             // Dropped. The next ring is measured against the same kept neighbour, so a
             // long smooth run collapses rather than losing every other ring.

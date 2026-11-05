@@ -9,6 +9,7 @@ use arbor_core::textures::{MapSource, TEXTURE_DIR};
 
 /// The files in one folder on disk.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
 pub struct Maps {
     dir: &'static std::path::Path,
 }
@@ -58,7 +59,8 @@ mod web {
         Done(Option<Vec<u8>>),
     }
 
-    /// The files fetched so far, from one folder beside the page.
+    /// The files fetched so far, from one folder beside the page. A clone shares them.
+    #[derive(Clone)]
     pub struct Maps {
         dir: &'static str,
         files: Arc<Mutex<HashMap<String, Fetch>>>,

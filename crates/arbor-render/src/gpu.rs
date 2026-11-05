@@ -370,8 +370,23 @@ pub unsafe fn create_cutout_texture(
     height: u32,
 ) -> glow::Texture {
     unsafe {
-        let chain =
-            crate::mipmap::coverage_preserving_chain(rgba, width, height, LEAF_ALPHA_CUTOFF);
+        let chain = cutout_chain(rgba, width, height);
+        upload_cutout_chain(gl, &chain)
+    }
+}
+
+/// The mip chain `create_cutout_texture` uploads, worked out without a GL context so
+/// it can be built on another thread. It is most of what a foliage cutout costs.
+pub fn cutout_chain(rgba: &[u8], width: u32, height: u32) -> Vec<crate::mipmap::MipLevel> {
+    crate::mipmap::coverage_preserving_chain(rgba, width, height, LEAF_ALPHA_CUTOFF)
+}
+
+/// Uploads a chain from `cutout_chain`, as `create_cutout_texture` does.
+pub unsafe fn upload_cutout_chain(
+    gl: &glow::Context,
+    chain: &[crate::mipmap::MipLevel],
+) -> glow::Texture {
+    unsafe {
         let texture = gl.create_texture().expect("create texture");
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         for (level, (px, w, h)) in chain.iter().enumerate() {
@@ -596,36 +611,60 @@ pub unsafe fn load_leaf_material<S: MapSource + ?Sized>(
     maps: &S,
     lp: &LeafParams,
 ) -> Option<MaterialTextures> {
-    unsafe {
-        // Loaded, and clustered where the species clusters, by the same code the
-        // exporters use, so what is exported is what is on screen.
-        let started = web_time::Instant::now();
-        let maps = textures::load_leaf_maps(maps, lp)?;
-        if let Some(cluster) = &lp.cluster {
-            println!(
-                "clustered {} into {}x{} from {} leaves, coverage {:.3} ({:.0} ms)",
-                lp.texture,
-                maps.albedo.width,
-                maps.albedo.height,
-                cluster.count,
-                maps.albedo.mean_alpha(),
-                started.elapsed().as_secs_f32() * 1000.0
-            );
-        }
-        let (albedo, normal, roughness, translucency) =
-            (maps.albedo, maps.normal, maps.roughness, maps.translucency);
+    unsafe { Some(upload_leaf_material(gl, bake_leaf_material(maps, lp)?)) }
+}
 
+/// A leaf material read, baked and mipped, waiting to be uploaded.
+pub struct LeafMaterialPixels {
+    albedo: Vec<crate::mipmap::MipLevel>,
+    normal: Option<Bitmap>,
+    roughness: Option<Bitmap>,
+    translucency: Option<Bitmap>,
+}
+
+/// Everything slow about `load_leaf_material` — reading and decoding the maps, baking
+/// the cluster atlas and the cutout's mip chain, which together run to seconds for a
+/// clustered species — and none of it needing GL, so it can be done off the thread
+/// that owns the context.
+pub fn bake_leaf_material<S: MapSource + ?Sized>(maps: &S, lp: &LeafParams) -> Option<LeafMaterialPixels> {
+    // Loaded, and clustered where the species clusters, by the same code the
+    // exporters use, so what is exported is what is on screen.
+    let started = web_time::Instant::now();
+    let maps = textures::load_leaf_maps(maps, lp)?;
+    if let Some(cluster) = &lp.cluster {
+        println!(
+            "clustered {} into {}x{} from {} leaves, coverage {:.3} ({:.0} ms)",
+            lp.texture,
+            maps.albedo.width,
+            maps.albedo.height,
+            cluster.count,
+            maps.albedo.mean_alpha(),
+            started.elapsed().as_secs_f32() * 1000.0
+        );
+    }
+    Some(LeafMaterialPixels {
+        albedo: cutout_chain(&maps.albedo.pixels, maps.albedo.width, maps.albedo.height),
+        normal: maps.normal,
+        roughness: maps.roughness,
+        translucency: maps.translucency,
+    })
+}
+
+/// Hands a material from `bake_leaf_material` to the driver.
+pub unsafe fn upload_leaf_material(gl: &glow::Context, px: LeafMaterialPixels) -> MaterialTextures {
+    unsafe {
         let upload = |map: Option<Bitmap>, fill: u8| match map {
             Some(m) => create_texture(gl, &m.pixels, m.width, m.height, false),
             None => create_texture(gl, &[fill, fill, fill, 255], 1, 1, false),
         };
-        Some(MaterialTextures {
-            albedo: create_cutout_texture(gl, &albedo.pixels, albedo.width, albedo.height),
-            normal: upload(normal, 128),
-            roughness: upload(roughness, 200),
-            translucency: translucency
+        MaterialTextures {
+            albedo: upload_cutout_chain(gl, &px.albedo),
+            normal: upload(px.normal, 128),
+            roughness: upload(px.roughness, 200),
+            translucency: px
+                .translucency
                 .map(|m| create_texture(gl, &m.pixels, m.width, m.height, true)),
-        })
+        }
     }
 }
 

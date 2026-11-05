@@ -6,6 +6,7 @@ mod export;
 mod knobs;
 mod presets;
 mod rock_view;
+mod worker;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,7 @@ use eframe::glow;
 use eframe::glow::HasContext;
 use glam::{Mat4, Vec3};
 
-use arbor_core::species::{LeafClusterParams, CUSTOM_PRESET_DIR};
+use arbor_core::species::{LeafClusterParams, LeafParams, CUSTOM_PRESET_DIR};
 use arbor_core::textures;
 use arbor_core::{
     build_leaves, build_mesh, grow, Skeleton, SkeletonStats, SpeciesParams, SpeciesTemplate,
@@ -470,7 +471,11 @@ struct App {
     loaded_bark: String,
     /// Texture name and cluster arrangement the leaf material was built from.
     /// Both go in the key, because changing either has to rebuild the atlas.
-    loaded_leaf: (String, Option<LeafClusterParams>, [f32; 2]),
+    loaded_leaf: LeafKey,
+    /// The leaf material last asked of `leaf_bakes`, which may not be in yet.
+    asked_leaf: LeafKey,
+    /// Bakes leaf atlases off the UI thread: seconds each for a clustered species.
+    leaf_bakes: worker::Worker<(assets::Maps, LeafParams), (LeafKey, Option<gpu::LeafMaterialPixels>)>,
     presets: Vec<presets::Preset>,
     /// The preset the panel was last loaded from or saved to. None once that preset
     /// has been deleted: the tree stays on screen with nothing behind it until saved.
@@ -495,7 +500,10 @@ struct App {
     /// The leaves' bounding box: where the crown is, for the shade it casts on the sky.
     crown: (Vec3, Vec3),
     camera: OrbitCamera,
+    /// The panel has changed the tree since it was last asked to be regrown.
     dirty: bool,
+    /// Grows the tree off the UI thread, so the panel stays live while it does.
+    trees: worker::Worker<SpeciesTemplate, Regrown>,
     gen_ms: f32,
     render_mode: RenderMode,
     wireframe: bool,
@@ -647,6 +655,10 @@ impl App {
             leaf_material: None,
             loaded_bark: String::new(),
             loaded_leaf: (String::new(), None, [1.0, 1.0]),
+            asked_leaf: (String::new(), None, [1.0, 1.0]),
+            leaf_bakes: worker::Worker::new("leaf atlas", |(maps, leaves): (assets::Maps, LeafParams)| {
+                (leaf_key(&leaves), gpu::bake_leaf_material(&maps, &leaves))
+            }),
             presets,
             preset: Some(preset_index),
             save_name,
@@ -670,6 +682,7 @@ impl App {
                 aspect: 1.6,
             },
             dirty: true,
+            trees: worker::Worker::new("regrow", regrow),
             gen_ms: 0.0,
             render_mode: RenderMode::Shaded,
             wireframe: false,
@@ -849,21 +862,41 @@ impl App {
         app
     }
 
+    /// Asks for the tree to be grown again from the panel. A capture grows it here and
+    /// now, since the frame it takes has to be of this tree; otherwise it is grown on
+    /// the worker and shown by `poll_regrown` once it is in.
     fn regenerate(&mut self) {
-        let t = web_time::Instant::now();
-        self.grown = self.params.instance();
-        self.skeleton = grow(&self.grown);
-        let mesh = build_mesh(&self.skeleton, &self.grown);
+        if self.capture.is_some() {
+            let regrown = self.trees.run_now(self.params.clone());
+            self.show_regrown(regrown);
+        } else {
+            self.trees.request(self.params.clone());
+        }
+    }
+
+    /// Puts on screen whatever the worker has grown since the last frame.
+    fn poll_regrown(&mut self) {
+        if let Some(regrown) = self.trees.poll() {
+            self.show_regrown(regrown);
+        }
+    }
+
+    fn show_regrown(&mut self, r: Regrown) {
+        let Regrown { grown, skeleton, mesh, leaves, support, ms } = r;
+        self.grown = grown;
+        // Wind is edited without regrowing, so a tree grown from the panel as it was a
+        // moment ago may carry a sway the panel has moved on from since.
+        self.grown.wind = self.params.instance().wind;
+        self.skeleton = skeleton;
         self.aabb = mesh.aabb();
         self.mesh_stats = (mesh.vertex_count(), mesh.triangle_count());
         self.mesh_gpu.lock().unwrap().upload(&self.gl, &mesh);
-        let leaves = build_leaves(&self.skeleton, &self.grown);
         self.leaf_stats = (leaves.leaf_count(), leaves.triangle_count());
         self.crown = crown_bounds(&leaves);
         self.leaves_gpu.lock().unwrap().upload(&self.gl, &leaves);
-        self.support_gpu.lock().unwrap().upload(&self.gl, &support_mesh(&self.grown));
+        self.support_gpu.lock().unwrap().upload(&self.gl, &support);
         self.sync_materials();
-        self.gen_ms = t.elapsed().as_secs_f32() * 1000.0;
+        self.gen_ms = ms;
         self.stats = self.skeleton.stats();
         self.rebuild_overlay();
         if self.auto_frame {
@@ -883,19 +916,39 @@ impl App {
             self.bark_material =
                 unsafe { gpu::load_material(&self.gl, &self.maps, &self.loaded_bark) };
         }
+        // The leaves bake on the worker, and what is on screen stays until the new
+        // atlas is in. A capture bakes here, so its frame has the leaves it asked for.
         let leaves = &self.grown.leaves;
-        let loaded = &self.loaded_leaf;
-        let colour = [leaves.saturation, leaves.transmission];
-        if (&leaves.texture, &leaves.cluster, colour) != (&loaded.0, &loaded.1, loaded.2)
-            && self.maps.ready(&textures::leaf_map_files(&leaves.texture))
-        {
-            if let Some(old) = self.leaf_material.take() {
-                old.delete(&self.gl);
+        let wanted = leaf_key(leaves);
+        if wanted != self.asked_leaf && self.maps.ready(&textures::leaf_map_files(&leaves.texture)) {
+            // Only the colours changing leaves the old atlas laid out as the new one
+            // will be, so only then is it worth showing meanwhile. Other art, or the
+            // same art clustered otherwise, would put the wrong leaf in every cell.
+            if (&wanted.0, &wanted.1) != (&self.loaded_leaf.0, &self.loaded_leaf.1) {
+                if let Some(old) = self.leaf_material.take() {
+                    old.delete(&self.gl);
+                }
             }
-            self.loaded_leaf = (leaves.texture.clone(), leaves.cluster.clone(), colour);
-            self.leaf_material =
-                unsafe { gpu::load_leaf_material(&self.gl, &self.maps, &self.grown.leaves) };
+            self.asked_leaf = wanted;
+            let job = (self.maps.clone(), leaves.clone());
+            if self.capture.is_some() {
+                let baked = self.leaf_bakes.run_now(job);
+                self.show_leaf_material(baked);
+            } else {
+                self.leaf_bakes.request(job);
+            }
         }
+        if let Some(baked) = self.leaf_bakes.poll() {
+            self.show_leaf_material(baked);
+        }
+    }
+
+    fn show_leaf_material(&mut self, (key, pixels): (LeafKey, Option<gpu::LeafMaterialPixels>)) {
+        if let Some(old) = self.leaf_material.take() {
+            old.delete(&self.gl);
+        }
+        self.loaded_leaf = key;
+        self.leaf_material = pixels.map(|px| unsafe { gpu::upload_leaf_material(&self.gl, px) });
     }
 
     /// Sets the ground up the way the photograph `name` wants it, when it is picked.
@@ -1861,7 +1914,7 @@ impl App {
             });
         ui.checkbox(&mut self.show_leaves, "Leaves");
         if self.leaf_material.is_none() {
-            if self.loaded_leaf.0 != self.grown.leaves.texture {
+            if self.leaf_bakes.busy() || self.loaded_leaf.0 != self.grown.leaves.texture {
                 ui.weak("fetching the leaf textures…");
             } else {
                 ui.colored_label(
@@ -2144,6 +2197,36 @@ impl App {
     }
 }
 
+/// What a leaf material is baked from: its art, how it clusters, and the saturation
+/// and transmission baked into its colours. A change to any of them rebakes it.
+type LeafKey = (String, Option<LeafClusterParams>, [f32; 2]);
+
+fn leaf_key(leaves: &LeafParams) -> LeafKey {
+    (leaves.texture.clone(), leaves.cluster.clone(), [leaves.saturation, leaves.transmission])
+}
+
+/// A tree grown on the worker, with everything slow about putting it on screen done
+/// except the upload, which needs the GL context.
+struct Regrown {
+    grown: SpeciesParams,
+    skeleton: Skeleton,
+    mesh: arbor_core::Mesh,
+    leaves: arbor_core::LeafMesh,
+    support: arbor_core::Mesh,
+    ms: f32,
+}
+
+fn regrow(params: SpeciesTemplate) -> Regrown {
+    let t = web_time::Instant::now();
+    let grown = params.instance();
+    let skeleton = grow(&grown);
+    let mesh = build_mesh(&skeleton, &grown);
+    let leaves = build_leaves(&skeleton, &grown);
+    let support = support_mesh(&grown);
+    let ms = t.elapsed().as_secs_f32() * 1000.0;
+    Regrown { grown, skeleton, mesh, leaves, support, ms }
+}
+
 /// The bounding box of a canopy's cards, empty (min above max) for none.
 /// The wall or post a vine grows over, or nothing for a plant that stands up by itself.
 fn support_mesh(params: &SpeciesParams) -> arbor_core::Mesh {
@@ -2239,6 +2322,7 @@ impl eframe::App for App {
             self.regenerate();
             self.dirty = false;
         }
+        self.poll_regrown();
         if self.view == ViewMode::Cover {
             self.sync_cover();
         }
@@ -2252,6 +2336,11 @@ impl eframe::App for App {
         // Maps being fetched are put in on the frame they arrive.
         self.sync_materials();
         self.sync_environment();
+        // egui only draws when something happens, and a worker finishing is not
+        // something it hears about.
+        if self.trees.busy() || self.leaf_bakes.busy() {
+            ctx.request_repaint();
+        }
         self.exports.poll(frame, &mut self.status, &self.maps);
 
         if self.wind_on && !self.wind_paused {
