@@ -145,6 +145,17 @@ pub fn scale_colour(map: &mut Bitmap, k: f32) {
     scale_channels(map, [k; 3]);
 }
 
+/// `x.clamp(0.0, 255.0).round() as u8`, without the library call `f32::round` is on
+/// targets where rounding half away from zero is not one instruction, which includes
+/// the web and this toolchain's desktop. Bakes round millions of channels each.
+/// The same byte for every input, NaN included: the fraction is exact below 2^23.
+#[inline]
+pub(crate) fn round_byte(x: f32) -> u8 {
+    let x = x.clamp(0.0, 255.0);
+    let whole = x as u32;
+    (whole + u32::from(x - whole as f32 >= 0.5)) as u8
+}
+
 pub(crate) fn srgb8_to_linear(v: u8) -> f32 {
     let c = f32::from(v) / 255.0;
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
@@ -153,7 +164,34 @@ pub(crate) fn srgb8_to_linear(v: u8) -> f32 {
 pub(crate) fn linear_to_srgb8(l: f32) -> u8 {
     let l = l.clamp(0.0, 1.0);
     let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
-    (c * 255.0).round() as u8
+    round_byte(c * 255.0)
+}
+
+#[cfg(test)]
+mod round_byte_tests {
+    use super::round_byte;
+
+    #[test]
+    fn rounds_half_away_from_zero() {
+        // Not `f32::round` itself: this toolchain's C runtime rounds 0.49999997 up, as
+        // floor(x + 0.5) does, where Rust defines it as 0 and wasm agrees.
+        let reference = |x: f32| {
+            let x = x.clamp(0.0, 255.0);
+            let down = x.floor();
+            (if x - down >= 0.5 { down + 1.0 } else { down }) as u8
+        };
+        // Every float from just under 0 to just over 255 a million steps apart, every
+        // half-integer and its neighbours, and the ends.
+        let mut probes: Vec<f32> = (0..=1_000_000).map(|k| -1.0 + k as f32 * 257.0 / 1e6).collect();
+        for k in 0..=512 {
+            let h = k as f32 * 0.5;
+            probes.extend([h, f32::from_bits(h.to_bits().wrapping_sub(1)), f32::from_bits(h.to_bits() + 1)]);
+        }
+        probes.extend([f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.0, 0.0, 1e30, -1e30]);
+        for x in probes {
+            assert_eq!(round_byte(x), reference(x), "at {x:?}");
+        }
+    }
 }
 
 /// Pulls a map's colour toward its own grey by `amount` kept, 1 leaving it as it is.
@@ -166,7 +204,7 @@ pub fn saturate(map: &mut Bitmap, amount: f32) {
         let [r, g, b] = [px[0], px[1], px[2]].map(f32::from);
         let grey = 0.2126 * r + 0.7152 * g + 0.0722 * b;
         for (c, v) in px[..3].iter_mut().zip([r, g, b]) {
-            *c = (grey + (v - grey) * amount).round().clamp(0.0, 255.0) as u8;
+            *c = round_byte(grey + (v - grey) * amount);
         }
     }
 }
@@ -256,7 +294,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 }
 
 fn unorm(x: f32) -> u8 {
-    (x.clamp(0.0, 1.0) * 255.0).round() as u8
+    round_byte(x.clamp(0.0, 1.0) * 255.0)
 }
 
 /// Encodes RGBA8 pixels as a PNG.

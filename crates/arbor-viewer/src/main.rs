@@ -474,6 +474,8 @@ struct App {
     loaded_leaf: LeafKey,
     /// The leaf material last asked of `leaf_bakes`, which may not be in yet.
     asked_leaf: LeafKey,
+    /// A mouse button or touch is held: a slider may be mid-drag.
+    pointer_down: bool,
     /// Bakes leaf atlases off the UI thread: seconds each for a clustered species.
     leaf_bakes: worker::Worker<(assets::Maps, LeafParams), (LeafKey, Option<gpu::LeafMaterialPixels>)>,
     presets: Vec<presets::Preset>,
@@ -656,6 +658,7 @@ impl App {
             loaded_bark: String::new(),
             loaded_leaf: (String::new(), None, [1.0, 1.0]),
             asked_leaf: (String::new(), None, [1.0, 1.0]),
+            pointer_down: false,
             leaf_bakes: worker::Worker::new("leaf atlas", |(maps, leaves): (assets::Maps, LeafParams)| {
                 (leaf_key(&leaves), gpu::bake_leaf_material(&maps, &leaves))
             }),
@@ -920,11 +923,16 @@ impl App {
         // atlas is in. A capture bakes here, so its frame has the leaves it asked for.
         let leaves = &self.grown.leaves;
         let wanted = leaf_key(leaves);
-        if wanted != self.asked_leaf && self.maps.ready(&textures::leaf_map_files(&leaves.texture)) {
-            // Only the colours changing leaves the old atlas laid out as the new one
-            // will be, so only then is it worth showing meanwhile. Other art, or the
-            // same art clustered otherwise, would put the wrong leaf in every cell.
-            if (&wanted.0, &wanted.1) != (&self.loaded_leaf.0, &self.loaded_leaf.1) {
+        // Only the colours changing leaves the old atlas laid out as the new one will
+        // be, so only then is it worth showing meanwhile. Other art, or the same art
+        // clustered otherwise, would put the wrong leaf in every cell.
+        let recolour_only = (&wanted.0, &wanted.1) == (&self.loaded_leaf.0, &self.loaded_leaf.1);
+        // The web bakes on the UI thread, a second or more for a clustered species, so
+        // a colour dragged there would stall every frame of the drag. It waits for the
+        // drag to end instead, with the old colours on screen until then.
+        let hold = cfg!(target_arch = "wasm32") && recolour_only && self.pointer_down;
+        if wanted != self.asked_leaf && !hold && self.maps.ready(&textures::leaf_map_files(&leaves.texture)) {
+            if !recolour_only {
                 if let Some(old) = self.leaf_material.take() {
                     old.delete(&self.gl);
                 }
@@ -2318,6 +2326,7 @@ impl eframe::App for App {
             }
         }
 
+        self.pointer_down = ctx.input(|i| i.pointer.any_down());
         if self.dirty {
             self.regenerate();
             self.dirty = false;

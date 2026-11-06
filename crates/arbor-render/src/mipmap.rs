@@ -80,14 +80,60 @@ fn srgb_encode(v: f32) -> u8 {
     (v.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8
 }
 
+/// `srgb_encode` by table: for each byte past 0, the least value that encodes to at
+/// least it. The encode only ever climbs with its input, so counting how many of these
+/// a value has reached gives the same byte — for eight comparisons rather than a
+/// `powf`, which is most of what halving a big atlas cost. NaN reaches none of them
+/// and comes out 0, as it does from `srgb_encode`.
+struct SrgbEncoder([f32; 255]);
+
+impl SrgbEncoder {
+    fn new() -> Self {
+        Self(std::array::from_fn(|i| {
+            let byte = i as u8 + 1;
+            // Bisected over the bit patterns of the floats in 0..=1, which order the
+            // same way as the floats themselves.
+            let (mut lo, mut hi) = (0u32, 1.0f32.to_bits());
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if srgb_encode(f32::from_bits(mid)) >= byte {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            f32::from_bits(lo)
+        }))
+    }
+
+    fn encode(&self, v: f32) -> u8 {
+        self.0.partition_point(|&t| t <= v) as u8
+    }
+}
+
+fn srgb_encoder() -> &'static SrgbEncoder {
+    static ENCODER: std::sync::OnceLock<SrgbEncoder> = std::sync::OnceLock::new();
+    ENCODER.get_or_init(SrgbEncoder::new)
+}
+
 /// Box filter to half size. RGB is decoded to linear and averaged weighted by alpha,
 /// so colour from fully transparent texels never bleeds into the visible part of the
 /// leaf and the average matches what the hardware decodes at sample time.
 pub fn halve(src: &[u8], w: u32, h: u32) -> MipLevel {
     let nw = (w / 2).max(1);
     let nh = (h / 2).max(1);
-    let mut out = Vec::with_capacity((nw * nh * 4) as usize);
-    for y in 0..nh {
+    // A byte has only 256 values, and the first level of an atlas is millions of
+    // texels with four samples of three channels each: decoding by table gives the
+    // same numbers as `srgb_decode` for a fraction of the powf calls.
+    let linear: [f32; 256] = std::array::from_fn(|v| srgb_decode(v as u8));
+    let unit: [f32; 256] = std::array::from_fn(|v| v as f32 / 255.0);
+    let encoder = srgb_encoder();
+    let mut out = vec![0u8; (nw * nh * 4) as usize];
+    // Every output row reads two input rows and nothing else, so the rows are halved
+    // side by side.
+    arbor_core::par::for_each_chunk_mut(&mut out, (nw * 4) as usize, |y, row| {
+        let y = y as u32;
+        let mut px = row.chunks_exact_mut(4);
         for x in 0..nw {
             let mut weighted = [0.0f32; 3];
             let mut plain = [0.0f32; 3];
@@ -98,9 +144,9 @@ pub fn halve(src: &[u8], w: u32, h: u32) -> MipLevel {
                     let sx = (x * 2 + dx).min(w - 1);
                     let sy = (y * 2 + dy).min(h - 1);
                     let i = ((sy * w + sx) * 4) as usize;
-                    let a = src[i + 3] as f32 / 255.0;
+                    let a = unit[src[i + 3] as usize];
                     for k in 0..3 {
-                        let c = srgb_decode(src[i + k]);
+                        let c = linear[src[i + k] as usize];
                         weighted[k] += c * a;
                         plain[k] += c;
                     }
@@ -108,33 +154,65 @@ pub fn halve(src: &[u8], w: u32, h: u32) -> MipLevel {
                     count += 1.0;
                 }
             }
+            let texel = px.next().expect("a row holds nw texels");
             for k in 0..3 {
                 let c = if alpha_sum > 1e-5 {
                     weighted[k] / alpha_sum
                 } else {
                     plain[k] / count
                 };
-                out.push(srgb_encode(c));
+                texel[k] = encoder.encode(c);
             }
-            out.push((alpha_sum / count * 255.0).clamp(0.0, 255.0) as u8);
+            texel[3] = (alpha_sum / count * 255.0).clamp(0.0, 255.0) as u8;
         }
-    }
+    });
     (out, nw, nh)
+}
+
+/// How many texels have each alpha.
+fn alpha_histogram(rgba: &[u8]) -> [u32; 256] {
+    let mut hist = [0u32; 256];
+    for p in rgba.chunks_exact(4) {
+        hist[p[3] as usize] += 1;
+    }
+    hist
+}
+
+/// `alpha_coverage`, read off a histogram of the alphas rather than the texels: the
+/// test only ever sees a texel's alpha, so counting per alpha value passes exactly the
+/// same texels. Bisecting the scale needs dozens of these, and on the first level of
+/// an atlas each one was a walk over millions of texels.
+fn histogram_coverage(hist: &[u32; 256], total: usize, cutoff: f32, scale: f32) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    let passing: usize = (0..256)
+        .filter(|&a| (a as f32 / 255.0 * scale).min(1.0) >= cutoff)
+        .map(|a| hist[a] as usize)
+        .sum();
+    passing as f32 / total as f32
+}
+
+/// The alpha a texel of alpha `a` is left with once scaled by `scale`.
+fn scaled_alpha(a: u8, scale: f32) -> u8 {
+    ((a as f32 / 255.0 * scale).min(1.0) * 255.0).round() as u8
 }
 
 /// Scales alpha so the share of texels passing `cutoff` comes back to `target`.
 fn rescale_alpha(rgba: &mut [u8], cutoff: f32, target: f32) {
+    let total = rgba.len() / 4;
+    let hist = alpha_histogram(rgba);
     // Coverage is a step function of the scale, so the bisection below lands on the
     // edge of whatever range of scales satisfies the target rather than on 1.0.
     // Where this level already has the coverage it should, leave its alpha untouched.
-    if (alpha_coverage(rgba, cutoff, 1.0) - target).abs() <= COVERAGE_TOLERANCE {
+    if (histogram_coverage(&hist, total, cutoff, 1.0) - target).abs() <= COVERAGE_TOLERANCE {
         return;
     }
     // Coverage only ever rises with the scale, so it can be bisected directly.
     let (mut lo, mut hi) = (0.0f32, 64.0f32);
     for _ in 0..24 {
         let mid = 0.5 * (lo + hi);
-        if alpha_coverage(rgba, cutoff, mid) < target {
+        if histogram_coverage(&hist, total, cutoff, mid) < target {
             lo = mid;
         } else {
             hi = mid;
@@ -145,24 +223,31 @@ fn rescale_alpha(rgba: &mut [u8], cutoff: f32, target: f32) {
         return;
     }
 
-    let source: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
-    let apply = |rgba: &mut [u8], scale: f32| {
-        for (p, &a) in rgba.chunks_exact_mut(4).zip(source.iter()) {
-            p[3] = ((a as f32 / 255.0 * scale).min(1.0) * 255.0).round() as u8;
+    // What the alphas would be at a scale, as a histogram: every texel of one alpha
+    // lands on the same new one, so the texels never need touching to measure it.
+    let after = |scale: f32| {
+        let mut out = [0u32; 256];
+        for a in 0..256 {
+            out[scaled_alpha(a as u8, scale) as usize] += hist[a];
         }
+        out
     };
-    apply(rgba, scale);
 
     // The bisection lands on the scale where coverage *just* reaches the target, and
     // quantising back to 8 bits can then drop those texels straight back under the
     // cutoff. On the last couple of levels, where a handful of texels carry the whole
     // leaf, that is the difference between distant foliage and none.
     for _ in 0..8 {
-        if alpha_coverage(rgba, cutoff, 1.0) + 1e-6 >= target {
+        if histogram_coverage(&after(scale), total, cutoff, 1.0) + 1e-6 >= target {
             break;
         }
         scale *= 1.05;
-        apply(rgba, scale);
+    }
+
+    // Always from the alphas this level came in with, never compounded.
+    let table: [u8; 256] = std::array::from_fn(|a| scaled_alpha(a as u8, scale));
+    for p in rgba.chunks_exact_mut(4) {
+        p[3] = table[p[3] as usize];
     }
 }
 

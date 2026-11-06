@@ -29,6 +29,20 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    /// Puts `other` after this mesh, its indices moved past this one's vertices.
+    pub fn append(&mut self, other: Mesh) {
+        let base = self.positions.len() as u32;
+        self.positions.extend(other.positions);
+        self.normals.extend(other.normals);
+        self.tangents.extend(other.tangents);
+        self.uvs.extend(other.uvs);
+        self.weathering.extend(other.weathering);
+        self.stem_radius.extend(other.stem_radius);
+        self.sway.extend(other.sway);
+        self.sway_at.extend(other.sway_at);
+        self.indices.extend(other.indices.into_iter().map(|i| i + base));
+    }
+
     pub fn vertex_count(&self) -> usize {
         self.positions.len()
     }
@@ -364,37 +378,94 @@ impl Irregular {
     }
 
     /// Multiplier on the radius at distance `s` along the stem, at angle `a` whose
-    /// outward direction is `e_r`.
+    /// outward direction is `e_r`. The mesher samples whole rings through
+    /// `at_length`; this is for looking at one point.
+    #[cfg(test)]
     fn shape(&self, s: f32, a: f32, e_r: Vec3, radius: f32) -> f32 {
-        if !self.active {
+        self.at_length(s).shape(a, e_r, radius)
+    }
+
+    /// The bark at distance `s` along the stem, with everything about it that does not
+    /// change round the stem already worked out: a ring is sampled hundreds of times
+    /// round, and the branch collars near it cost an `exp` or two each per sample.
+    fn at_length(&self, s: f32) -> IrregularRing<'_> {
+        let mut collars = Vec::new();
+        if self.active {
+            for c in &self.collars {
+                let reach = (c.radius * 2.6).max(0.04);
+                let ds = (s - c.arc) / reach;
+                // A trunk carries a hundred-odd collars and every sample of its surface
+                // used to pay for all of them. Past `COLLAR_CUTOFF` reaches both the
+                // collar and its ridge are below a billionth, which no f32 radius can
+                // tell from 0.
+                if ds.abs() > COLLAR_CUTOFF {
+                    continue;
+                }
+                // The branch bark ridge, above the crotch only: a much narrower seam
+                // than the collar, peaking a little way up the parent and dying out
+                // above it.
+                let ridge = if self.params.bark_ridge > 0.0 {
+                    let up = ds - 0.55;
+                    (-(up * up) / 0.45).exp() * smoothstep(-0.2, 0.2, ds)
+                } else {
+                    0.0
+                };
+                collars.push(RingCollar { dir: c.dir, radius: c.radius, swell: (-(ds * ds)).exp(), ridge });
+            }
+        }
+        IrregularRing { ir: self, s, collars }
+    }
+}
+
+/// A branch collar as one ring sees it: how much it swells there, and its ridge.
+struct RingCollar {
+    dir: Vec3,
+    radius: f32,
+    swell: f32,
+    ridge: f32,
+}
+
+/// `Irregular` at one distance along the stem; see `Irregular::at_length`.
+struct IrregularRing<'a> {
+    ir: &'a Irregular,
+    s: f32,
+    collars: Vec<RingCollar>,
+}
+
+impl IrregularRing<'_> {
+    /// `Irregular::shape` at this ring's distance along the stem.
+    fn shape(&self, a: f32, e_r: Vec3, radius: f32) -> f32 {
+        let ir = self.ir;
+        if !ir.active {
             return 1.0;
         }
-        let p = &self.params;
+        let s = self.s;
+        let p = &ir.params;
         // Faded in off the socket, so a branch still starts inside its parent and the
         // junction stays welded. A trunk has nothing to start inside, and fading it
         // there left the one part of the tree people look at closest - the foot -
         // as the only part with no bark relief on it at all.
-        let fade = if self.is_trunk {
+        let fade = if ir.is_trunk {
             1.0
         } else {
             smoothstep(0.0, radius * 4.0, s)
         };
 
         let mut flute = 0.0;
-        for (f, phase, twist) in self.flutes {
+        for (f, phase, twist) in ir.flutes {
             flute += (a * f + phase + s * twist).sin() / f.max(1.0).sqrt();
         }
         let mut swell = 0.0;
-        for (w, phase, weight, around) in self.swells {
+        for (w, phase, weight, around) in ir.swells {
             swell += (s * w + phase + a * around).sin() * weight;
         }
         let mut lumps = 0.0;
-        for b in &self.burls {
+        for b in &ir.burls {
             let ds = (s - b.arc) / b.sigma_s;
             let da = wrap_pi(a - b.angle) / b.sigma_a;
             lumps += b.amp * (-(ds * ds + da * da)).exp();
         }
-        for k in &self.knots {
+        for k in &ir.knots {
             let ds = (s - k.arc) / k.sigma_s;
             let da = wrap_pi(a - k.angle) / k.sigma_a;
             let d2 = ds * ds + da * da;
@@ -411,30 +482,17 @@ impl Irregular {
             lumps += k.amp * (0.77 * rim - 0.54 * core);
         }
         for c in &self.collars {
-            let reach = (c.radius * 2.6).max(0.04);
-            let ds = (s - c.arc) / reach;
-            // A trunk carries a hundred-odd collars and every sample of its surface
-            // used to pay for all of them. Past `COLLAR_CUTOFF` reaches both the collar
-            // and its ridge are below a billionth, which no f32 radius can tell from 0.
-            if ds.abs() > COLLAR_CUTOFF {
-                continue;
-            }
             // Only on the side the branch leaves from.
             let facing = e_r.dot(c.dir).max(0.0);
             let share = (c.radius / radius.max(1e-4)).min(1.0);
-            lumps += p.collar_depth * share * (-(ds * ds)).exp() * facing * facing * facing;
-
-            // The branch bark ridge, above the crotch only: a much narrower seam than
-            // the collar, peaking a little way up the parent and dying out above it.
+            lumps += p.collar_depth * share * c.swell * facing * facing * facing;
             if p.bark_ridge > 0.0 {
-                let up = ds - 0.55;
-                let along = (-(up * up) / 0.45).exp() * smoothstep(-0.2, 0.2, ds);
                 // Broad rather than knife-edged, because that is the shape a real
                 // ridge is. Narrowing it saves nothing: what the sweep charges for is
                 // the height of the bump, not how sharp it is, since the sides are
                 // sized by how far a chord falls from the surface.
                 let seam = facing.powi(4);
-                lumps += p.bark_ridge * share * along * seam;
+                lumps += p.bark_ridge * share * c.ridge * seam;
             }
         }
 
@@ -556,14 +614,15 @@ const RING_ERROR_ANGLES: usize = 8;
 
 /// Every ring's surface radius at the angles `ring_error` measures.
 fn ring_error_radii(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<[f32; RING_ERROR_ANGLES]> {
-    (0..path.len())
-        .map(|i| {
-            std::array::from_fn(|k| {
-                let ang = k as f32 / RING_ERROR_ANGLES as f32 * TAU;
-                path.radius_at(i, ang, mp, phase)
-            })
-        })
-        .collect()
+    let radii_at = |i: usize| -> [f32; RING_ERROR_ANGLES] {
+        let ring = path.ring(i, mp, phase);
+        std::array::from_fn(|k| ring.at(k as f32 / RING_ERROR_ANGLES as f32 * TAU))
+    };
+    if path.len() >= PARALLEL_RINGS {
+        crate::par::map_range(path.len(), radii_at)
+    } else {
+        (0..path.len()).map(radii_at).collect()
+    }
 }
 
 /// How far above `flare_height` the trunk keeps its fine rings, as a multiple of it.
@@ -949,33 +1008,28 @@ impl StemPath {
         self.points.len()
     }
 
-    /// Widening at the foot of a branch, where it meets its parent.
-    ///
-    /// Two swept tubes meeting can only ever intersect, so there is no fillet to be
-    /// had; what stands in for one is flaring the limb hard over the last stretch
-    /// before the surfaces cross, so both are already heading toward each other by the
-    /// time they meet. The flare is heavier underneath, where a limb lays down wood to
-    /// carry its own weight.
-    fn socket_at(&self, i: usize, e_r: Vec3, mp: &MeshParams) -> f32 {
-        let t = self.socket_t[i];
-        if t >= 1.0 {
-            return 1.0;
-        }
-        let k = (1.0 - t).powf(mp.socket_power.max(0.5));
-        let under = e_r.dot(self.under).max(0.0);
-        let lean = 1.0 + mp.socket_bias * under * under;
-        (1.0 + mp.socket_flare * k * lean).min(self.socket_max)
-    }
-
     /// Surface radius of ring `i` at angle `a`, including socket, root flare and the
     /// flutes, swellings, burls and branch collars that make it bark rather than pipe.
+    /// The mesher samples whole rings through `ring`; this is for looking at one point.
+    #[cfg(test)]
     fn radius_at(&self, i: usize, a: f32, mp: &MeshParams, phase: (f32, f32)) -> f32 {
-        let (n, b) = self.frames[i];
-        let e_r = n * a.cos() + b * a.sin();
-        let base = self.radii[i] * self.socket_at(i, e_r, mp);
-        let shaped = base * self.irregular.shape(self.arc[i], a, e_r, base);
+        self.ring(i, mp, phase).at(a)
+    }
 
-        shaped * self.buttress(a, self.points[i].y, mp, phase)
+    /// Ring `i`'s surface, ready to be sampled round: everything about it that does not
+    /// change with the angle is worked out here, once, rather than at every sample.
+    fn ring<'a>(&'a self, i: usize, mp: &'a MeshParams, phase: (f32, f32)) -> RingSurface<'a> {
+        let t = self.socket_t[i];
+        let socket_k = (t < 1.0).then(|| (1.0 - t).powf(mp.socket_power.max(0.5)));
+        RingSurface {
+            path: self,
+            mp,
+            phase,
+            i,
+            socket_k,
+            bark: self.irregular.at_length(self.arc[i]),
+            buttress: self.buttress_ring(self.points[i].y, mp),
+        }
     }
 
     /// Widening at the foot of the trunk, as a multiplier on the radius.
@@ -984,9 +1038,9 @@ impl StemPath {
     /// buttress roots with hollows between them, and it is the hollows that make it
     /// read as a root system rather than as a skirt. Everything here is a smooth
     /// function of the angle, so the analytic normals follow it for free.
-    fn buttress(&self, a: f32, y: f32, mp: &MeshParams, phase: (f32, f32)) -> f32 {
+    fn buttress_ring(&self, y: f32, mp: &MeshParams) -> Option<ButtressRing> {
         if !self.is_trunk || y >= mp.flare_height || mp.flare_height <= 1e-4 {
-            return 1.0;
+            return None;
         }
         // Not clamped below zero: under the ground the flare keeps growing, which is
         // what carries the roots outward as they go down.
@@ -999,17 +1053,78 @@ impl StemPath {
         // below the ground is hidden by it, so sharpening only down there would shape
         // the one part of the tree nobody can see.
         let sharpen = 1.0 + mp.root_split * (1.0 - t).max(0.0).powi(2);
+        Some(ButtressRing { k, n, sharpen })
+    }
+}
+
+/// The root flare at one height up the trunk; see `StemPath::buttress_ring`.
+struct ButtressRing {
+    k: f32,
+    n: f32,
+    sharpen: f32,
+}
+
+impl ButtressRing {
+    /// Multiplier on the radius at angle `a`.
+    fn at(&self, a: f32, mp: &MeshParams, phase: (f32, f32)) -> f32 {
+        let (k, n) = (self.k, self.n);
         // Warping the angle before the ridges are laid out spaces them unevenly,
         // which is what a real root collar does and a cog does not.
         let warped = a + 0.35 * (a + phase.1).sin();
         let ridge =
-            (0.5 + 0.5 * (n * warped + phase.0).cos()).powf(mp.root_sharpness.max(0.1) * sharpen);
+            (0.5 + 0.5 * (n * warped + phase.0).cos()).powf(mp.root_sharpness.max(0.1) * self.sharpen);
         // Roots are not evenly sized, so a slow wave rides over the ring of them, and
         // each one carries finer ridges of its own: a real buttress is grooved, not a
         // set of smooth cones.
         let uneven = 0.72 + 0.28 * (a * 2.0 + phase.1).sin();
         let grooves = 1.0 + mp.root_grooves * (a * n * 3.0 + phase.0 * 2.0).sin() * k;
         1.0 + mp.root_flare * k * ridge * uneven * grooves
+    }
+}
+
+/// One ring's surface; see `StemPath::ring`.
+struct RingSurface<'a> {
+    path: &'a StemPath,
+    mp: &'a MeshParams,
+    phase: (f32, f32),
+    i: usize,
+    /// How hard the socket flares at this ring, or `None` once past it.
+    socket_k: Option<f32>,
+    bark: IrregularRing<'a>,
+    buttress: Option<ButtressRing>,
+}
+
+impl RingSurface<'_> {
+    /// The surface radius at angle `a`.
+    fn at(&self, a: f32) -> f32 {
+        let path = self.path;
+        // Only the socket and the bark care which way round the stem they are. A plain
+        // stem past its socket is round, and most of a tree is plain stems.
+        let e_r = if self.socket_k.is_some() || path.irregular.active {
+            let (n, b) = path.frames[self.i];
+            n * a.cos() + b * a.sin()
+        } else {
+            Vec3::ZERO
+        };
+        // Widening at the foot of a branch, where it meets its parent.
+        //
+        // Two swept tubes meeting can only ever intersect, so there is no fillet to be
+        // had; what stands in for one is flaring the limb hard over the last stretch
+        // before the surfaces cross, so both are already heading toward each other by
+        // the time they meet. The flare is heavier underneath, where a limb lays down
+        // wood to carry its own weight.
+        let socket = match self.socket_k {
+            None => 1.0,
+            Some(k) => {
+                let mp = self.mp;
+                let under = e_r.dot(path.under).max(0.0);
+                let lean = 1.0 + mp.socket_bias * under * under;
+                (1.0 + mp.socket_flare * k * lean).min(path.socket_max)
+            }
+        };
+        let base = path.radii[self.i] * socket;
+        let shaped = base * self.bark.shape(a, e_r, base);
+        shaped * self.buttress.as_ref().map_or(1.0, |b| b.at(a, self.mp, self.phase))
     }
 }
 
@@ -1038,16 +1153,30 @@ pub fn build_mesh(sk: &Skeleton, params: &SpeciesParams) -> Mesh {
     let children = child_index(sk);
     let field = SwayField::new(sk);
 
-    for stem in sk.stem_runs() {
-        let Some(path) = StemPath::build(sk, &stem, mp, params.seed, &children) else {
-            continue;
-        };
-        if too_thin_for_bark(&path, mp) {
-            continue;
+    // Every stem is swept on its own, from the skeleton alone, so they are swept side
+    // by side and joined in skeleton order afterwards: the same mesh, vertex for
+    // vertex, as sweeping them one after another into one sink.
+    let stems = crate::par::map(&sk.stem_runs(), |stem| {
+        // Told from the skeleton before the path is built: most of a conifer is twigs
+        // too thin to sweep, and building and thinning each only to drop it cost more
+        // than sweeping the ones that stay.
+        if !gets_bark(sk, stem[0] as usize, mp) {
+            return None;
         }
-        sink.weathering = if path.is_dead { 1.0 } else { 0.0 };
-        sink.sway = field.stem(sk, stem[0] as usize);
+        let path = StemPath::build(sk, stem, mp, params.seed, &children)?;
+        if too_thin_for_bark(&path, mp) {
+            return None;
+        }
+        let mut sink = MeshSink {
+            weathering: if path.is_dead { 1.0 } else { 0.0 },
+            sway: field.stem(sk, stem[0] as usize),
+            ..MeshSink::default()
+        };
         emit_stem(&mut sink, &path, mp, phase);
+        Some(sink.mesh)
+    });
+    for stem in stems.into_iter().flatten() {
+        sink.mesh.append(stem);
     }
 
     sink.mesh
@@ -1106,11 +1235,13 @@ fn emit_spike(
 
     let base = sink.vertex_offset();
     sink.radius = path.radii[0];
+    let anchor = path.ring(0, mp, phase);
     for j in 0..=radial {
         let a = j as f32 / radial as f32 * TAU;
-        let e_r = n * a.cos() + b * a.sin();
-        let e_a = b * a.cos() - n * a.sin();
-        let r = path.radius_at(0, a, mp, phase);
+        let (cos, sin) = (a.cos(), a.sin());
+        let e_r = n * cos + b * sin;
+        let e_a = b * cos - n * sin;
+        let r = anchor.at(a);
         // The cone narrows to nothing over its length, so the normal leans back
         // along the axis by that slope instead of pointing straight out.
         let slope = if arc > 1e-6 { -r / arc } else { 0.0 };
@@ -1163,9 +1294,8 @@ fn radial_for(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> u32 {
 
     let mut needed = lo;
     for &i in &order {
-        let profile: Vec<f32> = (0..SAMPLES)
-            .map(|k| path.radius_at(i, k as f32 / SAMPLES as f32 * TAU, mp, phase))
-            .collect();
+        let ring = path.ring(i, mp, phase);
+        let profile: Vec<f32> = (0..SAMPLES).map(|k| ring.at(k as f32 / SAMPLES as f32 * TAU)).collect();
         needed = needed.max(sides_for_profile(&profile, tol, lo, hi));
         if needed >= hi {
             break;
@@ -1190,31 +1320,85 @@ fn sides_for_profile(profile: &[f32], tol: f32, lo: u32, hi: u32) -> u32 {
 /// from the centre at angle `a` has a closed form, so the error is read straight off
 /// the samples rather than by building the geometry.
 fn profile_error(profile: &[f32], n: u32) -> f32 {
-    let m = profile.len();
-    let at = |a: f32| -> f32 {
+    PROFILE_STENCILS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let stencil = cache
+            .entry((profile.len(), n))
+            .or_insert_with(|| ProfileStencil::new(profile.len(), n));
+        stencil.error(profile)
+    })
+}
+
+thread_local! {
+    /// Stencils by sample count and side count. Every ring of every stem tries the
+    /// same few side counts against a profile of the same length.
+    static PROFILE_STENCILS: std::cell::RefCell<std::collections::HashMap<(usize, u32), ProfileStencil>> =
+        std::cell::RefCell::default();
+}
+
+/// Where on a sampled profile a point at some angle reads, and how it blends the two
+/// samples either side.
+#[derive(Clone, Copy)]
+struct ProfileTap {
+    i: usize,
+    next: usize,
+    f: f32,
+}
+
+impl ProfileTap {
+    fn new(a: f32, m: usize) -> Self {
         let t = a / TAU * m as f32;
         let i = (t.floor() as usize) % m;
-        let f = t - t.floor();
-        profile[i] * (1.0 - f) + profile[(i + 1) % m] * f
-    };
-    let step = TAU / n as f32;
-    let mut worst = 0.0f32;
-    for j in 0..n {
-        let a0 = j as f32 * step;
-        let a1 = a0 + step;
-        let (r0, r1) = (at(a0), at(a1));
-        // Walk the arc this edge spans and compare the surface with the chord.
-        for k in 1..8 {
-            let a = a0 + step * k as f32 / 8.0;
-            let denom = r0 * (a - a0).sin() + r1 * (a1 - a).sin();
-            if denom.abs() < 1e-6 {
-                continue;
-            }
-            let chord = r0 * r1 * step.sin() / denom;
-            worst = worst.max((at(a) - chord).abs());
-        }
+        Self { i, next: (i + 1) % m, f: t - t.floor() }
     }
-    worst
+
+    fn read(self, profile: &[f32]) -> f32 {
+        profile[self.i] * (1.0 - self.f) + profile[self.next] * self.f
+    }
+}
+
+/// Everything `profile_error` works out from the side count alone: where each edge's
+/// ends and test points fall on the profile, and the sines of the angles between them.
+/// Worked out once per side count instead of once per ring, by the same expressions,
+/// so the error comes out the same to the last bit for a fraction of the trigonometry.
+struct ProfileStencil {
+    step_sin: f32,
+    edges: Vec<(ProfileTap, ProfileTap, [(ProfileTap, f32, f32); 7])>,
+}
+
+impl ProfileStencil {
+    fn new(m: usize, n: u32) -> Self {
+        let step = TAU / n as f32;
+        let edges = (0..n)
+            .map(|j| {
+                let a0 = j as f32 * step;
+                let a1 = a0 + step;
+                let inner = std::array::from_fn(|k| {
+                    let a = a0 + step * (k + 1) as f32 / 8.0;
+                    (ProfileTap::new(a, m), (a - a0).sin(), (a1 - a).sin())
+                });
+                (ProfileTap::new(a0, m), ProfileTap::new(a1, m), inner)
+            })
+            .collect();
+        Self { step_sin: step.sin(), edges }
+    }
+
+    fn error(&self, profile: &[f32]) -> f32 {
+        let mut worst = 0.0f32;
+        for (t0, t1, inner) in &self.edges {
+            let (r0, r1) = (t0.read(profile), t1.read(profile));
+            // Walk the arc this edge spans and compare the surface with the chord.
+            for &(tap, s_lo, s_hi) in inner {
+                let denom = r0 * s_lo + r1 * s_hi;
+                if denom.abs() < 1e-6 {
+                    continue;
+                }
+                let chord = r0 * r1 * self.step_sin / denom;
+                worst = worst.max((tap.read(profile) - chord).abs());
+            }
+        }
+        worst
+    }
 }
 
 /// What one stem costs the mesh.
@@ -1328,15 +1512,20 @@ fn ring_sides(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<u32> {
     let tol = mp.silhouette_tolerance.max(1e-5);
     let hi = mp.max_radial.max(mp.min_radial.max(3));
 
-    let mut sides: Vec<u32> = (0..path.len())
-        .map(|i| {
-            let lo = ring_floor(path, i, mp).min(hi);
-            let profile: Vec<f32> = (0..SAMPLES)
-                .map(|k| path.radius_at(i, k as f32 / SAMPLES as f32 * TAU, mp, phase))
-                .collect();
-            sides_for_profile(&profile, tol, lo, hi)
-        })
-        .collect();
+    let sides_at = |i: usize| {
+        let lo = ring_floor(path, i, mp).min(hi);
+        let ring = path.ring(i, mp, phase);
+        let profile: Vec<f32> = (0..SAMPLES).map(|k| ring.at(k as f32 / SAMPLES as f32 * TAU)).collect();
+        sides_for_profile(&profile, tol, lo, hi)
+    };
+    // A trunk is one stem of a few hundred rings and costs more than the rest of the
+    // tree's stems together, so its rings are measured side by side too. A twig's few
+    // are not worth handing out.
+    let mut sides: Vec<u32> = if path.len() >= PARALLEL_RINGS {
+        crate::par::map_range(path.len(), sides_at)
+    } else {
+        (0..path.len()).map(sides_at).collect()
+    };
 
     // One ring dipping below its neighbours would pinch the resolution of a stretch
     // that needs it, so a dip is lifted to whichever neighbour is lower.
@@ -1346,6 +1535,9 @@ fn ring_sides(path: &StemPath, mp: &MeshParams, phase: (f32, f32)) -> Vec<u32> {
     }
     sides
 }
+
+/// Rings a stem needs before they are worth measuring in parallel.
+const PARALLEL_RINGS: usize = 24;
 
 /// Fewest sides a dead stem this thick is swept with.
 ///
@@ -1437,20 +1629,17 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         let ds = path.arc[i_next] - path.arc[i_prev];
 
         let base = sink.vertex_offset();
+        let (here, ahead, behind) =
+            (path.ring(i, mp, phase), path.ring(i_next, mp, phase), path.ring(i_prev, mp, phase));
         for j in 0..=radial {
             let a = j as f32 / radial as f32 * TAU;
-            let e_r = n * a.cos() + b * a.sin();
-            let e_a = b * a.cos() - n * a.sin();
-            let r = path.radius_at(i, a, mp, phase);
+            let (cos, sin) = (a.cos(), a.sin());
+            let e_r = n * cos + b * sin;
+            let e_a = b * cos - n * sin;
+            let r = here.at(a);
 
-            let dr_da = (path.radius_at(i, a + NORMAL_DA, mp, phase)
-                - path.radius_at(i, a - NORMAL_DA, mp, phase))
-                / (2.0 * NORMAL_DA);
-            let dr_ds = if ds > 1e-6 {
-                (path.radius_at(i_next, a, mp, phase) - path.radius_at(i_prev, a, mp, phase)) / ds
-            } else {
-                0.0
-            };
+            let dr_da = (here.at(a + NORMAL_DA) - here.at(a - NORMAL_DA)) / (2.0 * NORMAL_DA);
+            let dr_ds = if ds > 1e-6 { (ahead.at(a) - behind.at(a)) / ds } else { 0.0 };
             let normal = norm_or_zero(e_r - e_a * (dr_da / r.max(1e-5)) - d * dr_ds);
             let normal = if normal == Vec3::ZERO { e_r } else { normal };
 
@@ -1475,10 +1664,11 @@ fn emit_stem(sink: &mut MeshSink, path: &StemPath, mp: &MeshParams, phase: (f32,
         sink.radius = path.radii[0];
         let rim_sides = sides[0];
         let rim = sink.vertex_offset();
+        let foot = path.ring(0, mp, phase);
         for j in 0..=rim_sides {
             let a = j as f32 / rim_sides as f32 * TAU;
             let e_r = n0 * a.cos() + b0 * a.sin();
-            let pos = path.points[0] + e_r * path.radius_at(0, a, mp, phase);
+            let pos = path.points[0] + e_r * foot.at(a);
             sink.push_vertex(pos, cap_n, ortho_of(cap_n), [0.0, 0.0], path.sway_arc[0]);
         }
         let center = sink.vertex_offset();

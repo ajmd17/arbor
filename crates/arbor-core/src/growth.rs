@@ -359,17 +359,24 @@ fn crowding_field(skeleton: &Skeleton) -> Vec<f32> {
         *wood.entry(key(node.position)).or_insert(0.0) += run;
     }
 
+    // Nodes come many to a cell, so each cell's neighbourhood is summed once, in the
+    // same order, and shared by every node in it.
+    let mut around: std::collections::HashMap<(i32, i32, i32), f32> =
+        std::collections::HashMap::with_capacity(wood.len());
     let mut local: Vec<f32> = Vec::with_capacity(skeleton.nodes.len());
     for node in &skeleton.nodes {
         let (cx, cy, cz) = key(node.position);
-        let mut total = 0.0;
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    total += wood.get(&(cx + dx, cy + dy, cz + dz)).copied().unwrap_or(0.0);
+        let total = *around.entry((cx, cy, cz)).or_insert_with(|| {
+            let mut total = 0.0;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        total += wood.get(&(cx + dx, cy + dy, cz + dz)).copied().unwrap_or(0.0);
+                    }
                 }
             }
-        }
+            total
+        });
         local.push(total);
     }
 

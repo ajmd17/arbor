@@ -93,16 +93,28 @@ impl Skeleton {
     /// first node so the result is deterministic.
     pub fn stem_runs(&self) -> Vec<Vec<u32>> {
         let mut runs: Vec<Vec<u32>> = Vec::new();
-        let mut slot: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        // Stem ids are node indices, so a slot per node holds them all; anything else
+        // is still placed, through the map.
+        let mut slot: Vec<usize> = vec![usize::MAX; self.nodes.len()];
+        let mut other: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         for (i, node) in self.nodes.iter().enumerate() {
             // Broken wood is gone, not merely dead, so nothing downstream ever sees it.
             if node.broken {
                 continue;
             }
-            let entry = *slot.entry(node.stem).or_insert_with(|| {
+            let mut start = || {
                 runs.push(Vec::new());
                 runs.len() - 1
-            });
+            };
+            let entry = match slot.get_mut(node.stem as usize) {
+                Some(s) => {
+                    if *s == usize::MAX {
+                        *s = start();
+                    }
+                    *s
+                }
+                None => *other.entry(node.stem).or_insert_with(start),
+            };
             runs[entry].push(i as u32);
         }
         runs.retain(|r| !r.is_empty());

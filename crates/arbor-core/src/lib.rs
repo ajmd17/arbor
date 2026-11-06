@@ -12,6 +12,7 @@ pub mod leaf_art;
 pub mod leaves;
 pub(crate) mod math;
 pub mod mesh;
+pub mod par;
 pub mod ranged;
 pub mod rocks;
 pub mod seed;

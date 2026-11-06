@@ -29,6 +29,9 @@ web-sys = { version = "0.3.73", features = ["Blob", "BlobPropertyBag", "Document
 js-sys = "0.3"
 ehttp = "0.5"
 log = "0.4"
+# Desktop builds spread the slow, independent parts of a bake over every core. The web
+# has one thread, so nothing that runs there depends on it.
+rayon = "1"
 
 arbor-core = { path = "crates/arbor-core" }
 arbor-render = { path = "crates/arbor-render" }

@@ -108,33 +108,47 @@ impl Bitmap {
     }
 
     fn sample(&self, x: f32, y: f32) -> Option<[f32; 4]> {
+        self.taps(x, y).map(|t| self.read(&t))
+    }
+
+    /// Where a bilinear sample at (`x`, `y`) reads from a map this size, or `None` off
+    /// it. Every map of a leaf is the same size, so compositing works this out once
+    /// per pixel and reads every map through it.
+    fn taps(&self, x: f32, y: f32) -> Option<Taps> {
         let fx = x - 0.5;
         let fy = y - 0.5;
         if fx < -1.0 || fy < -1.0 || fx > self.width as f32 || fy > self.height as f32 {
             return None;
         }
-        let x0 = fx.floor();
-        let y0 = fy.floor();
-        let tx = fx - x0;
-        let ty = fy - y0;
-        let at = |ix: f32, iy: f32| -> [f32; 4] {
-            let cx = (ix as i32).clamp(0, self.width as i32 - 1) as u32;
-            let cy = (iy as i32).clamp(0, self.height as i32 - 1) as u32;
-            self.at(cx, cy).map(|c| c as f32 / 255.0)
+        let x0 = floor(fx);
+        let y0 = floor(fy);
+        let at = |ix: f32, iy: f32| -> usize {
+            let cx = (ix as i32).clamp(0, self.width as i32 - 1) as usize;
+            let cy = (iy as i32).clamp(0, self.height as i32 - 1) as usize;
+            (cy * self.width as usize + cx) * 4
         };
-        let (a, b, c, d) = (
-            at(x0, y0),
-            at(x0 + 1.0, y0),
-            at(x0, y0 + 1.0),
-            at(x0 + 1.0, y0 + 1.0),
-        );
+        Some(Taps {
+            at: [at(x0, y0), at(x0 + 1.0, y0), at(x0, y0 + 1.0), at(x0 + 1.0, y0 + 1.0)],
+            tx: fx - x0,
+            ty: fy - y0,
+        })
+    }
+
+    /// The sample `taps` describes, read from this map.
+    fn read(&self, t: &Taps) -> [f32; 4] {
+        let px = &self.pixels;
         let mut out = [0.0f32; 4];
-        for k in 0..4 {
-            let top = a[k] + (b[k] - a[k]) * tx;
-            let bottom = c[k] + (d[k] - c[k]) * tx;
-            out[k] = top + (bottom - top) * ty;
+        for (k, o) in out.iter_mut().enumerate() {
+            let [a, b, c, d] = t.at.map(|i| px[i + k] as f32 / 255.0);
+            let top = a + (b - a) * t.tx;
+            let bottom = c + (d - c) * t.tx;
+            *o = top + (bottom - top) * t.ty;
         }
-        Some(out)
+        out
+    }
+
+    fn same_size(&self, other: &Bitmap) -> bool {
+        (self.width, self.height) == (other.width, other.height)
     }
 
     /// One cell of an atlas, resampled to `width` so that a pixel covers as much width
@@ -149,7 +163,7 @@ impl Bitmap {
                 let p = self
                     .sample_cell(c * cw, r * ch, cw, ch, sx, y as f32 + 0.5)
                     .unwrap_or([0.0; 4]);
-                out.put(x, y, p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                out.put(x, y, p.map(to_u8));
             }
         }
         out
@@ -168,8 +182,8 @@ impl Bitmap {
     ) -> Option<[f32; 4]> {
         let fx = (x - 0.5).clamp(0.0, cw.saturating_sub(1) as f32);
         let fy = (y - 0.5).clamp(0.0, ch.saturating_sub(1) as f32);
-        let x0 = fx.floor();
-        let y0 = fy.floor();
+        let x0 = floor(fx);
+        let y0 = floor(fy);
         let tx = fx - x0;
         let ty = fy - y0;
         let at = |ix: f32, iy: f32| -> [f32; 4] {
@@ -192,6 +206,13 @@ impl Bitmap {
         }
         Some(out)
     }
+}
+
+/// A bilinear sample's four texels, as byte offsets, and its blend across and down.
+struct Taps {
+    at: [usize; 4],
+    tx: f32,
+    ty: f32,
 }
 
 /// The maps of a leaf material.
@@ -297,18 +318,15 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
     let square_w = ((cell_h as f32 * p.source_aspect.max(0.05)).round() as u32).max(1);
     type Maps = (Bitmap, Option<Bitmap>, Option<Bitmap>, Option<Bitmap>);
     let grid = |k: u32| -> Vec<Maps> {
-        (0..rows)
-            .flat_map(|r| (0..cols).map(move |c| (c, r)))
-            .map(|(c, r)| {
-                let r = k * rows + r;
-                (
-                    src.albedo.cell(cols, src_rows, c, r, square_w),
-                    src.normal.map(|m| m.cell(cols, src_rows, c, r, square_w)),
-                    src.roughness.map(|m| m.cell(cols, src_rows, c, r, square_w)),
-                    src.translucency.map(|m| m.cell(cols, src_rows, c, r, square_w)),
-                )
-            })
-            .collect()
+        crate::par::map_range((cols * rows) as usize, |i| {
+            let (c, r) = (i as u32 % cols, k * rows + i as u32 / cols);
+            (
+                src.albedo.cell(cols, src_rows, c, r, square_w),
+                src.normal.map(|m| m.cell(cols, src_rows, c, r, square_w)),
+                src.roughness.map(|m| m.cell(cols, src_rows, c, r, square_w)),
+                src.translucency.map(|m| m.cell(cols, src_rows, c, r, square_w)),
+            )
+        })
     };
 
     // The leaf hinges on the middle of the base of whatever the alpha test keeps, so
@@ -345,29 +363,41 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
     let mut normal = src.normal.map(|_| sheet());
     let mut roughness = src.roughness.map(|_| sheet());
     let mut translucency = src.translucency.map(|_| sheet());
-    for v in 0..variants {
-        // Each variant is a shoot in its own right, so it gets its own stream rather
-        // than a continuation of the last one: a species stays reproducible even if
-        // the count of variants changes under it.
-        let params = if v < living { p } else { &withered };
-        let places = lay_out(params, size, &bounds, p.seed ^ (v as u64).wrapping_mul(VARIANT_STRIDE));
-        for i in 0..(cols * rows) as usize {
-            let ox = (i as u32 % cols) * size;
-            let oy = (v * rows + i as u32 / cols) * size;
-            let maps: Vec<SourceMaps> = alts
-                .iter()
-                .map(|(cells, _)| {
-                    let (a, n, r, t) = &cells[i];
-                    (a, n.as_ref(), r.as_ref(), t.as_ref())
-                })
-                .collect();
-            let mut baked = composite(&places, size, &bounds, &maps);
-            if v >= living {
-                recolour(&mut baked.albedo, p.withered_color, false);
-                if let Some(t) = baked.translucency.as_mut() {
-                    recolour(t, p.withered_color, true);
-                }
+    // Each variant is a shoot in its own right, so it gets its own stream rather than
+    // a continuation of the last one: a species stays reproducible even if the count
+    // of variants changes under it.
+    let layouts: Vec<Vec<Placement>> = (0..variants)
+        .map(|v| {
+            let params = if v < living { p } else { &withered };
+            lay_out(params, size, &bounds, p.seed ^ (v as u64).wrapping_mul(VARIANT_STRIDE))
+        })
+        .collect();
+    // Every cell of every variant composites on its own, so they all bake side by
+    // side and are laid into the sheet in order once they are done.
+    let per_variant = (cols * rows) as usize;
+    let cells = crate::par::map_range(variants as usize * per_variant, |job| {
+        let (v, i) = ((job / per_variant) as u32, job % per_variant);
+        let maps: Vec<SourceMaps> = alts
+            .iter()
+            .map(|(cells, _)| {
+                let (a, n, r, t) = &cells[i];
+                (a, n.as_ref(), r.as_ref(), t.as_ref())
+            })
+            .collect();
+        let mut baked = composite(&layouts[v as usize], size, &bounds, &maps);
+        if v >= living {
+            recolour(&mut baked.albedo, p.withered_color, false);
+            if let Some(t) = baked.translucency.as_mut() {
+                recolour(t, p.withered_color, true);
             }
+        }
+        baked
+    });
+    for (job, baked) in cells.into_iter().enumerate() {
+        let (v, i) = ((job / per_variant) as u32, (job % per_variant) as u32);
+        {
+            let ox = (i % cols) * size;
+            let oy = (v * rows + i / cols) * size;
             blit(&mut albedo, &baked.albedo, ox, oy);
             if let (Some(dst), Some(s)) = (normal.as_mut(), baked.normal.as_ref()) {
                 blit(dst, s, ox, oy);
@@ -390,10 +420,10 @@ pub fn bake_cluster(p: &LeafClusterParams, cols: u32, rows: u32, src: LeafMaps) 
 }
 
 fn blit(dst: &mut Bitmap, src: &Bitmap, ox: u32, oy: u32) {
-    for y in 0..src.height {
-        for x in 0..src.width {
-            dst.put(ox + x, oy + y, src.at(x, y));
-        }
+    let row = src.width as usize * 4;
+    for y in 0..src.height as usize {
+        let at = ((oy as usize + y) * dst.width as usize + ox as usize) * 4;
+        dst.pixels[at..at + row].copy_from_slice(&src.pixels[y * row..(y + 1) * row]);
     }
 }
 
@@ -669,7 +699,48 @@ fn composite(
     boxes: &[(u32, u32, u32, u32)],
     sources: &[SourceMaps],
 ) -> BakedMaps {
-    let n = (size as usize) * (size as usize);
+    // A pixel only ever reads the leaves over it, in the order they are drawn, so the
+    // cell is composited in bands of rows side by side and the bands stacked after.
+    const BAND: u32 = 32;
+    let bands = crate::par::map_range(size.div_ceil(BAND) as usize, |b| {
+        let y0 = b as u32 * BAND;
+        composite_rows(places, size, boxes, sources, y0, (y0 + BAND).min(size))
+    });
+    let stack = |pick: fn(&BakedMaps) -> Option<&Bitmap>| -> Option<Bitmap> {
+        let mut pixels = Vec::with_capacity(size as usize * size as usize * 4);
+        for band in &bands {
+            pixels.extend_from_slice(&pick(band)?.pixels);
+        }
+        Bitmap::from_rgba(size, size, pixels)
+    };
+    let mut out_a = stack(|b| Some(&b.albedo)).expect("every band has an albedo");
+    let out_n = stack(|b| b.normal.as_ref());
+    let out_r = stack(|b| b.roughness.as_ref());
+    let mut out_t = stack(|b| b.translucency.as_ref());
+
+    bleed_color_outward(&mut out_a);
+    if let Some(img) = out_t.as_mut() {
+        bleed_color_outward(img);
+    }
+    BakedMaps {
+        albedo: out_a,
+        normal: out_n,
+        roughness: out_r,
+        translucency: out_t,
+    }
+}
+
+/// Rows `y0..y1` of a composited cell, before the colour is bled outward.
+fn composite_rows(
+    places: &[Placement],
+    size: u32,
+    boxes: &[(u32, u32, u32, u32)],
+    sources: &[SourceMaps],
+    y0: u32,
+    y1: u32,
+) -> BakedMaps {
+    let rows = y1 - y0;
+    let n = (size as usize) * (rows as usize);
     let mut acc_rgb = vec![[0.0f32; 3]; n];
     let mut acc_a = vec![0.0f32; n];
     let mut acc_n = vec![[0.0f32; 3]; n];
@@ -684,7 +755,7 @@ fn composite(
         let (lo_x, lo_y) = (src_box.0 as f32 - 1.0, src_box.1 as f32 - 1.0);
         let (hi_x, hi_y) = (src_box.2 as f32 + 1.0, src_box.3 as f32 + 1.0);
         let (lx, ly, hx, hy) = p.bounds;
-        for y in ly..=hy {
+        for y in ly.max(y0 as i32)..=hy.min(y1 as i32 - 1) {
             for x in lx..=hx {
                 let dx = x as f32 + 0.5 - p.attach.0;
                 let dy = y as f32 + 0.5 - p.attach.1;
@@ -700,21 +771,27 @@ fn composite(
                     continue;
                 }
 
-                let Some(src) = albedo.sample(sx, sy) else {
+                let Some(taps) = albedo.taps(sx, sy) else {
                     continue;
                 };
+                // Read through the albedo's taps where a map is its size, which every
+                // map of a leaf is; one that is not is sampled on its own.
+                let sample = |map: &Bitmap| {
+                    if map.same_size(albedo) { Some(map.read(&taps)) } else { map.sample(sx, sy) }
+                };
+                let src = albedo.read(&taps);
                 let a = src[3];
                 if a <= 0.0 {
                     continue;
                 }
-                let i = y as usize * size as usize + x as usize;
+                let i = (y as usize - y0 as usize) * size as usize + x as usize;
                 let keep = 1.0 - a;
 
                 for k in 0..3 {
                     acc_rgb[i][k] = src[k] * p.value * p.shift[k] * a + acc_rgb[i][k] * keep;
                 }
                 if let Some(map) = normal {
-                    let t = map.sample(sx, sy).unwrap_or([0.5, 0.5, 1.0, 1.0]);
+                    let t = sample(map).unwrap_or([0.5, 0.5, 1.0, 1.0]);
                     let relief = rotate_normal(
                         [t[0] * 2.0 - 1.0, t[1] * 2.0 - 1.0, t[2] * 2.0 - 1.0],
                         p.cos,
@@ -732,13 +809,13 @@ fn composite(
                     }
                 }
                 if let Some(map) = rough {
-                    let t = map.sample(sx, sy).unwrap_or([0.5; 4]);
+                    let t = sample(map).unwrap_or([0.5; 4]);
                     acc_r[i] = t[0] * a + acc_r[i] * keep;
                 }
                 if let Some(map) = through {
                     // A leaf behind the shoot is lit through the ones in front of it,
                     // so what it passes on is dimmed as its face is.
-                    let t = map.sample(sx, sy).unwrap_or(src);
+                    let t = sample(map).unwrap_or(src);
                     for k in 0..3 {
                         acc_t[i][k] = t[k] * p.value * p.shift[k] * a + acc_t[i][k] * keep;
                     }
@@ -748,18 +825,19 @@ fn composite(
         }
     }
 
-    let mut out_a = Bitmap::new(size, size);
-    let mut out_n = normal.map(|_| Bitmap::new(size, size));
-    let mut out_r = rough.map(|_| Bitmap::new(size, size));
-    let mut out_t = through.map(|_| Bitmap::new(size, size));
+    let mut out_a = Bitmap::new(size, rows);
+    let mut out_n = normal.map(|_| Bitmap::new(size, rows));
+    let mut out_r = rough.map(|_| Bitmap::new(size, rows));
+    let mut out_t = through.map(|_| Bitmap::new(size, rows));
+    // The band's sheets are `size` wide, so texel `i` of the accumulators is pixel `i`
+    // of each of them.
+    let put = |img: &mut Bitmap, i: usize, p: [u8; 4]| img.pixels[i * 4..i * 4 + 4].copy_from_slice(&p);
     for i in 0..n {
-        let x = (i % size as usize) as u32;
-        let y = (i / size as usize) as u32;
         let a = acc_a[i].clamp(0.0, 1.0);
         let inv = if a > 1e-4 { 1.0 / a } else { 0.0 };
-        out_a.put(
-            x,
-            y,
+        put(
+            &mut out_a,
+            i,
             [
                 to_u8(acc_rgb[i][0] * inv),
                 to_u8(acc_rgb[i][1] * inv),
@@ -777,9 +855,9 @@ fn composite(
             } else {
                 [0.0, 0.0, 1.0]
             };
-            img.put(
-                x,
-                y,
+            put(
+                img,
+                i,
                 [
                     to_u8(v[0] * 0.5 + 0.5),
                     to_u8(v[1] * 0.5 + 0.5),
@@ -791,18 +869,14 @@ fn composite(
         if let Some(img) = out_r.as_mut() {
             let r = if a > 1e-4 { acc_r[i] * inv } else { 0.6 };
             let b = to_u8(r);
-            img.put(x, y, [b, b, b, 255]);
+            put(img, i, [b, b, b, 255]);
         }
         if let Some(img) = out_t.as_mut() {
             let t = acc_t[i];
-            img.put(x, y, [to_u8(t[0] * inv), to_u8(t[1] * inv), to_u8(t[2] * inv), to_u8(a)]);
+            put(img, i, [to_u8(t[0] * inv), to_u8(t[1] * inv), to_u8(t[2] * inv), to_u8(a)]);
         }
     }
 
-    bleed_color_outward(&mut out_a);
-    if let Some(img) = out_t.as_mut() {
-        bleed_color_outward(img);
-    }
     BakedMaps {
         albedo: out_a,
         normal: out_n,
@@ -891,8 +965,18 @@ pub fn bleed_color_outward(img: &mut Bitmap) {
     }
 }
 
+/// `x.floor()` for the coordinates a resample works in, without the library call
+/// `f32::floor` is where it is not one instruction. Exact for every float a pixel
+/// coordinate can be; NaN, which gives NaN either way, only ever reaches a texel
+/// that is then blended by NaN.
+#[inline]
+fn floor(x: f32) -> f32 {
+    let whole = x as i32 as f32;
+    if whole > x { whole - 1.0 } else { whole }
+}
+
 fn to_u8(v: f32) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    crate::textures::round_byte(v.clamp(0.0, 1.0) * 255.0)
 }
 
 #[cfg(test)]
