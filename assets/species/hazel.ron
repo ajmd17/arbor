@@ -168,7 +168,7 @@
         even_roll: 1.0,
         normal_blend: 0.6,
         curvature: 0.35,
-        tint: (1.0, 1.0, 1.0),
+        tint: (1.0, 1.0, 1.43),
         hue_variance: 0.1,
         interior_shade: 0.4,
         cluster: Some((

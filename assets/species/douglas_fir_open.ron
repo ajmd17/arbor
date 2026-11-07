@@ -448,7 +448,7 @@
         curvature: 0.3,
         // Greyer and a shade lighter than the spruce. Douglas fir foliage is a soft
         // grey-green where a spruce is a hard blue-green.
-        tint: (0.7, 0.82, 0.66),
+        tint: (0.7, 0.82, 1.78),
         hue_variance: 0.09,
         interior_shade: 0.42,
         // No cluster. The other conifers here are given one branchlet and a recipe for
@@ -509,6 +509,7 @@
         tip_length: 0.06,
         socket_flare: 0.35,
         bark_texture: "bark_pine",
+        bark_tint: (2.4, 2.4, 2.4),
         bark_darken_low: 0.35,
         irregularity: (
             flute_depth: 0.17,

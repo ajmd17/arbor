@@ -427,6 +427,7 @@
         tip_length: 0.06,
         socket_flare: 0.35,
         bark_texture: "bark_pine",
+        bark_tint: (2.4, 2.4, 2.4),
         bark_darken_low: 0.35,
         irregularity: (
             flute_depth: 0.17,

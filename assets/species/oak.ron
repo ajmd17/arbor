@@ -243,7 +243,7 @@
         even_roll: 1.0,
         normal_blend: 0.5,
         curvature: 0.3,
-        tint: (0.6, 0.8, 0.5),
+        tint: (0.6, 0.8, 3.96),
         hue_variance: 0.14,
         interior_shade: 0.4,
         cluster: Some((
@@ -315,6 +315,7 @@
         socket_bias: 0.9,
         socket_power: 3.2,
         bark_texture: "bark_oak",
+        bark_tint: (1.35, 1.4, 1.45),
         moss_color: (0.19, 0.27, 0.12),
         moss_height: 1.6,
         moss_amount: 0.25,
